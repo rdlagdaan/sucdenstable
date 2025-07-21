@@ -1,3 +1,4 @@
+import { getCsrfToken } from '../utils/csrf';
 import { useState } from 'react';
 import napi from '../utils/axiosnapi';
 import Cookies from 'js-cookie';
@@ -29,9 +30,7 @@ const Role = () => {
 
     try {
       // Step 1: Get CSRF cookie
-      await napi.get('http://localhost:8686/sanctum/csrf-cookie', {
-          withCredentials: true
-        });
+      await getCsrfToken(); // centralized
 
       // Step 2: Submit
       const response = await napi.post<RoleResponse>('/api/roles', formData, {

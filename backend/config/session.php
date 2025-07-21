@@ -143,7 +143,8 @@ return [
     |
     */
 
-    'path' => env('SESSION_PATH', '/'),
+    //'path' => env('SESSION_PATH', '/'),
+    'path' => '/',
 
     /*
     |--------------------------------------------------------------------------
@@ -172,7 +173,7 @@ return [
     //'secure' => env('SESSION_SECURE_COOKIE'),
 
 
-    'secure' => env('SESSION_SECURE_COOKIE', true),
+    'secure' => env('SESSION_SECURE_COOKIE', false),
     'same_site' => 'lax',
     /*
     |--------------------------------------------------------------------------

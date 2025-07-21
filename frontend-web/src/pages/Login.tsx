@@ -15,7 +15,7 @@ const Login = () => {
   useEffect(() => {
     const fetchCompanies = async () => {
       try {
-        const response = await api.get<Company[]>('/companies');
+        const response = await api.get<Company[]>('/api/companies');
         console.log(response.data);
         setCompanies(response.data); // ✅ Now properly typed
       } catch (error) {
@@ -30,7 +30,7 @@ const Login = () => {
     <div
       className="w-screen h-screen bg-cover bg-center bg-no-repeat flex items-center justify-center"
       style={{
-        backgroundImage: "url('/accountingSystemBG.jpg')",
+        backgroundImage: "url('/sugarcaneBG.jpg')",
       }}
     >
       <div className="bg-white/80 backdrop-blur-md shadow-lg rounded-lg p-8 w-full max-w-sm mx-4">

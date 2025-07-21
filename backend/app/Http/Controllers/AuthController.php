@@ -2,12 +2,18 @@
 
 namespace App\Http\Controllers;
 
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use App\Models\UsersEmployee;
 use Carbon\Carbon;
+
+use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
+
+
 
 class AuthController extends Controller
 {
@@ -37,34 +43,51 @@ class AuthController extends Controller
                 'errors' => $validator->errors()
             ], 422);
         }
+        
+        try {
+            $user = new UsersEmployee();
+            $user->username = $request->username;
+            $user->email_address = $request->email;
+            $user->password = Hash::make($request->password);
+            $user->salt = Str::random(16);
+            $user->activation_code = Str::uuid();
+            $user->forgotten_password_code = null;
+            $user->forgotten_password_time = null;
+            $user->remember_code = null;
+            $user->date_created = Carbon::now();
+            $user->created_by = $request->username;
+            $user->last_login = null;
+            $user->role_id = $request->role_id;
+            $user->status = 'active';
+            $user->active = true;
+            $user->first_name = $request->first_name;
+            $user->last_name = $request->last_name;
+            $user->middle_name = $request->middle_name;
+            $user->designation = $request->designation;
 
-        $user = new UsersEmployee();
-        $user->username = $request->username;
-        $user->email_address = $request->email;
-        $user->password = Hash::make($request->password);
-        $user->salt = Str::random(16);
-        $user->activation_code = Str::uuid();
-        $user->forgotten_password_code = null;
-        $user->forgotten_password_time = null;
-        $user->remember_code = null;
-        $user->date_created = Carbon::now();
-        $user->created_by = $request->username;
-        $user->last_login = null;
-        $user->role_id = $request->role_id;
-        $user->status = 'active';
-        $user->active = true;
-        $user->first_name = $request->first_name;
-        $user->last_name = $request->last_name;
-        $user->middle_name = $request->middle_name;
-        $user->designation = $request->designation;
+            $user->time_stamp = Carbon::now();
 
-        $user->time_stamp = Carbon::now();
+            $user->save();
 
-        $user->save();
-
-        return response()->json([
-            'status' => 'success',
-            'message' => 'Registration successful.'
-        ], 201);
+            return response()->json([
+                'status' => 'success',
+                'message' => 'User created successfully',
+                'data' => $user
+            ], 201);
+        } catch (UniqueConstraintViolationException $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'The user already exists!'
+            ], 409);
+        } catch (QueryException $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Database error.',
+                'error' => $e->getMessage()
+            ], 500);
+        }    
+    
+    
+    
     }
 }

@@ -1,7 +1,8 @@
+import { getCsrfToken } from '../utils/csrf';
 import { useState, useEffect } from 'react';
 //import api from '../utils/axios';
 import napi from '../utils/axiosnapi';
-//import Cookies from 'js-cookie';
+import Cookies from 'js-cookie';
 
 interface Company {
   id: number;
@@ -12,6 +13,19 @@ interface Role {
   id: number;
   role: string;
 }
+
+
+interface RegisterResponse {
+  status: string;
+  message: string;
+  data: {
+    id: number;
+    role: string;
+    created_at: string;
+    updated_at: string;
+  };
+}
+
 
 const Registration = () => {
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -82,64 +96,39 @@ const Registration = () => {
   };
 
 
-/*
-    const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault(); // Prevent page reload
-    const errors = validate();
-    setFormErrors(errors);
 
-    if (Object.keys(errors).length > 0) return;
-
-    try {
-        await napi.get('/sanctum/csrf-cookie'); // initializes session & CSRF  
-        //const response = await napi.post('/api/register', formData);
-        const response = await napi.post('/api/register', formData, {
-          headers: {
-            'X-XSRF-TOKEN': Cookies.get('XSRF-TOKEN') ?? '',
-          },
-        });
-        
-        alert('Registration successful!');
-        console.log(response);
-    } catch (err: any) {
-        if (err.response?.data?.errors) {
-            setFormErrors(err.response.data.errors); // You need to define `formErrors` state
-            if (Object.keys(errors).length === 0) {
-            console.log('Submitting data:', formData);
-            // You can call your API here
-            }            
-        } else {
-            alert('Something went wrong. Please try again.');
-        }
-    }
-    };*/
 
 const handleSubmit = async (e: React.FormEvent) => {
   e.preventDefault();
     const errors = validate();
     setFormErrors(errors);
   try {
-    // Step 1: CSRF cookie
-    await napi.get('/sanctum/csrf-cookie');
+      await getCsrfToken(); // centralized
 
-    // Step 2: Register
-    const response = await napi.post('/api/register', formData);
-    alert('Registration successful!');
-    console.log(response);
-  } catch (err: any) {
-    if (err.response?.data?.errors) {
-      setFormErrors(err.response.data.errors);
-    } else {
-      alert('Something went wrong. Please try again.');
+      // Step 2: Submit
+      const response = await napi.post<RegisterResponse>('/api/register', formData, {
+        headers: {
+          'X-XSRF-TOKEN': Cookies.get('XSRF-TOKEN') || '',
+        },
+        withCredentials: true,
+      });
+      alert(response.data.message);
+  } catch (error: any) {
+      if (error.response && error.response.status === 409) {
+        alert(error.response.data.message);
+      } else if (error.response && error.response.data?.message) {
+        alert('Error: ' + error.response.data.message);
+      } else {
+        alert('An unexpected error occurred.');
+      }
     }
-  }
 };
 
 
   return (
     <div
       className="bg-fixed w-screen h-screen bg-cover bg-center flex items-center justify-center"
-      style={{ backgroundImage: "url('/accountingSystemBG.jpg')" }}
+      style={{ backgroundImage: "url('/sugarcaneBG.jpg')" }}
     >
       <div className="absolute top-[2%] bg-blue backdrop-blur-md shadow-lg rounded-lg p-8 w-full max-w-xl mx-2">
         <div className="flex justify-center items-center gap-4 mb-6">

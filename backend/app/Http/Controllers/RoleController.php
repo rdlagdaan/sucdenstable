@@ -25,19 +25,7 @@ class RoleController extends Controller
 
     public function store(Request $request)
     {
-        // Just store without validation for now
-        /*$role = new Role();
-        $role->role = $request->input('role');
-        $role->save();
-
-        return response()->json([
-            'status' => 'success',
-            'message' => 'Role created successfully',
-            'data' => $role
-        ], 201);*/
-        
-
-
+   
         try {
             $role = new Role();
             $role->role = $request->input('role');
