@@ -14,13 +14,33 @@ use Illuminate\Database\UniqueConstraintViolationException;
 
 class RoleController extends Controller
 {
-    public function index(): JsonResponse
+    public function list(): JsonResponse
     {
         return response()->json(
             Role::select('id', 'role')->get()
         );
     }
 
+
+    public function index(Request $request)
+    {
+
+        $perPage = $request->input('per_page', 5);
+        $search = $request->input('search', '');
+
+        $query = Role::query();
+
+        if (!empty($search)) {
+            $query->where('role', 'ILIKE', "%{$search}%");
+        }
+
+        $roles = $query->orderBy('created_at', 'desc')->paginate($perPage);
+
+        return response()->json($roles);
+
+
+
+    }
 
 
     public function store(Request $request)
@@ -51,6 +71,41 @@ class RoleController extends Controller
 
 
     }
+
+
+
+    // ✅ PUT: /api/roles/{id}
+    public function update(Request $request, $id): JsonResponse
+    {
+        $role = Role::findOrFail($id);
+
+        $request->validate([
+            'role' => 'required|string|max:255|unique:roles,role,' . $id,
+        ]);
+
+        $role->update([
+            'role' => $request->role,
+        ]);
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Role updated successfully.',
+            'data' => $role,
+        ]);
+    }
+
+    // ✅ DELETE: /api/roles/{id}
+    public function destroy($id): JsonResponse
+    {
+        $role = Role::findOrFail($id);
+        $role->delete();
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Role deleted successfully.',
+        ]);
+    }
+
 
 
 

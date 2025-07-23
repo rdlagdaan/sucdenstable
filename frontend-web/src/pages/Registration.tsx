@@ -52,7 +52,7 @@ const Registration = () => {
         const companiesResponse = await napi.get<Company[]>('/api/companies');
         setCompanies(companiesResponse.data);
 
-        const rolesResponse = await napi.get<Role[]>('/api/roles');
+        const rolesResponse = await napi.get<Role[]>('/api/roles/list');
         setRoles(rolesResponse.data);
       } catch (error) {
         console.error('Failed to fetch companies or roles:', error);
