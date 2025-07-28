@@ -3,6 +3,25 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  html, body, #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: visible !important;
+  }
+
+  body {
+    display: block !important; /* 👈 override bad flex+center styles */
+    place-items: unset !important;
+    justify-content: unset !important;
+    align-items: unset !important;
+    position: relative;
+  }
+}
+
+
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;

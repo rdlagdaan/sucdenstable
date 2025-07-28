@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { useEffect, useState } from 'react';
 import napi from '../utils/axiosnapi';
 import {
@@ -6,15 +7,38 @@ import {
   ChevronRightIcon,
   ClipboardDocumentIcon, 
 } from '@heroicons/react/24/outline';
+
+import { lazy, Suspense } from 'react';
+
 import { useNavigate } from 'react-router-dom'; // 👈 Required for redirection
-import Role from './components/settings/Role'; // adjust the path as needed
+//import Role from './components/settings/Role'; // adjust the path as needed
+//import Pbn_entry_form from './components/quedan_tracking/Pbn_entry_form'; // adjust the path as needed
+// Lazy-load your components
+const Role = lazy(() => import('./components/settings/Role'));
+const Pbn_entry_form = lazy(() => import('./components/quedan_tracking/Pbn_entry_form'));
+
 import type { JSX } from 'react';
 
+
+
+
 // 🔽 Place it here — after imports, before function
-const componentMap: Record<string, JSX.Element> = {
-  roles: <Role />,
+//const componentMap: Record<string, JSX.Element> = {
+  //roles: <Role />,
+  //pbn_enrty_forms: <Pbn_entry_form />,
+  // You can add more components later
+//};
+
+// Don't use JSX elements here, use component references
+const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>> = {
+  roles: Role,
+  pbn_entry_forms: Pbn_entry_form,
   // You can add more components later
 };
+
+
+
+
 
 interface SubModule {
   sub_module_id: number;
@@ -161,11 +185,11 @@ const getFilteredModules = (modules: Module[]) => {
   };
 
   return (
-    <div className="flex h-screen">
+    <div className="flex w-full h-screen overflow-visible">
       {/* Sidebar */}
-      <div className={`transition-all duration-300 ${sidebarOpen ? 'w-72' : 'w-0'} overflow-hidden border-r shadow-md h-screen flex flex-col`}>
+      <div className={`transition-all duration-300 ${sidebarOpen ? 'w-72' : 'w-0'} overflow-visible border-r shadow-md h-screen flex flex-col`}>
       
-      {/*<div className={`transition-all bg-[#007BFF] duration-300 ${sidebarOpen ? 'w-72' : 'w-0'} overflow-hidden bg-white border-r shadow-md`}>*/}
+      {/*<div className={`transition-all bg-[#007BFF] duration-300 ${sidebarOpen ? 'w-72' : 'w-0'} overflow-visible bg-white border-r shadow-md`}>*/}
         {/* Title Bar */}
         <div className="p-4 border-b font-bold text-lg flex justify-between items-center  bg-[#007BFF] text-white">
           <span><img src={`/${companyLogo}.jpg`} alt={`${companyLogo}`} className="h-10" />{companyName || 'Systems'}</span>
@@ -303,7 +327,7 @@ const getFilteredModules = (modules: Module[]) => {
         <Bars3Icon className="h-5 w-5" />
       </button>
     )}
-{selectedContent && componentMap[selectedContent] ? (
+{/*{selectedContent && componentMap[selectedContent] ? (
   <div className="bg-white p-6 rounded shadow text-gray-800">
     {componentMap[selectedContent]}
   </div>
@@ -311,7 +335,20 @@ const getFilteredModules = (modules: Module[]) => {
   <div className="bg-white p-6 rounded shadow text-gray-800">
     {typeof selectedContent === 'string' ? selectedContent : 'Select a sub-module to view.'}
   </div>
-)}
+)}*/}
+
+<Suspense fallback={<div className="p-4 text-gray-500">Loading module...</div>}>
+  {selectedContent && componentMap[selectedContent] ? (
+    <div className="w-full h-full">
+      {React.createElement(componentMap[selectedContent])}
+    </div>
+  ) : (
+    <div className="w-full h-full">
+      {typeof selectedContent === 'string' ? selectedContent : 'Select a sub-module to view.'}
+    </div>
+  )}
+</Suspense>
+
   </div>
 </div>
 

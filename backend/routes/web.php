@@ -9,6 +9,10 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\RegisterController;
 use App\Http\Controllers\ModuleAccessController;
 use App\Http\Controllers\ApplicationSettingsController;
+use App\Http\Controllers\PbnEntryController;
+use App\Http\Controllers\SugarTypeController;
+use App\Http\Controllers\CropYearController;
+use App\Http\Controllers\VendorListController;
 
 
 
@@ -34,6 +38,8 @@ Route::get('/api/roles/list', [RoleController::class, 'list'])->withoutMiddlewar
     \App\Http\Middleware\VerifyCsrfToken::class,
 ]);
 
+
+
 // ✅ Protected routes for POST (with CSRF + Sanctum stateful)
 Route::middleware(['web'])->group(function () {
     Route::post('/api/register', [AuthController::class, 'register']);
@@ -42,6 +48,27 @@ Route::middleware(['web'])->group(function () {
     Route::post('/api/roles', [RoleController::class, 'store']);
     Route::put('/api/roles/{id}', [RoleController::class, 'update']);
     Route::delete('/api/roles/{id}', [RoleController::class, 'destroy']);    
+
+
+    // 🟢 Purchase Book Note Entry CRUD
+    Route::get('/api/pbn-entries', [PbnEntryController::class, 'index']);
+    Route::post('/api/pbn-entry', [PbnEntryController::class, 'store']);
+
+    // 🟢 Sugar Types Dropdown
+    Route::get('/api/sugar-types', [SugarTypeController::class, 'index']);
+
+    // 🟢 Crop Years Dropdown
+    Route::get('/api/crop-years', [CropYearController::class, 'index']);
+
+    // 🟢 Vendor List Dropdown
+    Route::get('/api/vendors', [VendorListController::class, 'index']);
+
+    // 🟢 Auto-generated PBN Number from settings
+    Route::get('/api/settings/PBNNO', [ApplicationSettingsController::class, 'getPbnNumber']);
+
+
+
+
 
 
     Route::post('/api/login', [AuthController::class, 'login']);

@@ -10,8 +10,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@handsontable/react": "^16.0.1",
+    "@headlessui/react": "^2.2.6",
     "@heroicons/react": "^2.2.0",
     "axios": "^1.10.0",
+    "handsontable": "^16.0.1",
     "js-cookie": "^3.0.5",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
