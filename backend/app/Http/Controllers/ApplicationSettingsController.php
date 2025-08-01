@@ -26,67 +26,41 @@ class  ApplicationSettingsController extends Controller
         return response()->json(['value' => $value]);
     }
 
-    public function getPbnNumber(Request $request)
-    {
-        $companyId = $request->query('company_id'); // e.g., 1 for SUCDEN, 2 for AMEROP
-        $year = date('Y');
-        $apsetCode = 'PBNNO';
+public function getNextPbnNumber(Request $request)
+{
+    $request->validate([
+        'company_id' => 'required|integer',
+        'sugar_type' => 'required|string',
+    ]);
 
-        if (!$companyId) {
-            return response()->json(['error' => 'Missing company_id'], 400);
-        }
+    $companyId = $request->input('company_id');
+    $sugarType = $request->input('sugar_type');
 
-        DB::beginTransaction();
+    $setting = DB::table('application_settings')
+        ->where('apset_code', 'PBNNO')
+        ->where('company_id', $companyId)
+        ->where('type', $sugarType)
+        ->lockForUpdate()
+        ->first();
 
-        try {
-            // Lock the record for update
-            $setting = DB::table('application_settings')
-                ->where('apset_code', $apsetCode)
-                ->where('company_id', $companyId)
-                ->lockForUpdate()
-                ->first();
-
-            if (!$setting) {
-                // Insert a new row if it doesn't exist
-                DB::table('application_settings')->insert([
-                    'apset_code' => $apsetCode,
-                    'value' => '1',
-                    'description' => "Auto-numbering for PBN {$year} (company_id={$companyId})",
-                    'company_id' => $companyId,
-                    'updated_at' => now(),
-                ]);
-                $currentValue = 1;
-            } else {
-                $currentValue = (int) $setting->value;
-                DB::table('application_settings')
-                    ->where('apset_code', $apsetCode)
-                    ->where('company_id', $companyId)
-                    ->update([
-                        'value' => (string) ($currentValue + 1),
-                        'updated_at' => now(),
-                    ]);
-            }
-
-            DB::commit();
-
-            // Optional: resolve company code label (for output)
-            $companyCode = match ((int)$companyId) {
-                1 => 'SUC',
-                2 => 'AMR',
-                default => 'GEN',
-            };
-
-            $padded = str_pad($currentValue, 6, '0', STR_PAD_LEFT);
-            $formatted = "PBN-{$year}-{$companyCode}-{$padded}";
-
-            return response()->json(['value' => $formatted]);
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            return response()->json(['error' => 'Failed to generate PBN number'], 500);
-        }
+    if (!$setting) {
+        return response()->json(['error' => 'Application setting not found.'], 404);
     }
 
+    $prefix = $sugarType;
+    $currentValue = intval($setting->value);
+    $nextValue = $currentValue + 1;
+
+    $formattedNumber = str_pad($nextValue, 6, '0', STR_PAD_LEFT);
+    $pbnNumber = $prefix . $formattedNumber;
+
+    // Update the setting value
+    DB::table('application_settings')
+        ->where('id', $setting->id)
+        ->update(['value' => $nextValue]);
+
+    return response()->json(['pbn_number' => $pbnNumber]);
+}
 
 
 }

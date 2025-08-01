@@ -43,10 +43,10 @@ const Login = () => {
         company_id: selectedCompany,
       });
 
+      console.log(response.data);
       // Store token and user in localStorage (or in memory, or context)
       localStorage.setItem('token', response.data.token);
       localStorage.setItem('user', JSON.stringify(response.data.user));
-
 
       // Redirect to dashboard upon successful login
       navigate('/dashboard');  // Redirect to dashboard page

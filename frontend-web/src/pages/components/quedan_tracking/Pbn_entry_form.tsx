@@ -1,327 +1,258 @@
+// Unified working version of `pbn_entry_form.tsx` with:
+// ✅ Properly working searchable Mill dropdown
+// ✅ Auto-calculation of cost, commission, total cost
+// ✅ Auto-add of new row on complete input
+// ✅ Fully restored afterChange, cell typing, and Handsontable integration
 
-// PurchaseBookNote.tsx
-
-import _Handsontable from 'handsontable';
-import { HotTable, HotTableClass } from '@handsontable/react';
-import 'handsontable/dist/handsontable.full.min.css';
-import { NumericCellType  } from 'handsontable/cellTypes';
-
-_Handsontable.cellTypes.registerCellType('numeric', NumericCellType); // ✅ FIX
-
-
-import 'handsontable/dist/handsontable.full.min.css';
 import { useEffect, useState, useRef } from 'react';
-import napi from '../../../utils/axiosnapi';
-import type { CellChange, ChangeSource } from 'handsontable/common';
+import { HotTable, HotTableClass } from '@handsontable/react';
+import Handsontable from 'handsontable';
+import { NumericCellType } from 'handsontable/cellTypes';
+import 'handsontable/dist/handsontable.full.min.css';
+import Swal from 'sweetalert2';
+import { toast, ToastContainer } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 
 import DropdownWithHeaders from '../../components/DropdownWithHeaders';
-
 import { useDropdownOptions } from '../../../hooks/useDropdownOptions';
+import napi from '../../../utils/axiosnapi';
 
-
-
-/*interface Vendor {
-  vend_code: string;
-  vend_name: string;
-}
-
-interface SugarType {
-  id: number;
-  sugar_type: string;
-  description: string;
-}
-
-interface CropYear {
-  crop_year: string;
-}*/
+Handsontable.cellTypes.registerCellType('numeric', NumericCellType);
 
 export default function PurchaseBookNote() {
-  
-  useEffect(() => {
-    document.documentElement.style.overflow = 'visible';
-    return () => {
-      document.documentElement.style.overflow = '';
-    };
-  }, []);
-  
-  
-  //const [sugarTypes, setSugarTypes] = useState<SugarType[]>([]);
-  //const [cropYears, setCropYears] = useState<CropYear[]>([]);
-  //const [vendors, setVendors] = useState<Vendor[]>([]);
+  const hotRef = useRef<HotTableClass>(null);
   const [pbnNumber, setPbnNumber] = useState('');
   const [pbnDate, setPbnDate] = useState('');
-  const [sugarType, setSugarType] = useState('');
-  const [cropYear, setCropYear] = useState('');
-  const [vendCode, setVendCode] = useState('');
+  const [selectedSugarType, setSelectedSugarType] = useState('');
+  const [selectedCropYear, setSelectedCropYear] = useState('');
+  const [selectedVendor, setSelectedVendor] = useState('');
   const [vendorName, setVendorName] = useState('');
-  const hotRef = useRef<HotTableClass>(null);
+  const [posted, setPosted] = useState(false);
+  const [handsontableEnabled, setHandsontableEnabled] = useState(false);
+  const [mainEntryId, setMainEntryId] = useState<number | null>(null);
+  const [tableData, setTableData] = useState<any[]>([{}]);
+  const [mills, setMills] = useState<{ mill_id: string; mill_name: string }[]>([]);
 
-  const selectedCompanyId = 1; // Or dynamically set this
-  const [showPosted, setShowPosted] = useState(false);
-  const [pbnEntries, setPbnEntries] = useState<any[]>([]);
-  const [selectedPbn, setSelectedPbn] = useState('');
+  const sugarTypes = useDropdownOptions('/api/sugar-types');
+  const cropYears = useDropdownOptions('/api/crop-years');
+  const vendors = useDropdownOptions('/api/vendors');
 
-  const [selectedSugarType, setSelectedSugarType] = useState<string>('');
-
-//const [selectedSugarType, setSelectedSugarType] = useState('');
-const [selectedVendor, setSelectedVendor] = useState('');
-const [selectedCropYear, setSelectedCropYear] = useState('');
-
-
-
-
-// Load dynamic options
-//const sugarTypes = useDropdownOptions('/api/sugar-types');
-
-const {
-  items: sugarTypeItems,
-  search: sugarTypeSearch,
-  setSearch: setSugarTypeSearch,
-} = useDropdownOptions('/api/sugar-types');
-
-const vendors = useDropdownOptions('/api/vendors');
-//const cropYears = useDropdownOptions('/api/crop-years');
-
-const {
-  items: cropYears,
-  search: cropYearSearch,
-  setSearch: setCropYearSearch,
-} = useDropdownOptions('/api/crop-years');
-
-
-  useEffect(() => {
-    const fetchData = async () => {
-      const [sugar, crop, vendor,pbnno] = await Promise.all([
-        napi.get('/api/sugar-types'),
-        napi.get('/api/crop-years'),
-        napi.get('/api/vendors'),
-        napi.get(`/api/settings/PBNNO?company_id=${selectedCompanyId}`),
-      ]);
-      //setSugarTypes(sugar.data);
-      setSelectedSugarType(sugar.data);
-      if (sugar.data.length > 0) setSelectedSugarType(sugar.data[0].code);
-      //setCropYears(crop.data);
-      setSelectedCropYear(crop.data);
-      //setVendors(vendor.data);
-      setSelectedVendor(vendor.data);
-
-      setPbnNumber(pbnno.data.value);
-    };
-    fetchData();
-  }, []);
-
-//useEffect(() => {
-//  const selected = vendors.items.find(v => v.code === vendCode); // Access items array
-//  setVendorName(selected?.description || ''); // Safely set vendor name or use default
-//}, [vendCode, vendors.items]); // Correct dependency
-
-
-  useEffect(() => {
-    const fetchPbnEntries = async () => {
-      try {
-        const res = await napi.get(`/api/pbn-entries?postedFlag=${showPosted ? 1 : 0}`);
-        setPbnEntries(res.data);
-      } catch (err) {
-        console.error('Failed to fetch PBN entries', err);
-      }
-    };
-
-    fetchPbnEntries();
-  }, [showPosted]);
-
-const handleVendorChange = (vendorCode: string) => {
-  setSelectedVendor(vendorCode);
-
-  const selected = vendors.items.find(v => v.code === vendorCode);
-  setVendorName(selected?.description || '');
+const isRowComplete = (row: any) => {
+  return (
+    row.mill &&
+    row.quantity !== undefined &&
+    row.unit_cost !== undefined &&
+    row.commission !== undefined &&
+    row.mill !== '' &&
+    row.quantity !== '' &&
+    row.unit_cost !== '' &&
+    row.commission !== ''
+  );
 };
 
 
+  useEffect(() => {
+    napi.get('/api/mills').then(res => setMills(res.data));
+  }, []);
 
+  useEffect(() => {
+    const selected = vendors.items.find(v => v.code === selectedVendor);
+    setVendorName(selected?.description || '');
+  }, [selectedVendor, vendors.items]);
 
   const handleNew = () => {
-    setSugarType('');
-    setCropYear('');
-    setVendCode('');
+    setSelectedSugarType('');
+    setSelectedCropYear('');
+    setSelectedVendor('');
     setVendorName('');
-    setPbnDate(new Date().toISOString().substring(0, 10));
-    setPbnNumber('');
-    hotRef.current?.hotInstance?.loadData([{}]);
+    setPbnDate('');
+    setPosted(false);
+    setHandsontableEnabled(false);
+    setMainEntryId(null);
+    setTableData([{}]);
+    toast.success('✅ PBN Entry form is now ready for new entry');
   };
 
   const handleSave = async () => {
-    const hotInstance = hotRef.current?.hotInstance;
-    if (!hotInstance) return;
-
-    const details = hotInstance.getData().map((row: any[]) => {
-      const [_, mill, quantity, commission] = row;
-      const qty = parseFloat(quantity) || 0;
-      const com = parseFloat(commission) || 0;
-      return {
-        mill: mill || '',
-        quantity: qty,
-        commission: com,
-        cost: qty * com,
-        total_cost: qty * com,
-      };
+    const confirm = await Swal.fire({
+      title: 'Confirm Save?',
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonText: 'Yes, Save it!',
     });
-
-    const payload = {
-      pbn_number: pbnNumber,
-      pbn_date: pbnDate,
-      sugar_type: sugarType,
-      crop_year: cropYear,
-      vend_code: vendCode,
-      vendor_name: vendorName,
-      details,
-    };
+    if (!confirm.isConfirmed) return;
 
     try {
-      await napi.post('/api/pbn-entry', payload);
-      alert('Saved successfully');
+      const storedUser = localStorage.getItem('user');
+      const user = storedUser ? JSON.parse(storedUser) : null;
+      const companyId = user?.company_id;
+      if (!companyId) {
+        toast.error('Company ID not found in session.');
+        return;
+      }
+
+      const { data } = await napi.get('/api/pbn/generate-pbn-number', {
+        params: {
+          company_id: companyId,
+          sugar_type: selectedSugarType,
+        },
+      });
+
+      const generatedPbnNumber = data.pbn_number;
+      setPbnNumber(generatedPbnNumber);
+
+      const res = await napi.post('/api/pbn/save-main', {
+        sugar_type: selectedSugarType,
+        crop_year: selectedCropYear,
+        pbn_date: pbnDate,
+        vend_code: selectedVendor,
+        vendor_name: vendorName,
+        pbn_number: generatedPbnNumber,
+        posted_flag: posted,
+        company_id: companyId,
+      });
+
+      const { id } = res.data;
+      setMainEntryId(id);
+      setHandsontableEnabled(true);
+      toast.success('Main PBN Entry saved. You can now input details.');
     } catch (err) {
+      toast.error('Failed to save PBN Entry.');
       console.error(err);
-      alert('Save failed');
     }
   };
 
+const handleAutoSaveDetail = async (rowData: any, rowIndex: number) => {
+  if (!mainEntryId || !pbnNumber || !isRowComplete(rowData)) return;
+
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+
+  const payload = {
+    ...rowData,
+    mill_code: mills.find(m => m.mill_name === rowData.mill)?.mill_id || '',
+    pbn_entry_id: mainEntryId,
+    pbn_number: pbnNumber,
+    row: rowIndex,
+    company_id: user.company_id,
+    user_id: user.id,
+    cost: Math.round(rowData.quantity * rowData.unit_cost * 100) / 100,
+    total_commission: rowData.quantity * rowData.commission,
+    total_cost: (rowData.quantity * rowData.unit_cost) + (rowData.quantity * rowData.commission),
+  };
+
+  try {
+    if (!rowData.persisted) {
+      await napi.post('/api/pbn/save-detail', payload);
+      rowData.persisted = true;
+    } else {
+      await napi.post('/api/pbn/update-detail', payload);
+    }
+  } catch (err) {
+    console.error('Auto-save failed', err);
+  }
+};
+
+
   return (
-    <div className="w-full h-full px-6 space-y-6 overflow-visible relative">
-      
-      
-      <div className="grid grid-cols-2 gap-4 mb-6">
-        
-        <div className="relative overflow-visible z-10">
-        <DropdownWithHeaders
-          label="Sugar Type"
-          value={selectedSugarType}
-          onChange={setSelectedSugarType}
-          items={sugarTypeItems}
-          search={sugarTypeSearch}
-          onSearchChange={setSugarTypeSearch}
-          headers={['Sugar Type', 'Description']}
-        />
-        </div>        
+    <div className="space-y-4 p-6">
+      <ToastContainer position="top-right" autoClose={3000} />
 
-
-        
-        <div className="flex items-center gap-2 mt-4">
-          <input
-            type="checkbox"
-            id="chkPbnPosted"
-            checked={showPosted}
-            onChange={(e) => setShowPosted(e.target.checked)}
-          />
-          <label htmlFor="chkPbnPosted">PBN #:</label>
-
-          <select
-            value={selectedPbn}
-            onChange={(e) => {
-              const selected = pbnEntries.find(p => p.pbn_number === e.target.value);
-              setSelectedPbn(e.target.value);
-
-              if (selected) {
-                setSugarType(selected.sugar_type);
-                setCropYear(selected.crop_year);
-                setVendCode(selected.vend_code);
-                setVendorName(selected.vendor_name);
-                setPbnDate(selected.pbn_date);
-              }
-            }}
-            className="border p-2 w-[550px] bg-yellow-100"
-          >
-            <option value="">Select PBN Number</option>
-            {pbnEntries.map((entry) => (
-              <option key={entry.pbn_number} value={entry.pbn_number}>
-                {entry.pbn_number} | {entry.sugar_type} | {entry.vend_code} | {entry.vendor_name} | {entry.crop_year} | {entry.pbn_date}
-              </option>
-            ))}
-          </select>
+      <div className="bg-white shadow-md rounded-lg p-6 space-y-4">
+        <div className="grid grid-cols-2 gap-4">
+          <DropdownWithHeaders label="Sugar Type" value={selectedSugarType} onChange={setSelectedSugarType} items={sugarTypes.items} search={sugarTypes.search} onSearchChange={sugarTypes.setSearch} headers={['Sugar Type', 'Description']} />
+          <DropdownWithHeaders label="Crop Year" value={selectedCropYear} onChange={setSelectedCropYear} items={cropYears.items} search={cropYears.search} onSearchChange={cropYears.setSearch} headers={['Crop Year', 'FYear', 'TYear']} />
         </div>
-      
-      </div>
 
-
-      <div className="grid grid-cols-2 gap-4 mt-6">      
-        <div>
-          <label className="block">PBN Date</label>
-          <input type="date" value={pbnDate} onChange={e => setPbnDate(e.target.value)} className="w-full border p-2" />
+        <div className="grid grid-cols-2 gap-4">
+          <DropdownWithHeaders label="Vendor" value={selectedVendor} onChange={setSelectedVendor} items={vendors.items} search={vendors.search} onSearchChange={vendors.setSearch} headers={['Vendor Code', 'Vendor Name']} />
+          <div>
+            <label className="block">Vendor Name</label>
+            <input disabled className="w-full border p-2 bg-gray-100" value={vendorName} />
+          </div>
         </div>
-        
-        <DropdownWithHeaders
-          label="Crop Year"
-          value={selectedCropYear}
-          onChange={setSelectedCropYear}
-          items={cropYears}
-          search={cropYearSearch}
-          onSearchChange={setCropYearSearch}
-          headers={['Crop Year', 'FYear', 'TYear']} // optional custom headers
-        />
-      </div>
-      
-      
-      <div className="grid grid-cols-2 gap-4">
-        
-        <DropdownWithHeaders
-          label="Vendor"
-          value={selectedVendor}
-          onChange={handleVendorChange} // <-- use handler
-          items={vendors.items}
-          search={vendors.search}
-          onSearchChange={vendors.setSearch}
-          headers={['Vendor Code', 'Vendor Name']}
-        />
 
-        <div>
-          <label className="block">Vendor Name</label>
-          <input value={vendorName} disabled className="w-full border p-2 bg-gray-100" />
-
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label>PBN Date</label>
+            <input type="date" value={pbnDate} onChange={(e) => setPbnDate(e.target.value)} className="w-full border p-2" />
+          </div>
+          <div className="flex items-center mt-6">
+            <input type="checkbox" checked={posted} onChange={(e) => setPosted(e.target.checked)} className="mr-2" /> Posted
+          </div>
         </div>
       </div>
-      <div>
 
+<div className="relative overflow-visible z-0">
+  <h2 className="text-lg font-semibold text-gray-800 mb-2 mt-6">
+  Purchase Book Note Details
+</h2>
+      {handsontableEnabled && (
 
-
-        <label className="block font-bold mb-2">Details</label>
+        
+        
         <HotTable
           ref={hotRef}
-          data={[{}]}
-          colHeaders={["#", "Mill", "Quantity", "Commission", "Cost", "Total Cost"]}
-          columns={[
-            { readOnly: true },
-            { type: 'text' },
-            { type: 'numeric' },
-            { type: 'numeric' },
-            { readOnly: true },
-            { readOnly: true },
+          data={tableData}
+          colHeaders={['Mill', 'Quantity', 'Unit Cost', 'Commission', 'Cost', 'Total Commission', 'Total Cost']}
+    columns={[
+    {
+      data: 'mill',
+      type: 'autocomplete',        // base editor
+      source: mills.map(m => m.mill_name),
+      strict: false,
+      filter: true,
+      allowInvalid: false,
+      visibleRows: 10,              // show 8 items
+      trimDropdown: false          // optionally allow wider dropdown
+    },
+            { data: 'quantity', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
+            { data: 'unit_cost', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
+            { data: 'commission', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
+            { data: 'cost', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
+            { data: 'total_commission', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
+            { data: 'total_cost', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
           ]}
-          licenseKey="non-commercial-and-evaluation"
+afterChange={(changes, source) => {
+  if (!changes || source !== 'edit') return;
+  const newData = [...tableData];
+  changes.forEach(([rowIndex]) => {
+    const row = newData[rowIndex];
+    if (!row) return;
+
+    const qty = parseFloat(row.quantity || 0);
+    const uc = parseFloat(row.unit_cost || 0);
+    const com = parseFloat(row.commission || 0);
+
+    row.cost = Math.round(qty * uc * 100) / 100;
+    row.total_commission = qty * com;
+    row.total_cost = row.cost + row.total_commission;
+
+    if (isRowComplete(row)) {
+      handleAutoSaveDetail(row, rowIndex);
+      if (!row.persisted && rowIndex === newData.length - 1) {
+        newData.push({ mill: '', quantity: 0, unit_cost: 0, commission: 0 });
+      }
+    }
+  });
+  setTableData(newData);
+}}
+
+
+
+
           stretchH="all"
-          height="auto"
           width="100%"
+          height="300"
           rowHeaders={true}
-          afterChange={(changes: CellChange[] | null, source: ChangeSource) => {
-          if (source === 'edit' && changes) {
-              changes.forEach(([row]) => {
-              const hot = hotRef.current?.hotInstance;
-              if (!hot) return;
-              const qty = parseFloat(hot.getDataAtCell(row, 2)) || 0;
-              const com = parseFloat(hot.getDataAtCell(row, 3)) || 0;
-              const cost = qty * com;
-              hot.setDataAtCell(row, 4, cost);
-              hot.setDataAtCell(row, 5, cost);
-              });
-          }
-          }}
-
+          licenseKey="non-commercial-and-evaluation"
         />
-      </div>
-
-      <div className="flex gap-4">
-        <button onClick={handleNew} className="bg-gray-300 px-4 py-2 rounded">New</button>
-        <button onClick={handleSave} className="bg-green-500 text-white px-4 py-2 rounded">Save</button>
-        <button className="bg-blue-500 text-white px-4 py-2 rounded">Print</button>
-        <button className="bg-yellow-500 text-white px-4 py-2 rounded">Download</button>
+        
+      )}
+</div>
+      <div className="flex gap-4 mt-4">
+        <button onClick={handleNew} className="bg-blue-500 text-white px-4 py-2 rounded">New</button>
+        <button onClick={handleSave} className="bg-green-600 text-white px-4 py-2 rounded">Save</button>
       </div>
     </div>
   );

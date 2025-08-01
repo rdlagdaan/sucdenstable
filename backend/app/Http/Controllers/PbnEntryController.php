@@ -5,6 +5,7 @@ use Illuminate\Http\Request;
 use App\Models\PbnEntry;
 use App\Models\PbnEntryDetail;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Validator;
 
 class PbnEntryController extends Controller
 {
@@ -76,4 +77,115 @@ class PbnEntryController extends Controller
             return response()->json(['error' => 'Failed to save PBN entry', 'details' => $e->getMessage()], 500);
         }
     }
+
+public function storeMain(Request $request)
+{
+    $validated = $request->validate([
+        'sugar_type' => 'required',
+        'crop_year' => 'required',
+        'pbn_date' => 'required|date',
+        'vend_code' => 'required',
+        'vendor_name' => 'required',
+        'pbn_number' => 'required',
+        'posted_flag' => 'required|boolean',
+        'company_id' => 'required|integer',
+    ]);
+
+    $entry = PbnEntry::create([
+        ...$validated,
+        'date_created' => now(),
+        'created_by' => auth()->user()->id ?? null,
+    ]);
+
+    return response()->json([
+        'id' => $entry->id,
+        'pbn_number' => $entry->pbn_number,
+        'message' => 'Main PBN entry saved successfully.',
+    ]);
+}
+
+
+public function saveDetail(Request $request)
+{
+    $validated = $request->validate([
+        'pbn_entry_id' => 'required|integer',
+        'pbn_number' => 'required|string',
+        'mill' => 'required|string',
+        'mill_code' => 'required|string',
+        'quantity' => 'required|numeric',
+        'unit_cost' => 'required|numeric',
+        'commission' => 'required|numeric',
+        'company_id' => 'required|numeric',        
+        'user_id' => 'required|numeric',        
+    ]);
+
+    $quantity = floatval($validated['quantity']);
+    $unitCost = floatval($validated['unit_cost']);
+    $commission = floatval($validated['commission']);
+
+    // Formulas
+    $cost = round($quantity * $unitCost * 100) / 100;
+    $totalCommission = $quantity * $commission;
+    $totalCost = $cost + $totalCommission;
+
+    $rowCount = PbnEntryDetail::where('pbn_entry_id', $validated['pbn_entry_id'])->count();
+
+    $detail = new PbnEntryDetail();
+    $detail->pbn_entry_id = $validated['pbn_entry_id'];
+    $detail->row = $rowCount;
+    $detail->pbn_number = $validated['pbn_number'];
+    $detail->mill = $validated['mill'];
+    $detail->mill_code = $validated['mill_code'];
+    $detail->quantity = $quantity;
+    $detail->unit_cost = $unitCost;
+    $detail->commission = $commission;
+    $detail->cost = $cost;
+    $detail->total_commission = $totalCommission;
+    $detail->total_cost = $totalCost;
+    $detail->selected_flag = 0;
+    $detail->delete_flag = 0;
+    $detail->workstation_id = $request->ip(); // IP address of the client
+    $detail->user_id = $validated['user_id'];            // current logged-in user
+    $detail->company_id = $validated['company_id'];            // current logged-in user
+    $detail->save();
+
+    return response()->json([
+        'message' => 'Detail saved successfully',
+        'detail_id' => $detail->id
+    ]);
+}
+
+
+public function updateDetail(Request $request)
+{
+    $validator = Validator::make($request->all(), [
+        'pbn_entry_id' => 'required|integer',
+        'row' => 'required|integer',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json(['message' => 'Validation failed', 'errors' => $validator->errors()], 422);
+    }
+
+    DB::table('pbn_entry_details')
+        ->where('pbn_entry_id', $request->pbn_entry_id)
+        ->where('row', $request->row)
+        ->update([
+            'mill' => $request->mill,
+            'mill_code' => $request->mill_code,
+            'quantity' => $request->quantity,
+            'unit_cost' => $request->unit_cost,
+            'commission' => $request->commission,
+            'cost' => $request->cost,
+            'total_commission' => $request->total_commission,
+            'total_cost' => $request->total_cost,
+            'updated_at' => now(),
+        ]);
+
+    return response()->json(['message' => 'Detail updated']);
+}
+
+
+
+
 }

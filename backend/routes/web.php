@@ -13,6 +13,7 @@ use App\Http\Controllers\PbnEntryController;
 use App\Http\Controllers\SugarTypeController;
 use App\Http\Controllers\CropYearController;
 use App\Http\Controllers\VendorListController;
+use App\Http\Controllers\MillListController;
 
 
 
@@ -53,6 +54,14 @@ Route::middleware(['web'])->group(function () {
     // 🟢 Purchase Book Note Entry CRUD
     Route::get('/api/pbn-entries', [PbnEntryController::class, 'index']);
     Route::post('/api/pbn-entry', [PbnEntryController::class, 'store']);
+    Route::post('/api/pbn/save-main', [PbnEntryController::class, 'storeMain']);
+    
+    Route::post('/api/pbn/save-detail', [PbnEntryController::class, 'saveDetail']);
+    Route::post('/api/pbn/update-detail', [PbnEntryController::class, 'updateDetail']);    
+    
+    
+    Route::get('/api/mills', [MillListController::class, 'index']);
+
 
     // 🟢 Sugar Types Dropdown
     Route::get('/api/sugar-types', [SugarTypeController::class, 'index']);
@@ -64,8 +73,8 @@ Route::middleware(['web'])->group(function () {
     Route::get('/api/vendors', [VendorListController::class, 'index']);
 
     // 🟢 Auto-generated PBN Number from settings
-    Route::get('/api/settings/PBNNO', [ApplicationSettingsController::class, 'getPbnNumber']);
-
+    //Route::get('/api/settings/PBNNO', [ApplicationSettingsController::class, 'getPbnNumber']);
+    Route::get('/api/pbn/generate-pbn-number', [ApplicationSettingsController::class, 'getNextPbnNumber']);
 
 
 

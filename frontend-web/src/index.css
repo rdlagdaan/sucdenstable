@@ -91,3 +91,83 @@ button:focus-visible {
   }
 }
 
+/* index.css */
+.custom-autocomplete-cell {
+  font-weight: bold;
+  font-size: 13px;
+  color: #000080;
+}
+
+.handsontable .autocompleteEditor {
+  font-family: Arial, sans-serif;
+  font-size: 13px;
+  border: 1px solid #999;
+  box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+  z-index: 9999 !important;
+}
+
+.handsontable .autocompleteEditor .ht_master .htCore td {
+  padding: 6px 8px;
+  font-weight: bold;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.handsontable .autocompleteEditor .ht_master .htCore td:hover {
+  background-color: #dbeafe; /* light blue hover */
+}
+
+/* index.css */
+.handsontable .autocompleteEditor {
+  max-height: 200px !important;     /* ✅ ensure dropdown height */
+  overflow-y: auto !important;
+  z-index: 9999 !important;
+}
+
+.handsontable .autocompleteEditor .ht_master .htCore {
+  max-height: 200px;
+}
+
+.handsontable .autocompleteEditor .ht_master .htCore td {
+  padding: 6px 10px;
+  font-weight: bold;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.handsontable .autocompleteEditor .ht_master .htCore td:hover {
+  background-color: #dbeafe; /* Light blue on hover */
+}
+
+/* Allow dropdown to break out and stack on top */
+.htAutocompleteWrapper,
+.handsontableEditor {
+  position: absolute !important;
+  z-index: 9999 !important;
+  max-height: 300px !important;
+  overflow-y: auto !important;
+  background-color: white !important;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+  border: 1px solid #ccc;
+}
+
+/* Optional - make container allow overflow */
+.handsontable .wtHolder {
+  overflow: visible !important;
+}
+
+.htAutocompleteArrow {
+  transform: rotate(0deg) !important; /* Reset weird flip arrows */
+}
+
+.ht_master .handsontableInputHolder {
+  z-index: 9999 !important;
+}
+
+.handsontable .autocompleteEditor {
+  top: auto !important;
+  bottom: unset !important;
+  transform: none !important;
+  z-index: 9999 !important;
+}
+
