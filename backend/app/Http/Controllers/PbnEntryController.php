@@ -187,5 +187,99 @@ public function updateDetail(Request $request)
 
 
 
+public function deleteDetailAndLog(Request $request)
+{
+    $validated = $request->validate([
+        'pbn_entry_id' => 'required|integer',
+        'pbn_number' => 'required|string',
+        'row' => 'required|integer',
+    ]);
+
+    // ✅ Step 1: Fetch the original record to be deleted
+    $record = DB::table('pbn_entry_details')
+        ->where('pbn_entry_id', $validated['pbn_entry_id'])
+        ->where('pbn_number', $validated['pbn_number'])
+        ->where('id', $validated['row'])
+        ->first();
+
+    // 🔒 Step 2: If record doesn't exist, return 404
+    if (!$record) {
+        return response()->json(['message' => 'Record not found.'], 404);
+    }
+
+    // ✅ Step 3: Prepare the data for logging
+    $data = (array) $record;
+    $data['nid'] = $data['id'];  // move original id to `nid` field
+    unset($data['id']);          // let the log table auto-increment its own id
+
+    // ✅ Step 4: Insert to log table
+    DB::table('pbn_entry_details_log')->insert($data);
+
+    // ✅ Step 5: Delete the original record
+    DB::table('pbn_entry_details')
+        ->where('pbn_entry_id', $validated['pbn_entry_id'])
+        ->where('pbn_number', $validated['pbn_number'])
+        ->where('id', $validated['row'])
+        ->delete();
+
+    return response()->json(['message' => '✅ Deleted and logged successfully.']);
+}
+
+
+public function getPbnDropdownList(Request $request)
+{
+    $companyId = $request->query('company_id');
+
+    // Checkbox sends "true" (string) if checked → show posted (1)
+    // Otherwise show unposted (0)
+    $includePosted = $request->query('include_posted') === 'true';
+    $postedFlag = $includePosted ? 1 : 0;
+
+    $entries = DB::table('pbn_entry')
+        ->where('company_id', $companyId)
+        ->where('posted_flag', $postedFlag)
+        ->select([
+            'id',
+            'pbn_number',
+            'sugar_type',
+            //'vend_code',
+            'vendor_name',
+            'crop_year',
+            'pbn_date',
+            'posted_flag'
+        ])
+        ->orderByDesc('pbn_number')
+        ->get();
+
+       
+    return response()->json($entries);
+}
+
+
+public function show(Request $request, $id)
+{
+    $companyId = $request->query('company_id'); // ✅ Read from query params
+
+    $main = PbnEntry::where('id', intval($id))
+        ->where('company_id', $companyId)
+        ->first();
+
+    if (!$main) {
+        return response()->json(['message' => 'Not found'], 404);
+    }
+
+    $details = PbnEntryDetail::where('pbn_entry_id', $main->id)
+        ->where('company_id', $companyId)
+        ->get();
+
+    return response()->json([
+        'main' => $main,
+        'details' => $details,
+    ]);
+}
+
+
+
+
 
 }

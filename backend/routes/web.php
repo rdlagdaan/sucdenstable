@@ -58,7 +58,11 @@ Route::middleware(['web'])->group(function () {
     
     Route::post('/api/pbn/save-detail', [PbnEntryController::class, 'saveDetail']);
     Route::post('/api/pbn/update-detail', [PbnEntryController::class, 'updateDetail']);    
-    
+    Route::post('/api/pbn/delete-detail', [PbnEntryController::class, 'deleteDetailAndLog']);
+    Route::get('/api/pbn/dropdown-list', [PbnEntryController::class, 'getPbnDropdownList']);
+    Route::get('/api/id/{id}', [PbnEntryController::class, 'show']);
+
+   
     
     Route::get('/api/mills', [MillListController::class, 'index']);
 

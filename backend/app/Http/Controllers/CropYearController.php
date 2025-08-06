@@ -9,6 +9,9 @@ class CropYearController extends Controller
 {
     public function index()
     {
-        return response()->json(CropYear::all());
+        return response()->json(
+            CropYear::orderBy('crop_year', 'desc')->get()
+        );
+
     }
 }

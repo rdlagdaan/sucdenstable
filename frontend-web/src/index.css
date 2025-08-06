@@ -171,3 +171,12 @@ button:focus-visible {
   z-index: 9999 !important;
 }
 
+/* Make header background black and text white */
+.ht_clone_top .htCore th {
+  background-color: black !important;
+  color: white !important;
+  font-weight: bold;
+  text-align: center;
+  border-right: 1px solid #ffffff55;
+}
+
