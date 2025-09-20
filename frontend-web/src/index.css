@@ -153,7 +153,7 @@ button:focus-visible {
 
 /* Optional - make container allow overflow */
 .handsontable .wtHolder {
-  overflow: visible !important;
+  overflow: auto !important;
 }
 
 .htAutocompleteArrow {
@@ -164,12 +164,12 @@ button:focus-visible {
   z-index: 9999 !important;
 }
 
-.handsontable .autocompleteEditor {
-  top: auto !important;
-  bottom: unset !important;
-  transform: none !important;
+/* ✅ Let Handsontable position the editor normally (absolute). 
+   We only keep z-index so it floats above the grid. */
+.handsontableEditor.autocompleteEditor {
   z-index: 9999 !important;
 }
+
 
 /* Make header background black and text white */
 .ht_clone_top .htCore th {
@@ -180,3 +180,156 @@ button:focus-visible {
   border-right: 1px solid #ffffff55;
 }
 
+
+/* Keep Handsontable header/left clones above scrollbars */
+.hot-like-pbn .handsontable .ht_clone_top,
+.hot-like-pbn .handsontable .ht_clone_left,
+.hot-like-pbn .handsontable .ht_clone_top_left_corner {
+  z-index: 120 !important;
+}
+
+/* Prevent parent clipping of header clones */
+.hot-like-pbn {
+  position: relative;
+  overflow: visible;
+}
+
+/* Make header height consistent, single line */
+.hot-like-pbn .handsontable th,
+.hot-like-pbn .handsontable .ht_clone_top th {
+  height: 32px !important;
+  line-height: 32px !important;
+  white-space: nowrap;
+}
+
+/* DEBUG: draw a border around the sticky header clone */
+.hot-like-pbn .handsontable .ht_clone_top {
+  outline: 2px dashed magenta !important;
+}
+
+/* Flip the autocomplete popup upward when space below is tight */
+/*.handsontableEditor.autocompleteEditor.hot-open-up {
+  transform: translateY(calc(-100% - 6px)) !important;
+}*/
+
+.handsontableEditor.autocompleteEditor {
+  z-index: 99999 !important;
+}
+
+
+/* Zebra rows: white / light blue, without fighting the selection styles */
+.hot-zebra .htCore tr:nth-child(odd)  td:not(.current):not(.area):not(.highlight):not(.fill) {
+  background-color: #ffffff;
+}
+.hot-zebra .htCore tr:nth-child(even) td:not(.current):not(.area):not(.highlight):not(.fill) {
+  background-color: #eef5ff; /* soft blue */
+}
+
+
+/* ===========================
+   Handsontable – Enhanced Theme (v2)
+   =========================== */
+.hot-enhanced {
+  /* tweak these to taste */
+  --hot-bg:            #ffffff;
+  --hot-alt-bg:        #6398e2;     /* zebra alt */
+  --hot-hover-bg:      #e3edff;     /* row hover */
+  --hot-text:          #111827;     /* slate-900 */
+  --hot-muted:         #4b5563;     /* slate-600 */
+  --hot-border:        #e5e7eb;     /* slate-200 */
+
+  /* light, “normal” header palette */
+  --hot-header-bg:     #f9fafb;     /* column header */
+  --hot-header-text:   #111827;
+  --hot-side-header-bg:#f9fafb;     /* row numbers / corner */
+  --hot-side-header-text:#111827;
+
+  --hot-current:       #2563eb;     /* blue-600 focus ring */
+}
+
+/* Base text & borders */
+.hot-enhanced .htCore td,
+.hot-enhanced .htCore th {
+  color: var(--hot-text);
+  border-color: var(--hot-border);
+  font-size: 14px;
+}
+
+/* ----- Header styling (scoped to the proper clones) ----- */
+/* Safety reset in case an older broad th rule exists earlier */
+.hot-enhanced .htCore th {
+  background: unset;
+  color: unset;
+  font-weight: unset;
+  padding: unset;
+}
+
+/* Style ONLY the top column headers */
+.hot-enhanced .ht_clone_top .htCore th {
+  background: var(--hot-header-bg);
+  color: var(--hot-header-text);
+  font-weight: 700;
+  padding: 1px 1px;                 /* matches body cell padding below */
+  border-bottom: 1px solid var(--hot-border);
+}
+
+/* Keep row header (numbers) & corner neutral/light */
+.hot-enhanced .ht_clone_left .htCore th,
+.hot-enhanced .ht_clone_top_left_corner .htCore th {
+  background: var(--hot-side-header-bg);
+  color: var(--hot-side-header-text);
+  font-weight: 600;
+  padding: 1px 1px;
+  border-right: 1px solid var(--hot-border);
+}
+
+/* Body cell padding */
+.hot-enhanced .htCore td {
+  padding: 3px 3px;
+}
+
+/* ----- Zebra rows (don’t fight selection/area styles) ----- */
+.hot-enhanced .htCore tr:nth-child(odd)  td:not(.current):not(.area):not(.highlight):not(.fill) {
+  background-color: var(--hot-bg);
+  font-weight: 600;
+}
+.hot-enhanced .htCore tr:nth-child(even) td:not(.current):not(.area):not(.highlight):not(.fill) {
+  background-color: var(--hot-alt-bg);
+  color: white;
+  font-weight: 600;
+}
+
+/* Row hover (non-selected) */
+.hot-enhanced .htCore tr:hover td:not(.current):not(.area):not(.highlight):not(.fill) {
+  background-color: var(--hot-hover-bg);
+  
+}
+
+/* Focused cell ring & selection tint */
+.hot-enhanced .htCore td.current {
+  box-shadow: inset 0 0 0 2px var(--hot-current);
+}
+.hot-enhanced .area {
+  background: rgba(37, 99, 235, 0.08); /* blue-600 @ 8% */
+}
+
+/* Make Account Code column a bit bolder for scannability */
+.hot-enhanced .htCore td:nth-child(1) {
+  font-weight: 600;
+  letter-spacing: .2px;
+}
+
+/* Numeric columns: tabular lining for pretty numbers */
+.hot-enhanced .htRight {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Optional: soften read-only cells if you ever add a class */
+.hot-enhanced .htCore td.read-only {
+  color: var(--hot-muted);
+}
+
+/* Optional: nicer dropdown arrow color in autocomplete cells */
+.hot-enhanced .htAutocompleteArrow:after {
+  border-top-color: #6b7280; /* slate-500 */
+}

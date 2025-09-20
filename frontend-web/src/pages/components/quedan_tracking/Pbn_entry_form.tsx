@@ -1,5 +1,5 @@
 
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useRef, useMemo, useLayoutEffect  } from 'react';
 
 import { HotTable, HotTableClass } from '@handsontable/react';
 import Handsontable from 'handsontable';
@@ -14,6 +14,16 @@ import 'react-toastify/dist/ReactToastify.css';
 import napi from '../../../utils/axiosnapi';
 import DropdownWithHeaders from '../../components/DropdownWithHeaders';
 import { useDropdownOptions } from '../../../hooks/useDropdownOptions';
+import {
+  PrinterIcon,
+  ChevronDownIcon,
+  DocumentTextIcon,
+  PlusIcon,
+  CheckCircleIcon,
+  XMarkIcon,             // 👈 close icon for modal
+  ArrowDownTrayIcon,       // ✅ NEW (Download button icon)
+  DocumentArrowDownIcon,   // ✅ NEW (Excel menu item icon)
+} from '@heroicons/react/24/outline';
 
 
 Handsontable.cellTypes.registerCellType('numeric', NumericCellType);
@@ -46,6 +56,7 @@ interface PbnDetailRow {
   persisted?: boolean;
 }
 
+type MillLite = { mill_id: string | number; mill_name: string; company_id: number };
 
 
 
@@ -80,6 +91,59 @@ export default function PurchaseBookNote() {
   const [handsontableEnabled, setHandsontableEnabled] = useState(false);
   const [mainEntryId, setMainEntryId] = useState<number | null>(null);
 
+  const [pdfModalOpen, setPdfModalOpen] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState<string | undefined>(undefined);
+  // ⬇️ add these two right after your other useState hooks
+  const [showPdf, setShowPdf] = useState(false);
+  const [downloadOpen, setDownloadOpen] = useState(false);
+  const isPbnReady = !!mainEntryId;   // true when a PBN is saved/selected
+
+// ---- Viewport-anchored placement for the autocomplete popup ----
+const ROW_HEIGHT = 28;           // keep your existing constant or set it here
+const TARGET_LIST_HEIGHT = 320;  // cap the dropdown height
+const GAP = 6;                   // gap between cell and popup
+const MIN_BELOW = 220;           // preferred min space below for "open down"
+
+const placeAutocompletePopup = (row: number, col: number) => {
+  const hot = hotRef.current?.hotInstance;
+  if (!hot) return;
+
+  const td = hot.getCell(row, col);
+  const editor = document.querySelector<HTMLElement>('.handsontableEditor.autocompleteEditor');
+  if (!td || !editor) return;
+
+  const cellRect = td.getBoundingClientRect();
+
+  // Available space above & below in the viewport
+  const spaceAbove = cellRect.top - GAP;                       // px above the cell
+  const spaceBelow = window.innerHeight - cellRect.bottom - GAP; // px below the cell
+
+  // Decide whether to open below or above, and how tall it can be
+  const openDown = spaceBelow >= MIN_BELOW || spaceBelow >= spaceAbove;
+  const maxHeight = Math.min(TARGET_LIST_HEIGHT, openDown ? spaceBelow : spaceAbove, 420);
+
+  // Width: at least cell width, up to a sensible max
+  const width = Math.max(cellRect.width, 300);
+
+  // Left aligned with the cell, but keep in viewport
+  const left = Math.max(8, Math.min(cellRect.left, window.innerWidth - width - 8));
+
+  // Top is either just below or just above the cell
+  const top = openDown
+    ? (cellRect.bottom + GAP)
+    : Math.max(8, cellRect.top - maxHeight - GAP);
+
+  // Apply styles
+  editor.style.left = `${left}px`;
+  editor.style.top = `${top}px`;
+  editor.style.maxHeight = `${Math.max(160, maxHeight)}px`;
+  editor.style.width = `${width}px`;
+
+  // Ensure the text input still has focus
+  const input = document.querySelector<HTMLInputElement>('.handsontableInput');
+  input?.focus();
+};
+
 
   //const [tableData, setTableData] = useState<any[]>([{}]);
   const [tableData, setTableData] = useState<PbnDetailRow[]>([]);
@@ -102,10 +166,76 @@ export default function PurchaseBookNote() {
   const [pendingDetails, setPendingDetails] = useState<PbnDetailRow[]>([]);
 
 
+
   // NEW ref — used to safely detect when mainEntryId is updated
   const mainEntryIdRef = useRef<number | null>(null);
 
+  // Controls the Print hover menu (prevents flicker between button and menu)
+  const [printOpen, setPrintOpen] = useState(false);
 
+
+// Tracks if a cell editor is currently open
+const isEditingRef = useRef(false);
+
+// ---- Ensure there is enough space *below* the edited cell ----
+
+
+
+// Ensure there's at least ROOM_BELOW px of space under the edited cell
+const ROOM_BELOW = 260;   // tweak if you want a taller dropdown
+const ROW_PX = 28;        // row height used by the grid
+
+const ensureRoomBelow = (row: number, col: number) => {
+  const hot = hotRef.current?.hotInstance;
+  if (!hot) return;
+
+  const td = hot.getCell(row, col);
+  if (!td) return;
+
+  const rect = td.getBoundingClientRect();
+  const spaceBelow = window.innerHeight - rect.bottom;
+
+  if (spaceBelow >= ROOM_BELOW) return;
+
+  // Scroll up just enough rows to create ROOM_BELOW
+  const needed = ROOM_BELOW - spaceBelow;
+  const rowsToScroll = Math.ceil(needed / ROW_PX) + 1;
+  const target = Math.max(0, row - rowsToScroll);
+
+  // Gentle scroll that does not yank focus away
+  hot.scrollViewportTo(target, col);
+};
+
+
+// ---- Details wrapper & max grid height (add here) ----
+const detailsWrapRef = useRef<HTMLDivElement>(null);
+const [maxGridHeight, setMaxGridHeight] = useState<number>(600);
+
+useLayoutEffect(() => {
+  const update = () => {
+    const rect = detailsWrapRef.current?.getBoundingClientRect();
+    const top = rect?.top ?? 0;
+    const bottomPadding = 140; // room for buttons/toasts
+    const available = window.innerHeight - top - bottomPadding;
+    setMaxGridHeight(Math.max(320, Math.floor(available)));
+  };
+
+  update();
+  window.addEventListener('resize', update);
+  return () => window.removeEventListener('resize', update);
+}, []);
+
+
+// ---- Dynamic table height constants (add here) ----
+//const ROW_HEIGHT = 28;
+const HEADER_HEIGHT = 32;
+const DROPDOWN_ROOM = 240;
+
+const dynamicHeight = useMemo(() => {
+  const rows = Math.max(tableData.length, 6);
+  const desired = HEADER_HEIGHT * 1 + rows * ROW_HEIGHT + DROPDOWN_ROOM;
+  return Math.min(desired, maxGridHeight);
+}, [tableData.length, maxGridHeight]);
 
 
   const isRowComplete = (row: any) => {
@@ -120,6 +250,37 @@ export default function PurchaseBookNote() {
       row.commission !== ''
     );
   };
+
+
+// ---- Trailing blank rows helpers (add below isRowComplete) ----
+const TRAILING_BUFFER_ROWS = 4;
+
+const emptyRow = (): PbnDetailRow => ({
+  mill: '',
+  quantity: 0,
+  unit_cost: 0,
+  commission: 0,
+  cost: 0,
+  total_commission: 0,
+  total_cost: 0,
+  persisted: false,
+});
+
+const isRowEmpty = (r?: PbnDetailRow) =>
+  !r?.mill && !r?.quantity && !r?.unit_cost && !r?.commission;
+
+const ensureTrailingBuffer = (data: PbnDetailRow[]) => {
+  const out = [...data];
+  // count how many empties at the end
+  let blanksAtEnd = 0;
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (isRowEmpty(out[i])) blanksAtEnd++;
+    else break;
+  }
+  const need = Math.max(0, TRAILING_BUFFER_ROWS - blanksAtEnd);
+  for (let i = 0; i < need; i++) out.push(emptyRow());
+  return out;
+};
 
 
   const fetchPbnEntries = async () => {
@@ -152,9 +313,42 @@ useEffect(() => {
 }, [includePosted]);
 
 
-  useEffect(() => {
+  /*useEffect(() => {
     napi.get('/api/mills').then(res => setMills(res.data));
-  }, []);
+  }, []);*/
+
+useEffect(() => {
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+  const companyId = user?.company_id;
+
+  let cancelled = false;
+
+  async function loadMills() {
+    try {
+      const { data } = await napi.get<MillLite[]>('/api/mills', {
+        params: { company_id: companyId },       // keep this endpoint light for dropdown
+      });
+      if (!cancelled) {
+        setMills(
+          (data || []).map(m => ({
+            mill_id: String(m.mill_id),
+            mill_name: m.mill_name,
+          }))
+        );
+      }
+    } catch (e) {
+      console.error('Failed to load mills', e);
+    }
+  }
+
+  loadMills();
+  return () => { cancelled = true; };
+}, []);
+
+
+
+
 
   useEffect(() => {
     const selected = vendors.items.find(v => v.code === selectedVendor);
@@ -175,6 +369,15 @@ useEffect(() => {
 }, [mainEntryId]);
 
 
+useEffect(() => {
+  if (mainEntryId && pendingDetails.length > 0) {
+    // CHANGE THIS LINE:
+    setTableData(ensureTrailingBuffer(pendingDetails));
+    setHandsontableEnabled(true);
+    setPendingDetails([]);
+  }
+}, [mainEntryId, pendingDetails]);
+
 
   const handleNew = () => {
     setPbnNumber('');
@@ -188,17 +391,7 @@ useEffect(() => {
     setHandsontableEnabled(false);
     setMainEntryId(null);
 
-    setTableData([
-      {
-        mill: '',
-        quantity: 0,
-        unit_cost: 0,
-        commission: 0,
-        cost: 0,
-        total_commission: 0,
-        total_cost: 0,
-      },
-    ]);
+    setTableData(ensureTrailingBuffer([emptyRow()]));
 
     
     setIsExistingRecord(false);
@@ -250,105 +443,21 @@ const handleSave = async () => {
     setMainEntryId(id);
     setSelectedPbnNo(id.toString());
 
-    // ✅ 👇 Add the initial blank row here
-    setTableData([
-      {
-        mill: '',
-        quantity: 0,
-        unit_cost: 0,
-        commission: 0,
-        cost: 0,
-        total_commission: 0,
-        total_cost: 0,
-      },
-    ]);
+
+    setTableData(ensureTrailingBuffer([emptyRow()]));
 
     // ✅ 👇 Only now, enable the Handsontable
     setHandsontableEnabled(true);
-
+    
+    setIsExistingRecord(true);
     toast.success('Main PBN Entry saved. You can now input details.');
+
   } catch (err) {
     toast.error('Failed to save PBN Entry.');
     console.error(err);
   }
 };
 
-
-/*const handleAutoSaveDetail = async (rowData: any, rowIndex: number) => {
-  console.log('here');
-  console.log(mainEntryId);
-  console.log(pbnNumber);
-  console.log(isRowComplete(rowData));
-
-
-  if (!mainEntryId || !pbnNumber || !isRowComplete(rowData)) return;
- console.log('prepare');
-  const storedUser = localStorage.getItem('user');
-  const user = storedUser ? JSON.parse(storedUser) : null;
-
-  const payload = {
-    ...rowData,
-    mill_code: mills.find(m => m.mill_name === rowData.mill)?.mill_id || '',
-    pbn_entry_id: mainEntryId,
-    pbn_number: pbnNumber,
-    row: rowIndex,
-    company_id: user.company_id,
-    user_id: user.id,
-    cost: Math.round(rowData.quantity * rowData.unit_cost * 100) / 100,
-    total_commission: rowData.quantity * rowData.commission,
-    total_cost: (rowData.quantity * rowData.unit_cost) + (rowData.quantity * rowData.commission),
-  };
-
-  try {
-    if (!rowData.persisted) {
-
-      console.log('to be added');
-      console.log(payload);
-const response = await napi.post('/api/pbn/save-detail', payload);
-
-const updatedRow = {
-  ...rowData,
-  id: response.data.detail_id,
-  persisted: true,
-};
-
-// Prepare new data list
-const updatedData = [...tableData];
-updatedData[rowIndex] = updatedRow;
-
-// 👇 Only add a blank row if this is the last row
-if (rowIndex === updatedData.length - 1) {
-  //updatedData.push({ mill: '', quantity: 0, unit_cost: 0, commission: 0 });
-  updatedData.push({
-    mill: '',
-    quantity: 0,
-    unit_cost: 0,
-    commission: 0,
-    cost: 0,
-    total_commission: 0,
-    total_cost: 0,
-  });
-
-}
-
-setTableData(updatedData);
-
-
-
-
-    } else {
-      console.log('to be updated');
-      console.log(payload);
-      await napi.post('/api/pbn/update-detail', payload);
-    }
-  } catch (err) {
-      console.log('to be error');
-      
-    console.error('Auto-save failed', err);
-  }
-};
-
-*/
 
 
 
@@ -493,6 +602,71 @@ const filteredPbnOptions = useMemo(() => {
 
 
 
+const handleOpenPbnPdf = () => {
+  if (!selectedPbnNo) {
+    toast.error('Please select or save a PBN first.');
+    return;
+  }
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+
+  // If you run via Vite (dev), relative /api will proxy to 8686.
+  // If you want to be explicit, use: const base = 'http://localhost:8686';
+  const url = `/api/pbn/form-pdf/${selectedPbnNo}?company_id=${encodeURIComponent(
+    user?.company_id || ''
+  )}`;
+
+  setPdfUrl(url);
+  setShowPdf(true);
+};
+
+
+// ✅ Download Excel handler
+const handleDownloadPbnExcel = async () => {
+  try {
+    if (!mainEntryId) {
+      toast.info('Please save or select a PBN first.');
+      return;
+    }
+
+    const storedUser = localStorage.getItem('user');
+    const user = storedUser ? JSON.parse(storedUser) : null;
+
+    // Call your backend endpoint that returns an XLSX file
+    const res = await napi.get(`/api/pbn/form-excel/${mainEntryId}`, {
+      responseType: 'blob',
+      params: { company_id: user?.company_id || '' },
+    });
+
+    // Build a filename (backend may also send Content-Disposition)
+    const fallbackName = `PBN_${pbnNumber || mainEntryId}.xlsx`;
+    const headerName =
+      res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1];
+
+    const blob = new Blob(
+      [res.data],
+      {
+        type:
+          res.headers['content-type'] ||
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }
+    );
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = headerName || fallbackName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error(err);
+    toast.error('Failed to download Excel.');
+  }
+};
+
+
   return (
     <div className="space-y-4 p-6">
       <ToastContainer position="top-right" autoClose={3000} />
@@ -536,32 +710,6 @@ const filteredPbnOptions = useMemo(() => {
     />
   </div>
 </div>
-
-
-
-        {/*<div className="grid grid-cols-1 gap-4">
-    <input
-      type="checkbox"
-      checked={includePosted}
-      onChange={() => setIncludePosted(!includePosted)}
-      className="form-checkbox h-4 w-4 text-blue-600"
-    />
-
-    <DropdownWithHeaders
-      label="PBN No"
-      value={selectedPbnNo}
-      onChange={setSelectedPbnNo}
-      items={pbnOptions}
-      search={pbnSearch}
-      onSearchChange={setPbnSearch}
-      headers={['ID', 'PBN #', 'Sugar Type', 'Vend Code', 'Vendor Name', 'Crop Year', 'PBN Date']}
-      dropdownPositionStyle={{ minWidth: '700px' }}
-    />      
-        
-        
-        </div>  */}
-        
-        
         
         <div className="grid grid-cols-3 gap-4">
           <DropdownWithHeaders label="Sugar Type" value={selectedSugarType} onChange={setSelectedSugarType} items={sugarTypes.items} search={sugarTypes.search} onSearchChange={sugarTypes.setSearch} headers={['Sugar Type', 'Description']} />
@@ -593,14 +741,11 @@ const filteredPbnOptions = useMemo(() => {
 
       </div>
 
-<div className="relative overflow-visible z-0">
+<div ref={detailsWrapRef} className="relative z-0">
   <h2 className="text-lg font-semibold text-gray-800 mb-2 mt-6">
   Purchase Book Note Details
 </h2>
-      {handsontableEnabled && (
-
-        
-        
+      {handsontableEnabled && (        
         <HotTable
           ref={hotRef}
           data={tableData}
@@ -609,7 +754,14 @@ const filteredPbnOptions = useMemo(() => {
     {
       data: 'mill',
       type: 'autocomplete',        // base editor
-      source: mills.map(m => m.mill_name),
+      //source: mills.map(m => m.mill_name),
+      source: (query, cb) => {
+        const list = mills.map(m => m.mill_name);
+        if (!query) return cb(list);
+        const q = String(query).toLowerCase();
+        cb(list.filter(name => name.toLowerCase().includes(q)));
+      },
+
       strict: false,
       filter: true,
       allowInvalid: false,
@@ -623,6 +775,65 @@ const filteredPbnOptions = useMemo(() => {
             { data: 'total_commission', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
             { data: 'total_cost', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
           ]}
+
+
+afterBeginEditing={(row, col) => {
+  isEditingRef.current = true;
+  // Create room once; Handsontable will open the dropdown below by default
+  requestAnimationFrame(() => ensureRoomBelow(row, col));
+}}
+
+beforeKeyDown={(e: KeyboardEvent) => {
+  // If the autocomplete input is focused, let it own navigation keys
+  const editor = document.querySelector('.handsontableEditor.autocompleteEditor');
+  const active = document.activeElement;
+  if (editor && active && editor.contains(active)) {
+    const k = e.key;
+    if (k === 'ArrowDown' || k === 'ArrowUp' || k === 'PageDown' || k === 'PageUp' || k === 'Home' || k === 'End') {
+      e.stopPropagation(); // keep navigation inside the dropdown
+    }
+  }
+
+  // After first keystroke, the list pops in; make room below once more
+  if (isEditingRef.current) {
+    const hot = hotRef.current?.hotInstance;
+    const sel = hot?.getSelectedLast();
+    if (hot && sel) {
+      const [r, c] = sel;
+      requestAnimationFrame(() => ensureRoomBelow(r, c));
+    }
+  }
+}}
+
+afterSelectionEnd={() => {
+  isEditingRef.current = false;
+}}
+
+afterDeselect={() => {
+  isEditingRef.current = false;
+}}
+
+
+
+afterScrollVertically={() => {
+  if (!isEditingRef.current) return;
+  const hot = hotRef.current?.hotInstance;
+  const sel = hot?.getSelectedLast();
+  if (!hot || !sel) return;
+  const [r, c] = sel;
+  requestAnimationFrame(() => placeAutocompletePopup(r, c));
+}}
+
+afterRender={() => {
+  if (!isEditingRef.current) return;
+  const hot = hotRef.current?.hotInstance;
+  const sel = hot?.getSelectedLast();
+  if (!hot || !sel) return;
+  const [r, c] = sel;
+  requestAnimationFrame(() => placeAutocompletePopup(r, c));
+}}
+
+
 afterChange={(changes, source) => {
   if (!changes || source !== 'edit') return;
 
@@ -675,10 +886,10 @@ afterChange={(changes, source) => {
     });
   }
 
-  setTableData(newData);
+  //setTableData(newData);
+  setTableData(ensureTrailingBuffer(newData));
+
 }}
-
-
 
 
   contextMenu={{
@@ -688,7 +899,6 @@ afterChange={(changes, source) => {
         callback: async function (_key, selection) {
           const rowIndex = selection[0].start.row;
           const rowData = tableData[rowIndex];
-console.log(rowData);
           const confirm = await Swal.fire({
             title: 'Confirm Deletion?',
             text: `Do you want to delete this record?`,
@@ -720,23 +930,195 @@ console.log(rowData);
     }
   }}
 
-
-
           manualColumnResize={true} // 👈 allows drag-to-resize column width
           stretchH="all"
           width="100%"
-          height="300"
+          height={dynamicHeight}
           rowHeaders={true}
           licenseKey="non-commercial-and-evaluation"
         />
         
       )}
 </div>
-      <div className="flex gap-4 mt-4">
-        <button onClick={handleNew} className="bg-blue-500 text-white px-4 py-2 rounded">New</button>
-        <button onClick={handleSave} disabled={isExistingRecord} className={`px-4 py-2 rounded ${isExistingRecord ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white'}`}
->Save</button>
+<div className="flex gap-3 mt-4 items-start">
+
+{/* DOWNLOAD (hover dropdown that stays open while hovering the menu) */}
+<div
+  className="relative inline-block"
+  onMouseEnter={() => setDownloadOpen(true)}
+  onMouseLeave={() => setDownloadOpen(false)}
+>
+  <button
+    type="button"
+    disabled={!isPbnReady}
+    title={isPbnReady ? 'Download' : 'Save/select a PBN first'}
+    className={`inline-flex items-center gap-2 rounded border px-3 py-2 focus:outline-none ${
+      isPbnReady
+        ? 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50 focus:ring-2 focus:ring-emerald-400'
+        : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+    }`}
+  >
+    <ArrowDownTrayIcon
+      className={`h-5 w-5 ${isPbnReady ? 'text-emerald-600' : 'text-gray-400'}`}
+    />
+    <span>Download</span>
+    <ChevronDownIcon
+      className={`h-4 w-4 opacity-70 ${isPbnReady ? 'text-emerald-700' : 'text-gray-400'}`}
+    />
+  </button>
+
+  {/* Dropdown (no external gap so it doesn't flicker) */}
+  {downloadOpen && (
+    <div className="absolute left-0 top-full z-50">
+      <div className="mt-1 w-60 rounded-md border bg-white shadow-lg py-1">
+        <button
+          type="button"
+          onClick={handleDownloadPbnExcel}
+          disabled={!isPbnReady}
+          className={`flex w-full items-center gap-3 px-3 py-2 text-sm ${
+            isPbnReady
+              ? 'text-gray-800 hover:bg-emerald-50'
+              : 'text-gray-400 cursor-not-allowed pointer-events-none'
+          }`}
+        >
+          <DocumentArrowDownIcon
+            className={`h-5 w-5 ${isPbnReady ? 'text-emerald-600' : 'text-gray-400'}`}
+          />
+          <span className="truncate">PBN Form - Excel</span>
+          <span
+            className={`ml-auto text-[10px] font-semibold ${
+              isPbnReady ? 'text-emerald-600' : 'text-gray-400'
+            }`}
+          >
+            XLSX
+          </span>
+        </button>
       </div>
+    </div>
+  )}
+</div>
+
+  {/* PRINT (hover dropdown that stays open while hovering the menu) */}
+  <div
+    className="relative inline-block"
+    onMouseEnter={() => setPrintOpen(true)}
+    onMouseLeave={() => setPrintOpen(false)}
+  >
+    <button
+      type="button"
+      className="inline-flex items-center gap-2 rounded border px-3 py-2 bg-white text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-400"
+    >
+      <PrinterIcon className="h-5 w-5" />
+      <span>Print</span>
+      <ChevronDownIcon className="h-4 w-4 opacity-70" />
+    </button>
+
+    {/* Dropdown (no external gap so it doesn't flicker) */}
+    {printOpen && (
+      <div className="absolute left-0 top-full z-50">
+        <div className="mt-1 w-60 rounded-md border bg-white shadow-lg py-1">
+          <button
+            type="button"
+            onClick={handleOpenPbnPdf}
+            className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
+          >
+            <DocumentTextIcon className="h-5 w-5 text-red-600" />
+            <span className="truncate">PBN Form - PDF</span>
+            <span className="ml-auto text-[10px] font-semibold text-red-600">PDF</span>
+          </button>
+        </div>
+      </div>
+    )}
+  </div>
+
+  {/* NEW (with icon) */}
+  <button
+    onClick={handleNew}
+    className="inline-flex items-center gap-2 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+  >
+    <PlusIcon className="h-5 w-5" />
+    <span>New</span>
+  </button>
+
+  {/* SAVE (with icon) */}
+  <button
+    onClick={handleSave}
+    disabled={isExistingRecord}
+    className={`inline-flex items-center gap-2 px-4 py-2 rounded ${
+      isExistingRecord
+        ? 'bg-gray-400 cursor-not-allowed text-white'
+        : 'bg-green-600 text-white hover:bg-green-700'
+    }`}
+  >
+    <CheckCircleIcon className="h-5 w-5" />
+    <span>Save</span>
+  </button>
+</div>
+
+
+{/* --- PDF Modal --- */}
+{pdfModalOpen && (
+  <div
+    className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50"
+    onClick={() => setPdfModalOpen(false)}                // click on backdrop closes
+  >
+    <div
+      className="bg-white rounded-lg shadow-2xl w-[90vw] max-w-[1100px] h-[88vh] flex flex-col"
+      onClick={(e) => e.stopPropagation()}               // prevent backdrop close when clicking inside
+    >
+      {/* Modal header */}
+      <div className="flex items-center justify-between px-4 py-2 border-b">
+        <div className="font-semibold">PBN Form – PDF</div>
+        <button
+          onClick={() => setPdfModalOpen(false)}
+          className="p-2 hover:bg-gray-100 rounded"
+          aria-label="Close"
+        >
+          <XMarkIcon className="h-6 w-6" />
+        </button>
+      </div>
+
+      {/* PDF content */}
+      <div className="flex-1">
+        {pdfUrl ? (
+          <iframe
+            title="PBN PDF"
+            src={pdfUrl}
+            className="w-full h-full"
+          />
+        ) : (
+          <div className="h-full flex items-center justify-center text-gray-500">
+            Loading PDF…
+          </div>
+        )}
+      </div>
+    </div>
+  </div>
+)}
+
+{showPdf && (
+  <div className="fixed inset-0 z-[10000] bg-black/50 flex items-center justify-center">
+    <div className="bg-white rounded-lg shadow-xl w-[90vw] h-[85vh] relative">
+      <button
+        onClick={() => setShowPdf(false)}
+        className="absolute top-2 right-2 rounded-full px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200"
+        aria-label="Close"
+      >
+        ✕
+      </button>
+      <div className="h-full w-full pt-8">
+        <iframe
+          title="PBN Form PDF"
+          src={pdfUrl}
+          className="w-full h-full"
+          style={{ border: 'none' }}
+        />
+      </div>
+    </div>
+  </div>
+)}
+
+
     </div>
   );
 }

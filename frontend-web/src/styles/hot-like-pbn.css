@@ -1,0 +1,20 @@
+/* Keep Handsontable header/left clones above scrollbars */
+.hot-like-pbn .handsontable .ht_clone_top,
+.hot-like-pbn .handsontable .ht_clone_left,
+.hot-like-pbn .handsontable .ht_clone_top_left_corner {
+  z-index: 120 !important;
+}
+
+/* Prevent parent clipping of header clones */
+.hot-like-pbn {
+  position: relative;
+  overflow: visible;
+}
+
+/* Make header height consistent, single line */
+.hot-like-pbn .handsontable th,
+.hot-like-pbn .handsontable .ht_clone_top th {
+  height: 32px !important;
+  line-height: 32px !important;
+  white-space: nowrap;
+}

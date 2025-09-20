@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y \
     git unzip curl libpq-dev libzip-dev libonig-dev libcurl4-openssl-dev \
     libxml2-dev zlib1g-dev libssl-dev libpng-dev libjpeg-dev libfreetype6-dev \
     && docker-php-ext-install \
+        gd \
+        mbstring \        
         pdo \
         pdo_pgsql \
         zip \

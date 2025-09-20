@@ -16,6 +16,10 @@ import { useNavigate } from 'react-router-dom'; // 👈 Required for redirection
 // Lazy-load your components
 const Role = lazy(() => import('./components/settings/Role'));
 const Pbn_entry_form = lazy(() => import('./components/quedan_tracking/Pbn_entry_form'));
+const Receiving_entry_form = lazy(() => import('./components/quedan_tracking/Receiving_entry_form'));
+const Sales_journal_form = lazy(() => import('./components/accounting/Sales_journal_form'));
+const Cash_receipts_form = lazy(() => import('./components/accounting/Cash_receipts_form'));
+const Purchase_journal_form = lazy(() => import('./components/accounting/Purchase_journal_form'));
 
 import type { JSX } from 'react';
 
@@ -33,6 +37,10 @@ import type { JSX } from 'react';
 const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>> = {
   roles: Role,
   pbn_entry_forms: Pbn_entry_form,
+  receiving_entry_forms: Receiving_entry_form,
+  sales_journal_forms: Sales_journal_form, 
+  cash_receipts_forms: Cash_receipts_form,
+  purchase_journal_forms: Purchase_journal_form,
   // You can add more components later
 };
 

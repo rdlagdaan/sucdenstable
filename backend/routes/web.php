@@ -14,16 +14,16 @@ use App\Http\Controllers\SugarTypeController;
 use App\Http\Controllers\CropYearController;
 use App\Http\Controllers\VendorListController;
 use App\Http\Controllers\MillListController;
-
-
-
+use App\Http\Controllers\ReceivingController;
+use App\Http\Controllers\PbnController;
+use App\Http\Controllers\SalesJournalController;
+use App\Http\Controllers\CashReceiptController;
+use App\Http\Controllers\PurchaseJournalController;
 // ✅ No need to override Sanctum’s built-in CSRF route
 // ❌ Remove this:
 // Route::get('/sanctum/csrf-cookie', function () {
 //     return response()->noContent();
 // });
-
-
 
 // ✅ Public GET routes that don’t need CSRF protection
 Route::get('/api/companies', [CompanyController::class, 'index'])->withoutMiddleware([
@@ -66,6 +66,18 @@ Route::middleware(['web'])->group(function () {
     
     Route::get('/api/mills', [MillListController::class, 'index']);
 
+    Route::get('/api/mills/effective',  [MillListController::class, 'effective']);
+
+    // Optional CRUD for mills
+    Route::post('/api/mills',           [MillListController::class, 'store']);
+    Route::put('/api/mills/{id}',       [MillListController::class, 'update']);
+    Route::delete('/api/mills/{id}',    [MillListController::class, 'destroy']);
+
+    // Rate history CRUD + query
+    Route::get('/api/mill-rates',            [MillRateHistoryController::class, 'index']);
+    Route::post('/api/mill-rates',           [MillRateHistoryController::class, 'store']);
+    Route::put('/api/mill-rates/{id}',       [MillRateHistoryController::class, 'update']);
+    Route::delete('/api/mill-rates/{id}',    [MillRateHistoryController::class, 'destroy']);
 
     // 🟢 Sugar Types Dropdown
     Route::get('/api/sugar-types', [SugarTypeController::class, 'index']);
@@ -81,6 +93,8 @@ Route::middleware(['web'])->group(function () {
     Route::get('/api/pbn/generate-pbn-number', [ApplicationSettingsController::class, 'getNextPbnNumber']);
 
 
+    Route::get('/api/pbn/form-pdf/{id?}', [\App\Http\Controllers\PbnEntryController::class, 'formPdf']);
+    Route::get('/api/pbn/form-excel/{id}', [PbnEntryController::class, 'formExcel']);
 
 
 
@@ -90,6 +104,102 @@ Route::middleware(['web'])->group(function () {
     Route::post('/api/logout', [AuthController::class, 'logout']);
 
     Route::get('/api/settings/{code}', [ApplicationSettingsController::class, 'getSetting']);
+
+
+    Route::get('/api/receiving/rr-list', [ReceivingController::class, 'rrList']);
+    Route::get('/api/receiving/entry', [ReceivingController::class, 'getReceivingEntry']);
+    Route::get('/api/receiving/details', [ReceivingController::class, 'getReceivingDetails']);
+    Route::post('/api/receiving/batch-insert', [ReceivingController::class, 'batchInsertDetails']);
+    Route::post('/api/receiving/update-flag', [ReceivingController::class, 'updateFlag']);
+    Route::post('/api/receiving/update-date', [ReceivingController::class, 'updateDate']);
+    Route::post('/api/receiving/update-gl', [ReceivingController::class, 'updateGL']);
+    Route::post('/api/receiving/update-assoc-others', [ReceivingController::class, 'updateAssocOthers']);
+    Route::post('/api/receiving/update-mill', [ReceivingController::class, 'updateMillName']);
+
+    // helpers reused from PBN & mills
+    Route::get('/api/receiving/pbn-item', [ReceivingController::class, 'pbnItemForReceiving']);
+    Route::get('/api/mills/rate', [ReceivingController::class, 'millRateAsOf']);
+
+    Route::get('/api/pbn/list', [PbnController::class, 'list']);   // PBN dropdown
+    Route::get('/api/pbn/items', [PbnController::class, 'items']); // Item# dropdown, depends on pbn_number
+
+    Route::post('/api/receiving/create-entry', [ReceivingController::class, 'createEntry']);
+
+
+    // Sales Journal (Cash Sales)
+    Route::get('/api/sales/generate-cs-number', [SalesJournalController::class, 'generateCsNumber']);
+    Route::post('/api/sales/save-main',          [SalesJournalController::class, 'storeMain']);
+    Route::post('/api/sales/save-detail',        [SalesJournalController::class, 'saveDetail']);
+    Route::post('/api/sales/update-detail',      [SalesJournalController::class, 'updateDetail']);
+    Route::post('/api/sales/delete-detail',      [SalesJournalController::class, 'deleteDetail']);
+    Route::get('/api/sales/list',                [SalesJournalController::class, 'list']);
+    Route::get('/api/sales/{id}',                [SalesJournalController::class, 'show'])
+        ->whereNumber('id');
+    Route::post('/api/sales/cancel',             [SalesJournalController::class, 'updateCancel']);
+
+    // dropdowns
+    Route::get('/api/customers', [SalesJournalController::class, 'customers']);
+    Route::get('/api/accounts',  [SalesJournalController::class, 'accounts']);
+
+    // print/download
+    Route::get('/api/sales/form-pdf/{id}',  [SalesJournalController::class, 'formPdf']);
+    Route::get('/api/sales/check-pdf/{id}', [SalesJournalController::class, 'checkPdf']);
+    Route::get('/api/sales/form-excel/{id}',[SalesJournalController::class, 'formExcel']);
+
+    Route::get('/api/sales/unbalanced-exists', [SalesJournalController::class, 'unbalancedExists']);
+    Route::get('/api/sales/unbalanced',       [SalesJournalController::class, 'unbalanced']);
+
+    // Cash Receipts
+    Route::get('/api/cash-receipt/generate-cr-number', [CashReceiptController::class, 'generateCrNumber']);
+    Route::post('/api/cash-receipt/save-main',          [CashReceiptController::class, 'storeMain']);
+    Route::post('/api/cash-receipt/save-detail',        [CashReceiptController::class, 'saveDetail']);
+    Route::post('/api/cash-receipt/update-detail',      [CashReceiptController::class, 'updateDetail']);
+    Route::post('/api/cash-receipt/delete-detail',      [CashReceiptController::class, 'deleteDetail']);
+    Route::get('/api/cash-receipt/list',                [CashReceiptController::class, 'list']);
+    Route::get('/api/cash-receipt/{id}',                [CashReceiptController::class, 'show'])->whereNumber('id');
+    Route::post('/api/cash-receipt/cancel',             [CashReceiptController::class, 'updateCancel']);
+
+    // dropdowns
+    Route::get('/api/cr/customers',        [CashReceiptController::class, 'customers']);
+    Route::get('/api/cr/accounts',         [CashReceiptController::class, 'accounts']);
+    Route::get('/api/cr/banks',            [CashReceiptController::class, 'banks']);
+    Route::get('/api/cr/payment-methods',  [CashReceiptController::class, 'paymentMethods']);
+
+    // print/download
+    Route::get('/api/cash-receipt/form-pdf/{id}',  [CashReceiptController::class, 'formPdf']);
+    Route::get('/api/cash-receipt/form-excel/{id}',[CashReceiptController::class, 'formExcel']);
+
+    // unbalanced helpers (optional)
+    Route::get('/api/cash-receipt/unbalanced-exists', [CashReceiptController::class, 'unbalancedExists']);
+    Route::get('/api/cash-receipt/unbalanced',        [CashReceiptController::class, 'unbalanced']);
+
+
+    // Purchase Journal (Cash Purchase)
+    Route::get('/api/purchase/generate-cp-number', [PurchaseJournalController::class, 'generateCpNumber']);
+    Route::post('/api/purchase/save-main',          [PurchaseJournalController::class, 'storeMain']);
+    Route::post('/api/purchase/save-detail',        [PurchaseJournalController::class, 'saveDetail']);
+    Route::post('/api/purchase/update-detail',      [PurchaseJournalController::class, 'updateDetail']);
+    Route::post('/api/purchase/delete-detail',      [PurchaseJournalController::class, 'deleteDetail']);
+    Route::delete('/api/purchase/{id}',             [PurchaseJournalController::class, 'destroy']);
+    Route::get('/api/purchase/list',                [PurchaseJournalController::class, 'list']);
+    Route::get('/api/purchase/{id}',                [PurchaseJournalController::class, 'show'])->whereNumber('id');
+    Route::post('/api/purchase/cancel',             [PurchaseJournalController::class, 'updateCancel']);
+
+    // dropdowns
+    Route::get('/api/pj/vendors',  [PurchaseJournalController::class, 'vendors']);
+    Route::get('/api/pj/accounts', [PurchaseJournalController::class, 'accounts']);
+
+    // print/download
+    Route::get('/api/purchase/form-pdf/{id}',  [PurchaseJournalController::class, 'formPdf']);
+    Route::get('/api/purchase/check-pdf/{id}', [PurchaseJournalController::class, 'checkPdf']);
+    Route::get('/api/purchase/form-excel/{id}',[PurchaseJournalController::class, 'formExcel']);
+
+    // unbalanced helpers
+    Route::get('/api/purchase/unbalanced-exists', [PurchaseJournalController::class, 'unbalancedExists']);
+    Route::get('/api/purchase/unbalanced',        [PurchaseJournalController::class, 'unbalanced']);
+
+
+
 
 });
 
