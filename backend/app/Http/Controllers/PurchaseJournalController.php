@@ -95,40 +95,42 @@ class PurchaseJournalController extends Controller
     }
 
     // 2) Create main header
-    public function storeMain(Request $req)
-    {
-        $data = $req->validate([
-            'cp_no'          => ['nullable','string','max:25'],
-            'vendor_id'      => ['required','string','max:50'],
-            'purchase_date'  => ['required','date'],
-            'explanation'    => ['required','string','max:1000'],
-            'invoice_no'     => ['required','string','max:25'],
-            'company_id'     => ['required','integer'],
-            'workstation_id' => ['nullable','string','max:25'],
-            'user_id'        => ['nullable','integer'],
 
-            // 🔹 extra header fields
-            'sugar_type'     => ['nullable','string','max:25'],
-            'crop_year'      => ['nullable','string','max:9'],
-            'mill_id'      => ['nullable','string','max:25'],
-            'booking_no'     => ['nullable','string','max:50'],
-        ]);
+public function storeMain(Request $req)
+{
+    $vendId = $req->input('vend_id', $req->input('vend_id'));
 
-        if (empty($data['cp_no'])) {
-            $next = $this->generateCpNumber(new Request(['company_id' => $data['company_id']]));
-            $data['cp_no'] = $next->getData()->cp_no ?? null;
-        }
+    $data = $req->validate([
+        'cp_no'          => ['nullable','string','max:25'],
+        'purchase_date'  => ['required','date'],
+        'explanation'    => ['required','string','max:1000'],
+        'sugar_type'     => ['nullable','string','max:10'],
+        'crop_year'      => ['nullable','string','max:10'],
+        'mill_id'        => ['nullable','string','max:25'],
+        'booking_no'     => ['nullable','string','max:25'],
+        'company_id'     => ['required','integer'],
+        'workstation_id' => ['nullable','string','max:25'],
+        'user_id'        => ['nullable','integer'],
+    ]);
 
-        $data['purchase_amount'] = 0;
-        $data['is_cancel'] = 'n';
-
-        $main = CashPurchase::create($data);
-
-        return response()->json([
-            'id'    => $main->id,
-            'cp_no' => $main->cp_no,
-        ]);
+    if (!$vendId) {
+        return response()->json(['message' => 'Vendor is required.'], 422);
     }
+    $data['vend_id'] = $vendId;
+
+    if (empty($data['cp_no'])) {
+        $next = $this->generateCpNumber(new Request(['company_id' => $data['company_id']]));
+        $data['cp_no'] = $next->getData()->cp_no ?? null;
+    }
+
+    $data['purchase_amount'] = 0;
+    $data['is_cancel']       = 'N';   // <-- UPPERCASE
+
+    $main = CashPurchase::create($data);
+
+    return response()->json(['id' => $main->id, 'cp_no' => $main->cp_no]);
+}
+
 
     // 3) Insert a detail row (prevents duplicate acct_code per transaction)
     public function saveDetail(Request $req)
@@ -247,38 +249,47 @@ class PurchaseJournalController extends Controller
     }
 
     // 7) Search list for combobox
-    public function list(Request $req)
-    {
-        $companyId = $req->query('company_id');
-        $q  = trim((string) $req->query('q', ''));
-        $qq = strtolower($q);
+public function list(Request $req)
+{
+    $companyId = $req->query('company_id');
+    $q  = trim((string) $req->query('q', ''));
+    $qq = strtolower($q);
 
-        $rows = CashPurchase::from('cash_purchase as p')
-            ->when($companyId, fn ($qr) => $qr->where('p.company_id', $companyId))
-            ->leftJoin('vendor_list as v', function ($j) use ($companyId) {
-                $j->on('v.vendor_id', '=', 'p.vendor_id'); // keep your existing join key
-                if ($companyId) $j->where('v.company_id', $companyId);
-            })
-            ->when($q !== '', function ($qr) use ($qq) {
-                $qr->where(function ($w) use ($qq) {
-                    $w->whereRaw('LOWER(p.cp_no) LIKE ?',         ["%{$qq}%"])
-                      ->orWhereRaw('LOWER(p.vendor_id) LIKE ?',   ["%{$qq}%"])
-                      ->orWhereRaw('LOWER(p.invoice_no) LIKE ?',  ["%{$qq}%"])
-                      ->orWhereRaw('LOWER(v.vendor_name) LIKE ?', ["%{$qq}%"]);
-                });
-            })
-            ->orderByDesc('p.cp_no')
-            ->limit(50)
-            ->get([
-                'p.id','p.cp_no','p.vendor_id','p.purchase_date','p.purchase_amount','p.invoice_no',
-                'p.is_cancel',
-                // extra header fields are persisted on the main but not required in the list dropdown
-                'p.sugar_type','p.crop_year','p.mill_id','p.booking_no',
-                DB::raw("COALESCE(v.vendor_name,'') as vendor_name"),
-            ]);
+    $rows = CashPurchase::from('cash_purchase as p')
+        ->when($companyId, fn ($qr) => $qr->where('p.company_id', $companyId))
+        ->leftJoin('vendor_list as v', function ($j) use ($companyId) {
+            // ✅ correct join: vendor_list.vend_code ↔ cash_purchase.vend_id
+            $j->on('v.vend_code', '=', 'p.vend_id');
+            if ($companyId) {
+                $j->where('v.company_id', $companyId);
+            }
+        })
+        ->when($q !== '', function ($qr) use ($qq) {
+            $qr->where(function ($w) use ($qq) {
+                $w->whereRaw('LOWER(p.cp_no) LIKE ?',        ["%{$qq}%"])
+                  ->orWhereRaw('LOWER(p.vend_id) LIKE ?',     ["%{$qq}%"])
+                  ->orWhereRaw('LOWER(v.vend_name) LIKE ?',   ["%{$qq}%"]);
+            });
+        })
+        ->orderByDesc('p.cp_no')
+        ->limit(50)
+        ->get([
+            'p.id',
+            'p.cp_no',
+            'p.vend_id',
+            'p.purchase_date',
+            'p.purchase_amount',
+            'p.is_cancel',
+            'p.sugar_type',
+            'p.crop_year',
+            'p.mill_id',
+            'p.booking_no',
+            DB::raw("COALESCE(v.vend_name,'') as vend_name"),
+        ]);
 
-        return response()->json($rows);
-    }
+    return response()->json($rows);
+}
+
 
     // 8) Dropdowns
     public function vendors(Request $req)
@@ -317,30 +328,32 @@ class PurchaseJournalController extends Controller
     }
 
     // 9) Cancel / Uncancel
-    public function updateCancel(Request $req)
-    {
-        $data = $req->validate([
-            'id' => ['required','integer','exists:cash_purchase,id'],
-            'flag' => ['required','in:0,1'],
-        ]);
-        $val = $data['flag'] == '1' ? 'y' : 'n';
-        CashPurchase::where('id',$data['id'])->update(['is_cancel'=>$val]);
-        return response()->json(['ok'=>true,'is_cancel'=>$val]);
-    }
+public function updateCancel(Request $req)
+{
+    $data = $req->validate([
+        'id'   => ['required','integer','exists:cash_purchase,id'],
+        'flag' => ['required','in:0,1'],
+    ]);
+    $val = $data['flag'] === '1' ? 'Y' : 'N';   // <-- UPPERCASE
+    CashPurchase::where('id',$data['id'])->update(['is_cancel' => $val]);
+    return response()->json(['ok'=>true,'is_cancel'=>$val]);
+}
 
     // 10) Print/Download PDF (unchanged)
     public function formPdf(Request $request, $id)
     {
+        // In PurchaseJournalController@formPdf (the query that builds $header)
         $header = DB::table('cash_purchase as cp')
-            ->join('vendor_list as v', 'cp.vendor_id', '=', 'v.vendor_id')
+            ->leftJoin('vendor_list as v', 'cp.vend_id', '=', 'v.vend_code') // <-- FIX HERE
             ->select(
-                'cp.id','cp.cp_no','cp.vendor_id','cp.purchase_amount',
-                'cp.explanation','cp.is_cancel','cp.invoice_no',
+                'cp.id','cp.cp_no','cp.vend_id','cp.purchase_amount',
+                'cp.explanation','cp.is_cancel',
                 DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
-                'v.vendor_name','cp.workstation_id','cp.user_id','cp.created_at'
+                'v.vend_name','cp.workstation_id','cp.user_id','cp.created_at'
             )
             ->where('cp.id', $id)
             ->first();
+
 
         if (!$header || $header->is_cancel === 'y') {
             abort(404, 'Purchase Voucher not found or cancelled');
@@ -384,27 +397,20 @@ class PurchaseJournalController extends Controller
 <tr><td colspan="5"></td></tr>
 <tr>
   <td width="65%"></td>
-  <td width="20%" align="left"><font size="10"><b>PV Number:</b></font></td>
+  <td width="20%" align="left"><font size="10"><b>RR Number:</b></font></td>
   <td width="15%" align="left"><font size="14"><b><u>{$header->cp_no}</u></b></font></td>
 </tr>
 <tr>
   <td width="65%"></td>
-  <td width="20%" align="left"><font size="10"><b>Invoice Date:</b></font></td>
+  <td width="20%" align="left"><font size="10"><b>Receipt Date:</b></font></td>
   <td width="15%"><font size="10"><u>{$header->purchase_date}</u></font></td>
 </tr>
-<tr>
-  <td width="65%"></td>
-  <td width="20%" align="left"><font size="10"><b>Vendor Invoice #:</b></font></td>
-  <td width="15%"><font size="10"><u>{$header->invoice_no}</u></font></td>
-</tr>
+
 <tr>
   <td width="15%"><font size="10"><b>VENDOR:</b></font></td>
-  <td width="80%" colspan="4"><font size="10"><u>{$header->vendor_name}</u></font></td>
+  <td width="80%" colspan="4"><font size="10"><u>{$header->vend_name}</u></font></td>
 </tr>
-<tr>
-  <td width="15%"><font size="10"><b>PESOS:</b></font></td>
-  <td width="80%" colspan="4"><font size="10"><u>$formattedDebit</u></font></td>
-</tr>
+
 </table>
 
 <table><tr><td><br><br></td></tr></table>
@@ -514,7 +520,7 @@ EOD;
             ->get([
                 'id',
                 'cp_no',
-                'vendor_id',
+                'vend_id',
                 DB::raw('COALESCE(sum_debit,0)  as sum_debit'),
                 DB::raw('COALESCE(sum_credit,0) as sum_credit'),
             ]);

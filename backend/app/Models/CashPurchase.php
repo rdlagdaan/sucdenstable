@@ -9,8 +9,22 @@ class CashPurchase extends Model
     protected $table = 'cash_purchase';
 
     protected $fillable = [
-        'cp_no','vendor_id','invoice_no','purchase_date','purchase_amount',
-        'explanation','is_cancel','workstation_id','user_id','company_id',
+        'cp_no',
+        'vend_id',          // <-- IMPORTANT
+        'purchase_date',
+        'explanation',
+        'sugar_type',
+        'crop_year',
+        'mill_id',
+        'booking_no',
+        'purchase_amount',
+        'is_cancel',
+        'company_id',
+        'workstation_id',
+        'user_id',
+        'sum_debit',
+        'sum_credit',
+        'is_balanced',
     ];
 
     protected $casts = [

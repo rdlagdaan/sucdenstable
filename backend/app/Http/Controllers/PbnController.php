@@ -8,38 +8,44 @@ use Illuminate\Support\Facades\DB;
 class PbnController extends Controller
 {
     // PBN # combobox (headers: PBN No, Sugar Type, Vendor ID, Vendor Name, Crop Year, PBN Date)
-public function list(Request $req)
-{
-    $q = trim($req->query('q', ''));
-    $posted = $req->query('include_posted'); // no default → only filter if sent
+    public function list(Request $req)
+    {
+        $req->validate([
+            'company_id' => 'required|integer',
+            'q'          => 'nullable|string',
+            'vend_code'  => 'nullable|string',
+            'sugar_type' => 'nullable|string',
+            'crop_year'  => 'nullable|string',
+        ]);
 
-    $rows = DB::table('pbn_entry as p')
-        ->select([
-            'p.pbn_number',
-            'p.sugar_type',
-            'p.vend_code as vendor_code',
-            'p.vendor_name',
-            'p.crop_year',
-            'p.pbn_date',
-        ])
-        ->when($posted !== null, fn($w) => $w->where('p.posted_flag', (int) $posted))
-        ->when($q !== '', function ($w) use ($q) {
-            $like = "%{$q}%";
-            $w->where(function ($x) use ($like) {
-                // Use ILIKE (PostgreSQL) so search is case-insensitive
-                $x->whereRaw('p.pbn_number ILIKE ?', [$like])
-                  ->orWhereRaw('p.vend_code ILIKE ?', [$like])     // Vendor ID
-                  ->orWhereRaw('p.vendor_name ILIKE ?', [$like])   // Vendor Name
-                  ->orWhereRaw('CAST(p.crop_year AS TEXT) ILIKE ?', [$like])
-                  ->orWhereRaw('TO_CHAR(p.pbn_date, \'YYYY-MM-DD\') ILIKE ?', [$like]);
-            });
-        })
-        ->orderBy('p.pbn_date', 'asc')
-        ->limit(100)
-        ->get();
+        $companyId = (int) $req->query('company_id');
+        $q         = trim((string) $req->query('q', ''));
+        $vendCode  = $req->query('vend_code');
+        $sugarType = $req->query('sugar_type');
+        $cropYear  = $req->query('crop_year');
 
-    return response()->json($rows);
-}
+        $rows = DB::table('pbn_entry')
+            ->where('company_id', $companyId)
+            ->where('posted_flag', 1)                 // ✅ posted only
+            ->when($vendCode,  fn($w) => $w->where('vend_code',  $vendCode))
+            ->when($sugarType, fn($w) => $w->where('sugar_type', $sugarType))
+            ->when($cropYear,  fn($w) => $w->where('crop_year',  $cropYear))
+            ->when($q !== '', function ($w) use ($q) {
+                $qq = strtolower($q);
+                $w->where(function ($k) use ($qq) {
+                    $k->whereRaw('LOWER(pbn_number) LIKE ?', ["%{$qq}%"])
+                      ->orWhereRaw("TO_CHAR(pbn_date,'YYYY-MM-DD') LIKE ?", ["%{$qq}%"]);
+                });
+            })
+            ->orderByDesc('pbn_date')
+            ->limit(100)
+            ->get([
+                'id','pbn_number','pbn_date',
+                'sugar_type','crop_year','vend_code','vendor_name',
+            ]);
+
+        return response()->json($rows);
+    }
 
 
 

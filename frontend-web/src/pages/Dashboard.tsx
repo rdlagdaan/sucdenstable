@@ -20,6 +20,8 @@ const Receiving_entry_form = lazy(() => import('./components/quedan_tracking/Rec
 const Sales_journal_form = lazy(() => import('./components/accounting/Sales_journal_form'));
 const Cash_receipts_form = lazy(() => import('./components/accounting/Cash_receipts_form'));
 const Purchase_journal_form = lazy(() => import('./components/accounting/Purchase_journal_form'));
+const Cash_disbursement_form = lazy(() => import('./components/accounting/Cash_disbursement_form'));
+const General_accounting_form = lazy(() => import('./components/accounting/General_accounting_form'));
 
 import type { JSX } from 'react';
 
@@ -41,6 +43,8 @@ const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>>
   sales_journal_forms: Sales_journal_form, 
   cash_receipts_forms: Cash_receipts_form,
   purchase_journal_forms: Purchase_journal_form,
+  cash_disbursement_forms: Cash_disbursement_form,
+  general_accounting_forms: General_accounting_form,
   // You can add more components later
 };
 

@@ -1,0 +1,466 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\GeneralAccounting;
+use App\Models\GeneralAccountingDetail;
+use App\Models\AccountCode;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+
+class MyJournalVoucherPDF extends \TCPDF
+{
+    public $journalDate;
+    public $journalTime;
+    public function setDataJournalDate($d) { $this->journalDate = $d; }
+    public function setDataJournalTime($t) { $this->journalTime = $t; }
+
+    public function Header()
+    {
+        $candidates = [
+            public_path('images/sucdenLogo.jpg'),
+            public_path('images/sucdenLogo.png'),
+            public_path('sucdenLogo.jpg'),
+            public_path('sucdenLogo.png'),
+        ];
+        foreach ($candidates as $img) {
+            if ($img && is_file($img)) {
+                $ext = strtoupper(pathinfo($img, PATHINFO_EXTENSION));
+                $this->Image($img, 15, 10, 50, '', $ext, '', 'T', false, 300, '', false, false, 0, false, false, false);
+                break;
+            }
+        }
+    }
+
+    public function Footer()
+    {
+        $this->SetY(-50);
+        $this->SetFont('helvetica','I',8);
+        $currentDate = date('M d, Y');
+        $currentTime = date('h:i:sa');
+
+        $html = '
+        <table border="0"><tr>
+          <td width="70%">
+            <table border="1" cellpadding="5"><tr>
+              <td><font size="8">Prepared:<br><br><br><br><br>administrator</font></td>
+              <td><font size="8">Checked:<br><br><br><br><br></font></td>
+              <td><font size="8">Approved:<br><br><br><br><br></font></td>
+              <td><font size="8">Posted by:<br><br><br><br><br></font></td>
+            </tr></table>
+          </td>
+          <td width="5%"></td>
+          <td width="25%"></td>
+        </tr></table>
+        <br>
+        <table border="0">
+          <tr>
+            <td width="10%"><font size="8">Printed:</font></td>
+            <td width="15%"><font size="8">'.$currentDate.'</font></td>
+            <td width="15%"><font size="8">'.$currentTime.'</font></td>
+            <td width="60%"></td>
+          </tr>
+          <tr>
+            <td><font size="8">Created:</font></td>
+            <td><font size="8">'.$this->journalDate.'</font></td>
+            <td><font size="8">'.$this->journalTime.'</font></td>
+            <td></td>
+          </tr>
+        </table>';
+        $this->writeHTML($html, true, false, false, false, '');
+    }
+}
+
+class GeneralAccountingController extends Controller
+{
+    /** 1) Generate next GA number */
+    public function generateGaNumber(Request $req)
+    {
+        $companyId = $req->query('company_id');
+
+        $last = GeneralAccounting::when($companyId, fn($q) => $q->where('company_id', $companyId))
+            ->orderBy('ga_no', 'desc')
+            ->value('ga_no');
+
+        $base = is_numeric($last) ? (int)$last : 100000;
+        return response()->json(['ga_no' => (string)($base + 1)]);
+    }
+
+    /** 2) Create main header */
+    public function storeMain(Request $req)
+    {
+        $data = $req->validate([
+            'ga_no'         => ['nullable','string','max:25'],
+            'gen_acct_date' => ['required','date'],
+            'explanation'   => ['required','string','max:1000'],
+            'company_id'    => ['required','integer'],
+            'workstation_id'=> ['nullable','string','max:25'],
+            'user_id'       => ['nullable','integer'],
+            'type'          => ['nullable','string','max:2'], // e.g. 'g' (legacy style)
+        ]);
+
+        if (empty($data['ga_no'])) {
+            $next = $this->generateGaNumber(new Request(['company_id' => $data['company_id']]));
+            $data['ga_no'] = $next->getData()->ga_no ?? null;
+        }
+
+        $data['gen_acct_amount'] = 0;
+        $data['sum_debit'] = 0;
+        $data['sum_credit'] = 0;
+        $data['is_balanced'] = false;
+        $data['is_cancel'] = 'n';
+
+        $main = GeneralAccounting::create($data);
+
+        return response()->json([
+            'id'    => $main->id,
+            'ga_no' => $main->ga_no,
+        ]);
+    }
+
+    /** 3) Insert detail line (enforce validations) */
+    public function saveDetail(Request $req)
+    {
+        $payload = $req->validate([
+            'transaction_id' => ['required','integer','exists:general_accounting,id'],
+            'acct_code'      => ['required','string','max:75'],
+            'debit'          => ['nullable','numeric'],
+            'credit'         => ['nullable','numeric'],
+            'company_id'     => ['required','integer'],
+            'user_id'        => ['nullable','integer'],
+            'workstation_id' => ['nullable','string','max:25'],
+        ]);
+
+        $d = (float)($payload['debit'] ?? 0);
+        $c = (float)($payload['credit'] ?? 0);
+        if (($d > 0 && $c > 0) || ($d <= 0 && $c <= 0)) {
+            return response()->json(['message' => 'Provide either debit OR credit (not both/zero).'], 422);
+        }
+
+        $acctOk = AccountCode::where('acct_code', $payload['acct_code'])
+            ->where('active_flag', 1)->exists();
+        if (!$acctOk) return response()->json(['message' => 'Invalid or inactive account.'], 422);
+
+        $dup = GeneralAccountingDetail::where('transaction_id',$payload['transaction_id'])
+            ->where('acct_code',$payload['acct_code'])->exists();
+        if ($dup) return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
+
+        $payload['general_accounting_id'] = $payload['transaction_id'];
+
+        $detail = GeneralAccountingDetail::create($payload);
+        $totals = $this->recalcTotals($payload['transaction_id']);
+
+        return response()->json(['detail_id' => $detail->id, 'totals' => $totals]);
+    }
+
+    /** 4) Update detail */
+    public function updateDetail(Request $req)
+    {
+        $payload = $req->validate([
+            'id'             => ['required','integer','exists:general_accounting_details,id'],
+            'transaction_id' => ['required','integer','exists:general_accounting,id'],
+            'acct_code'      => ['nullable','string','max:75'],
+            'debit'          => ['nullable','numeric'],
+            'credit'         => ['nullable','numeric'],
+        ]);
+
+        $row = GeneralAccountingDetail::find($payload['id']);
+        if (!$row) return response()->json(['message'=>'Detail not found.'], 404);
+
+        $apply = [];
+        if (isset($payload['acct_code'])) $apply['acct_code'] = $payload['acct_code'];
+        if (isset($payload['debit']))     $apply['debit']     = $payload['debit'];
+        if (isset($payload['credit']))    $apply['credit']    = $payload['credit'];
+
+        if (array_key_exists('debit',$apply) && array_key_exists('credit',$apply)) {
+            $d = (float)$apply['debit']; $c = (float)$apply['credit'];
+            if ($d > 0 && $c > 0) return response()->json(['message'=>'Provide either debit OR credit.'], 422);
+            if ($d <= 0 && $c <= 0) return response()->json(['message'=>'Debit or credit is required.'], 422);
+        }
+
+        if (isset($apply['acct_code'])) {
+            $acctOk = AccountCode::where('acct_code',$apply['acct_code'])->where('active_flag',1)->exists();
+            if (!$acctOk) return response()->json(['message'=>'Invalid or inactive account.'], 422);
+            $dup = GeneralAccountingDetail::where('transaction_id',$payload['transaction_id'])
+                    ->where('acct_code',$apply['acct_code'])
+                    ->where('id','<>',$payload['id'])
+                    ->exists();
+            if ($dup) return response()->json(['message'=>'Duplicate account code for this transaction.'], 422);
+        }
+
+        $row->update($apply);
+        $totals = $this->recalcTotals($payload['transaction_id']);
+        return response()->json(['ok'=>true,'totals'=>$totals]);
+    }
+
+    /** 5) Delete detail */
+    public function deleteDetail(Request $req)
+    {
+        $payload = $req->validate([
+            'id'             => ['required','integer','exists:general_accounting_details,id'],
+            'transaction_id' => ['required','integer','exists:general_accounting,id'],
+        ]);
+        GeneralAccountingDetail::where('id',$payload['id'])->delete();
+        $totals = $this->recalcTotals($payload['transaction_id']);
+        return response()->json(['ok'=>true,'totals'=>$totals]);
+    }
+
+    /** 6) Show main + details */
+    public function show($id, Request $req)
+    {
+        $companyId = $req->query('company_id');
+
+        $main = GeneralAccounting::when($companyId, fn($q)=>$q->where('company_id',$companyId))
+            ->findOrFail($id);
+
+        $details = GeneralAccountingDetail::from('general_accounting_details as d')
+            ->leftJoin('account_code as a','d.acct_code','=','a.acct_code')
+            ->where('d.transaction_id',$main->id)
+            ->orderBy('d.id')
+            ->get([
+                'd.id','d.transaction_id','d.acct_code',
+                DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
+                'd.debit','d.credit'
+            ]);
+
+        return response()->json(['main'=>$main,'details'=>$details]);
+    }
+
+    /** 7) List for JE dropdown */
+    public function list(Request $req)
+    {
+        $companyId = $req->query('company_id');
+        $q = trim((string)$req->query('q',''));
+        $qq = strtolower($q);
+
+        $rows = GeneralAccounting::when($companyId, fn($qr)=>$qr->where('company_id',$companyId))
+            ->when($q !== '', function($qr) use ($qq) {
+                $qr->where(function($w) use ($qq) {
+                    $w->whereRaw('LOWER(ga_no) LIKE ?', ["%{$qq}%"])
+                      ->orWhereRaw('LOWER(explanation) LIKE ?', ["%{$qq}%"]);
+                });
+            })
+            ->orderByDesc('ga_no')
+            ->limit(50)
+            ->get([
+                'id','ga_no','gen_acct_date','explanation','sum_debit','sum_credit','is_cancel'
+            ]);
+
+        return response()->json($rows);
+    }
+
+    /** 8) Accounts (active) for autocomplete */
+    public function accounts(Request $req)
+    {
+        $companyId = $req->query('company_id');
+        $q = trim((string)$req->query('q',''));
+
+        $rows = AccountCode::where('active_flag',1)
+            ->when($companyId, fn($w)=>$w->where('company_id',$companyId))
+            ->when($q, fn($w)=>$w->where(function($k) use ($q){
+                $k->where('acct_code','like',"%$q%")->orWhere('acct_desc','like',"%$q%");
+            }))
+            ->orderBy('acct_desc')
+            ->limit(200)
+            ->get(['acct_code','acct_desc']);
+
+        return response()->json($rows);
+    }
+
+    /** 9) Cancel / Uncancel */
+    public function updateCancel(Request $req)
+    {
+        $data = $req->validate([
+            'id'   => ['required','integer','exists:general_accounting,id'],
+            'flag' => ['required','in:0,1'], // 1 = cancel (y), 0 = uncancel (n)
+        ]);
+        $val = $data['flag'] === '1' ? 'y' : 'n';
+        GeneralAccounting::where('id',$data['id'])->update(['is_cancel'=>$val]);
+        return response()->json(['ok'=>true,'is_cancel'=>$val]);
+    }
+
+    /** 10) Delete main (cascade details) */
+    public function destroy($id)
+    {
+        $main = GeneralAccounting::findOrFail($id);
+        DB::transaction(function() use ($main){
+            GeneralAccountingDetail::where('transaction_id',$main->id)->delete();
+            $main->delete();
+        });
+        return response()->json(['ok'=>true]);
+    }
+
+    /** 11) Print Journal Voucher PDF */
+    public function formPdf($id, Request $req)
+    {
+        $companyId = $req->query('company_id');
+
+        $header = DB::table('general_accounting as g')
+            ->select(
+                'g.id','g.ga_no','g.explanation','g.is_cancel',
+                DB::raw("to_char(g.gen_acct_date, 'MM/DD/YYYY') as gen_acct_date"),
+                'g.amount_in_words','g.workstation_id','g.user_id','g.created_at',
+                DB::raw('COALESCE(g.sum_debit,0) as sum_debit'),
+                DB::raw('COALESCE(g.sum_credit,0) as sum_credit'),
+                'g.is_balanced'
+            )
+            ->when($companyId, fn($q)=>$q->where('g.company_id',$companyId))
+            ->where('g.id',$id)
+            ->first();
+
+        if (!$header || $header->is_cancel === 'y') {
+            abort(404, 'Journal Voucher not found or cancelled');
+        }
+        if (!$header->is_balanced || abs(($header->sum_debit ?? 0) - ($header->sum_credit ?? 0)) > 0.005) {
+            $html = sprintf(
+                '<!doctype html><meta charset="utf-8">
+                <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+                <h2>Cannot print Journal Voucher</h2>
+                <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
+                <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+                number_format((float)$header->sum_debit, 2),
+                number_format((float)$header->sum_credit, 2)
+            );
+            return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+        }
+
+        $details = DB::table('general_accounting_details as d')
+            ->join('account_code as a','d.acct_code','=','a.acct_code')
+            ->where('d.transaction_id',$id)
+            ->orderBy('d.id')
+            ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
+
+        $totalDebit  = $details->sum('debit');
+        $totalCredit = $details->sum('credit');
+
+        $pdf = new MyJournalVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
+        $pdf->setPrintHeader(true);
+        $pdf->SetHeaderMargin(8);
+        $pdf->SetMargins(15,30,15);
+        $pdf->AddPage();
+        $pdf->SetFont('helvetica','',7);
+
+        $pdf->setDataJournalDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
+        $pdf->setDataJournalTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
+
+        $formattedDebit  = number_format($totalDebit, 2);
+        $formattedCredit = number_format($totalCredit, 2);
+
+        $tbl = <<<EOD
+<br><br>
+<table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
+<tr>
+  <td width="30%"></td>
+  <td width="40%" align="center"><div><font size="16"><b>JOURNAL VOUCHER</b></font></div></td>
+  <td width="30%"></td>
+</tr>
+<tr><td colspan="3"></td></tr>
+<tr>
+  <td width="40%"><font size="10"><b>Date:</b> {$header->gen_acct_date}</font></td>
+  <td width="20%"></td>
+  <td width="40%" align="left"><font size="14"><b><u>JE - {$header->ga_no}</u></b></font></td>
+</tr>
+</table>
+
+<table><tr><td><br><br></td></tr></table>
+<table border="1" cellspacing="0" cellpadding="5">
+  <tr><td align="center"><font size="10"><b>EXPLANATION</b></font></td></tr>
+  <tr><td height="80" valign="top"><font size="10">{$header->explanation}</font></td></tr>
+</table>
+
+<table><tr><td><br><br></td></tr></table>
+<table border="1" cellpadding="3" cellspacing="0" nobr="true" width="100%">
+ <tr>
+  <td width="30%" align="center"><font size="10"><b>ACCOUNT</b></font></td>
+  <td width="40%" align="center"><font size="10"><b>GL ACCOUNT</b></font></td>
+  <td width="15%" align="center"><font size="10"><b>DEBIT</b></font></td>
+  <td width="15%" align="center"><font size="10"><b>CREDIT</b></font></td>
+ </tr>
+EOD;
+
+        foreach ($details as $d) {
+            $debit  = $d->debit  ? number_format($d->debit, 2) : '';
+            $credit = $d->credit ? number_format($d->credit, 2) : '';
+            $tbl .= <<<EOD
+  <tr>
+    <td align="left"><font size="10">{$d->acct_code}</font></td>
+    <td align="left"><font size="10">{$d->acct_desc}</font></td>
+    <td align="right"><font size="10">{$debit}</font></td>
+    <td align="right"><font size="10">{$credit}</font></td>
+  </tr>
+EOD;
+        }
+        $tbl .= <<<EOD
+  <tr>
+    <td align="left"></td>
+    <td align="left"><font size="10">TOTAL</font></td>
+    <td align="right"><font size="10">{$formattedDebit}</font></td>
+    <td align="right"><font size="10">{$formattedCredit}</font></td>
+  </tr>
+</table>
+EOD;
+
+        $pdf->writeHTML($tbl, true, false, false, false, '');
+
+        $pdfContent = $pdf->Output('journalVoucher.pdf', 'S');
+        return response($pdfContent, 200)
+            ->header('Content-Type', 'application/pdf')
+            ->header('Content-Disposition', 'inline; filename="journalVoucher.pdf"');
+    }
+
+    /** 12) Excel stub (optional) */
+    public function formExcel($id)
+    {
+        return response('Excel stub – implement renderer', 200);
+    }
+
+    /** 13) Unbalanced helpers (optional, GA-only) */
+    public function unbalancedExists(Request $req)
+    {
+        $companyId = $req->query('company_id');
+        $exists = GeneralAccounting::when($companyId, fn($q)=>$q->where('company_id',$companyId))
+            ->where('is_balanced', false)
+            ->exists();
+        return response()->json(['exists' => $exists]);
+    }
+
+    public function unbalanced(Request $req)
+    {
+        $companyId = $req->query('company_id');
+        $limit = (int) $req->query('limit', 20);
+
+        $rows = GeneralAccounting::when($companyId, fn($q)=>$q->where('company_id',$companyId))
+            ->where('is_balanced', false)
+            ->orderByDesc('updated_at')
+            ->limit($limit)
+            ->get([
+                'id',
+                'ga_no',
+                DB::raw('COALESCE(sum_debit,0)  as sum_debit'),
+                DB::raw('COALESCE(sum_credit,0) as sum_credit'),
+            ]);
+
+        return response()->json(['items' => $rows]);
+    }
+
+    /** ---- helper ---- */
+    protected function recalcTotals(int $transactionId): array
+    {
+        $tot = GeneralAccountingDetail::where('transaction_id',$transactionId)
+            ->selectRaw('COALESCE(SUM(debit),0) as sum_debit, COALESCE(SUM(credit),0) as sum_credit')
+            ->first();
+
+        $sumDebit  = round((float)($tot->sum_debit ?? 0), 2);
+        $sumCredit = round((float)($tot->sum_credit ?? 0), 2);
+        $balanced  = abs($sumDebit - $sumCredit) < 0.005;
+
+        GeneralAccounting::where('id',$transactionId)->update([
+            'gen_acct_amount' => $sumDebit, // header “Amount” = total DEBIT
+            'sum_debit'       => $sumDebit,
+            'sum_credit'      => $sumCredit,
+            'is_balanced'     => $balanced,
+        ]);
+
+        return ['debit'=>$sumDebit,'credit'=>$sumCredit,'balanced'=>$balanced];
+    }
+}

@@ -26,6 +26,15 @@ Handsontable.cellTypes.registerCellType('numeric', NumericCellType);
 const onlyCode = (v?: string) => (v || '').split(';')[0];
 const fmtDate = (d?: string) => (!d ? '' : (new Date(d).toString() === 'Invalid Date' ? (d || '').split('T')[0] : new Date(d).toISOString().slice(0,10)));
 
+type SalesDetailRow = {
+  id?: number;
+  acct_code: string;      // stores "code;desc"
+  acct_desc?: string;
+  debit?: number;
+  credit?: number;
+  persisted?: boolean;
+};
+
 type PurchaseDetailRow = {
   id?: number;
   acct_code: string;
@@ -38,7 +47,7 @@ type PurchaseDetailRow = {
 type TxOption = {
   id: number | string;
   cp_no: string;
-  vendor_id: string;
+  vend_id: string;
   purchase_date: string;
   purchase_amount: number;
   invoice_no: string;
@@ -58,7 +67,7 @@ export default function Purchase_journal_form() {
   const [millCode, setMillCode] = useState('');
   const [explanation, setExplanation] = useState('');
   const [bookingNo, setBookingNo] = useState('');
-  const [invoiceNo, setInvoiceNo] = useState('');
+  const [_invoiceNo, setInvoiceNo] = useState('');
   const [mainId, setMainId] = useState<number | null>(null);
 
   const [locked, setLocked] = useState(false);
@@ -91,6 +100,12 @@ export default function Purchase_journal_form() {
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [pdfUrl, setPdfUrl] = useState<string | undefined>(undefined);
   const [showPdf, setShowPdf] = useState(false);
+
+    // state for PBN dropdown
+    const [pbns, setPbns] = useState<DropdownItem[]>([]);
+    const [pbnSearch, setPbnSearch] = useState('');
+
+
 
   // layout helpers
   const detailsWrapRef = useRef<HTMLDivElement>(null);
@@ -127,7 +142,7 @@ export default function Purchase_journal_form() {
         // Vendors: controller already shapes { code, label, description }
         const { data } = await napi.get('/api/pj/vendors', { params: { company_id: user?.company_id }});
         const items: DropdownItem[] = (data || []).map((v: any) => ({
-          code: String(v.code ?? v.vend_code ?? v.vendor_id ?? ''),
+          code: String(v.code ?? v.vend_code ?? v.vend_id ?? ''),
           description: v.description ?? v.vend_name ?? v.vendor_name ?? '',
           label: v.label ?? v.code ?? '',
         }));
@@ -245,12 +260,12 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     return (txOptions || []).map((o) => ({
       code: String(o.id),
       cp_no: o.cp_no,
-      vendor_id: o.vendor_id,
+      vend_id: o.vend_id,
       purchase_date: fmtDate(o.purchase_date),
       purchase_amount: o.purchase_amount,
       invoice_no: o.invoice_no,
       label: o.cp_no,
-      description: o.vendor_id,
+      description: o.vend_id,
     }));
   }, [txOptions]);
 
@@ -284,7 +299,7 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
         const htmlRows = items.map((r: any) => `
           <tr>
             <td style="padding:6px 8px">${r.cp_no}</td>
-            <td style="padding:6px 8px">${r.vendor_id}</td>
+            <td style="padding:6px 8px">${r.vend_id}</td>
             <td style="padding:6px 8px;text-align:right">${Number(r.sum_debit || 0).toLocaleString()}</td>
             <td style="padding:6px 8px;text-align:right">${Number(r.sum_credit || 0).toLocaleString()}</td>
           </tr>`).join('');
@@ -315,10 +330,9 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
 
       const res = await napi.post('/api/purchase/save-main', {
         cp_no: nextNo,
-        vendor_id: vendorId,
+        vend_id: vendorId,
         purchase_date: purchaseDate,
         explanation,
-        invoice_no: invoiceNo,
         company_id: user?.company_id,
         user_id: user?.id,
 
@@ -408,8 +422,8 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
       const m = data.main ?? data;
       setMainId(m.id);
       setCpNo(m.cp_no);
-      setVendorId(String(m.vendor_id || ''));
-      const selV = vendors.find((v) => String(v.code) === String(m.vendor_id));
+      setVendorId(String(m.vend_id || ''));
+      const selV = vendors.find((v) => String(v.code) === String(m.vend_id));
       setVendorName(selV?.description || selV?.label || '');
       setPurchaseDate(fmtDate(m.purchase_date));
       setExplanation(m.explanation ?? '');
@@ -474,8 +488,20 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
   };
 
 
+const getTotals = (rows: SalesDetailRow[]) => {
+  const sumD = rows.reduce((t, r) => t + (Number(r.debit)  || 0), 0);
+  const sumC = rows.reduce((t, r) => t + (Number(r.credit) || 0), 0);
+  const balanced = Math.abs(sumD - sumC) < 0.005; // 0.5 cent tolerance
+  return { sumD, sumC, balanced };
+};
+
+const fmtMoney = (n: number) =>
+  (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+
 // Start a brand-new transaction
 const handleNew = async () => {
+  // any meaningful content in the grid?
   const hasAnyDetail = tableData.some(
     r =>
       (r.acct_code && r.acct_code.trim() !== '') ||
@@ -483,19 +509,80 @@ const handleNew = async () => {
       (Number(r.credit) || 0) > 0
   );
 
-  // Simple confirmation; clears the form
-  const ok = await Swal.fire({
-    title: 'Start a new transaction?',
-    text: hasAnyDetail ? 'This will clear the current form.' : '',
-    icon: 'question',
-    showCancelButton: true,
-    confirmButtonText: 'Yes, New',
-  });
-  if (!ok.isConfirmed) return;
+  if (hasAnyDetail) {
+    const { sumD, sumC, balanced } = getTotals(tableData);
 
+    if (!balanced) {
+      await Swal.fire({
+        title: 'Transaction not balanced',
+        html: `Debit <b>${fmtMoney(sumD)}</b> must equal Credit <b>${fmtMoney(sumC)}</b> before starting a new one.`,
+        icon: 'error',
+        confirmButtonText: 'OK',
+      });
+      return; // stop — user must balance first
+    }
+
+    const ok = await Swal.fire({
+      title: 'Start a new transaction?',
+      text: 'This will clear the current form.',
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonText: 'Yes, New',
+    });
+    if (!ok.isConfirmed) return;
+  } else {
+    // No details — still confirm to avoid accidental clearing
+    const ok = await Swal.fire({
+      title: 'Start a new transaction?',
+      text: 'This will clear the current form.',
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonText: 'Yes, New',
+    });
+    if (!ok.isConfirmed) return;
+  }
+
+  // Clear the form (use your existing helper)
   resetForm();
   toast.success('Form is ready for a new entry.');
 };
+
+
+
+const fmtMDY = (d?: string) => d ? new Date(d).toLocaleDateString() : '';
+
+const loadPbns = async () => {
+  try {
+    const params: any = {
+      company_id: user?.company_id || '',
+      q: pbnSearch || '',
+    };
+    if (vendorId)  params.vend_code  = vendorId;   // your vendor dropdown stores vend_code
+    if (sugarType) params.sugar_type = sugarType;
+    if (cropYear)  params.crop_year  = cropYear;
+
+    const { data } = await napi.get('/api/pbn/list', { params });
+
+    const items: DropdownItem[] = (Array.isArray(data) ? data : []).map((r: any) => ({
+      code: String(r.pbn_number),              // what you’ll save into booking_no
+      label: String(r.pbn_number),
+      description: fmtMDY(r.pbn_date),         // 2nd column
+      // (keep extras if you ever want to show more columns)
+      vendor_name: r.vendor_name,
+      vend_code:   r.vend_code,
+      sugar_type:  r.sugar_type,
+      crop_year:   r.crop_year,
+    }));
+    setPbns(items);
+  } catch {
+    setPbns([]);
+  }
+};
+
+// Load when key filters or search change
+useEffect(() => { loadPbns(); },
+  [user?.company_id, vendorId, sugarType, cropYear, pbnSearch]);
+
 
 
 
@@ -509,10 +596,6 @@ const handleNew = async () => {
       <div className="bg-blue-50 shadow-md rounded-lg p-6 space-y-4 border border-blue-300">
         <h2 className="text-xl font-bold text-blue-800 mb-2">PURCHASE JOURNAL</h2>
 
-        {/* DEBUG – remove later */}
-        <div className="text-xs text-gray-500">
-          accounts: {accounts.length} | hotEnabled: {String(hotEnabled)} | locked: {String(locked)} | gridLocked: {String(gridLocked)}
-        </div>
 
        {/* Header form (thin, 2-column layout) */}
 <div className="grid grid-cols-2 gap-4">
@@ -625,12 +708,18 @@ const handleNew = async () => {
 
   {/* Row 5 — Booking # (single field) */}
   <div>
-    <label className="block mb-1">Booking #</label>
-    <input
-      value={bookingNo}
-      disabled={locked}
-      onChange={(e) => setBookingNo(e.target.value)}
-      className="w-full border p-2 bg-blue-100 text-blue-900"
+{/* Row 5 — Booking # */}
+    <DropdownWithHeaders
+    label="Booking #"
+    value={bookingNo}
+    onChange={setBookingNo}
+    items={pbns}
+    search={pbnSearch}
+    onSearchChange={setPbnSearch}
+    headers={["PBN No","PBN Date"]}          // 2 columns like your old app
+    columnWidths={["140px","140px"]}
+    dropdownPositionStyle={{ width: '360px' }}
+    inputClassName="p-2 text-sm bg-white"
     />
   </div>
   {/* spacer to keep grid alignment */}

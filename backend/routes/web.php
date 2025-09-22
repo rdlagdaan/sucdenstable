@@ -198,6 +198,57 @@ Route::middleware(['web'])->group(function () {
     Route::get('/api/purchase/unbalanced-exists', [PurchaseJournalController::class, 'unbalancedExists']);
     Route::get('/api/purchase/unbalanced',        [PurchaseJournalController::class, 'unbalanced']);
 
+    // Cash Disbursement
+    Route::get('/api/cash-disbursement/generate-cd-number', [\App\Http\Controllers\CashDisbursementController::class, 'generateCdNumber']);
+    Route::post('/api/cash-disbursement/save-main',          [\App\Http\Controllers\CashDisbursementController::class, 'storeMain']);
+    Route::post('/api/cash-disbursement/save-detail',        [\App\Http\Controllers\CashDisbursementController::class, 'saveDetail']);
+    Route::post('/api/cash-disbursement/update-detail',      [\App\Http\Controllers\CashDisbursementController::class, 'updateDetail']);
+    Route::post('/api/cash-disbursement/delete-detail',      [\App\Http\Controllers\CashDisbursementController::class, 'deleteDetail']);
+    Route::delete('/api/cash-disbursement/{id}',             [\App\Http\Controllers\CashDisbursementController::class, 'destroy']);
+    Route::get('/api/cash-disbursement/list',                [\App\Http\Controllers\CashDisbursementController::class, 'list']);
+    Route::get('/api/cash-disbursement/{id}',                [\App\Http\Controllers\CashDisbursementController::class, 'show'])->whereNumber('id');
+    Route::post('/api/cash-disbursement/cancel',             [\App\Http\Controllers\CashDisbursementController::class, 'updateCancel']);
+
+    // dropdowns
+    Route::get('/api/cd/vendors',         [\App\Http\Controllers\CashDisbursementController::class, 'vendors']);
+    Route::get('/api/cd/accounts',        [\App\Http\Controllers\CashDisbursementController::class, 'accounts']);
+    Route::get('/api/cd/banks',           [\App\Http\Controllers\CashDisbursementController::class, 'banks']);
+    Route::get('/api/cd/payment-methods', [\App\Http\Controllers\CashDisbursementController::class, 'paymentMethods']);
+
+    // print/download
+    Route::get('/api/cash-disbursement/form-pdf/{id}',   [\App\Http\Controllers\CashDisbursementController::class, 'formPdf']);
+    Route::get('/api/cash-disbursement/form-excel/{id}', [\App\Http\Controllers\CashDisbursementController::class, 'formExcel']);
+
+    // unbalanced helpers
+    Route::get('/api/cash-disbursement/unbalanced-exists', [\App\Http\Controllers\CashDisbursementController::class, 'unbalancedExists']);
+    Route::get('/api/cash-disbursement/unbalanced',        [\App\Http\Controllers\CashDisbursementController::class, 'unbalanced']);
+
+
+    // General Accounting (Journal Entry)
+    Route::get('/api/ga/generate-ga-number', [\App\Http\Controllers\GeneralAccountingController::class, 'generateGaNumber']);
+    Route::post('/api/ga/save-main',          [\App\Http\Controllers\GeneralAccountingController::class, 'storeMain']);
+
+    Route::post('/api/ga/save-detail',        [\App\Http\Controllers\GeneralAccountingController::class, 'saveDetail']);
+    Route::post('/api/ga/update-detail',      [\App\Http\Controllers\GeneralAccountingController::class, 'updateDetail']);
+    Route::post('/api/ga/delete-detail',      [\App\Http\Controllers\GeneralAccountingController::class, 'deleteDetail']);
+
+    Route::delete('/api/ga/{id}',             [\App\Http\Controllers\GeneralAccountingController::class, 'destroy']);
+    Route::get('/api/ga/list',                [\App\Http\Controllers\GeneralAccountingController::class, 'list']);
+    Route::get('/api/ga/{id}',                [\App\Http\Controllers\GeneralAccountingController::class, 'show'])->whereNumber('id');
+    Route::post('/api/ga/cancel',             [\App\Http\Controllers\GeneralAccountingController::class, 'updateCancel']);
+
+    // dropdowns
+    Route::get('/api/ga/accounts',  [\App\Http\Controllers\GeneralAccountingController::class, 'accounts']);
+
+    // print/download
+    Route::get('/api/ga/form-pdf/{id}',   [\App\Http\Controllers\GeneralAccountingController::class, 'formPdf']);
+    Route::get('/api/ga/form-excel/{id}', [\App\Http\Controllers\GeneralAccountingController::class, 'formExcel']);
+
+    // unbalanced helpers
+    Route::get('/api/ga/unbalanced-exists', [\App\Http\Controllers\GeneralAccountingController::class, 'unbalancedExists']);
+    Route::get('/api/ga/unbalanced',        [\App\Http\Controllers\GeneralAccountingController::class, 'unbalanced']);
+
+
 
 
 
