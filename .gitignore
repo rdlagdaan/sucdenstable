@@ -1,0 +1,12 @@
+# Frontend / repo-wide
+node_modules/
+frontend-web/dist/
+
+# Build artifacts that sometimes appear
+backend/public/assets/
+backend/public/html/
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.vscode/

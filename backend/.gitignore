@@ -22,3 +22,24 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+# Laravel
+/vendor/
+/storage/*
+!/storage/.gitkeep
+/.env
+
+# Node
+node_modules/
+frontend-web/dist/
+
+# Build artifacts that showed up in your status
+backend/public/assets/
+backend/public/html/
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Misc
+backend/127.0.0.1

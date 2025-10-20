@@ -1,0 +1,38 @@
+services:
+  app:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+    command: >
+      sh -lc "
+        php -v &&
+        php artisan config:cache &&
+        php artisan route:cache &&
+        php artisan view:cache &&
+        php artisan migrate --force &&
+        php artisan octane:start --server=swoole --host=0.0.0.0 --port=8686
+      "
+    restart: unless-stopped
+
+  queue:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+    command: >
+      sh -lc "
+        php artisan config:cache &&
+        php artisan queue:work --queue=default --sleep=1 --tries=3 --timeout=120
+      "
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend-web
+      dockerfile: Dockerfile
+    restart: unless-stopped
