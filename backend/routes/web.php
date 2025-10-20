@@ -25,6 +25,13 @@ use App\Http\Controllers\PurchaseJournalController;
 //     return response()->noContent();
 // });
 
+use App\Http\Controllers\HealthController;
+
+// --- API health (JSON) ---
+Route::prefix('api')->group(function () {
+    Route::get('/health', [HealthController::class, 'show']);
+});
+
 // ✅ Public GET routes that don’t need CSRF protection
 Route::get('/api/companies', [CompanyController::class, 'index'])->withoutMiddleware([
     \App\Http\Middleware\VerifyCsrfToken::class,
