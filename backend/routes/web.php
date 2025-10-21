@@ -26,7 +26,7 @@ use App\Http\Controllers\PurchaseJournalController;
 // });
 
 use App\Http\Controllers\HealthController;
-
+use App\Http\Middleware\VerifyCsrfToken;
 // --- API health (JSON) ---
 Route::prefix('api')->group(function () {
     Route::get('/health', [HealthController::class, 'show']);
@@ -105,7 +105,13 @@ Route::middleware(['web'])->group(function () {
 
 
 
-    Route::post('/api/login', [AuthController::class, 'login']);
+    Route::post('/api/login', [AuthController::class, 'login'])->withoutMiddleware([VerifyCsrfToken::class]);
+// routes/web.php
+
+
+
+
+
     Route::get('/api/user/modules', [ModuleAccessController::class, 'userModules']);
 
     Route::post('/api/logout', [AuthController::class, 'logout']);

@@ -35,19 +35,19 @@ export default function Login() {
     setErrorMessage('');
 
     try {
-      // 1) Prime CSRF cookies (XSRF-TOKEN + session) for the :3001 origin
+      // 1) Prime cookies for :3001
       await ensureCsrf();
 
-      // 2) POST login with CSRF header auto-attached by axiosnapi
+      // 2) POST with X-XSRF-TOKEN auto-attached
       const { data } = await api.post('/api/login', {
         username: form.username,
         password: form.password,
         company_id: companyId ? Number(companyId) : undefined,
       });
 
-      // 3) Store auth & redirect
       localStorage.setItem('token', data?.token ?? '');
       localStorage.setItem('user', JSON.stringify(data?.user ?? {}));
+
       navigate('/dashboard');
     } catch (error: any) {
       const msg =
