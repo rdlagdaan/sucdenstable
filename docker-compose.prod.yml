@@ -3,35 +3,54 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: sucden-app                      # build once, reuse for queue
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
+    working_dir: /var/www/html             # must match Dockerfile WORKDIR
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - postgres
     command: >
       sh -lc "
         php -v &&
         php artisan config:cache &&
+        php artisan event:cache || true &&
         php artisan route:cache &&
-        php artisan view:cache &&
         php artisan migrate --force &&
         php artisan octane:start --server=swoole --host=0.0.0.0 --port=8686
       "
+    healthcheck:
+      test: ["CMD-SHELL", "(wget -qO- http://127.0.0.1:8686/api/health || curl -fsS http://127.0.0.1:8686/api/health) >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    ports:
+      - "8686:8686" 
+
     restart: unless-stopped
+    networks: [app-network]
 
   queue:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    environment:
-      APP_ENV: production
-      APP_DEBUG: "false"
+    image: sucden-app
+    working_dir: /var/www/html
+    env_file: [ ./backend/.env ]
+    depends_on: [ app, postgres ]
     command: >
       sh -lc "
-        # Ensure dependencies exist once per boot
-        [ -f vendor/autoload.php ] || composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader ;
+        php -v &&
+        php -m | grep -i 'pdo\|pgsql' &&
         php artisan config:cache &&
+        php artisan event:cache || true &&
+        php artisan route:cache &&
+        php artisan migrate --force &&
         php artisan queue:work --queue=default --sleep=1 --tries=3 --timeout=120
       "
     restart: unless-stopped
+    networks: [ app-network ]
+
 
 
   frontend:
@@ -39,3 +58,7 @@ services:
       context: ./frontend-web
       dockerfile: Dockerfile
     restart: unless-stopped
+    networks: [app-network]
+
+networks:
+  app-network: {}   # internal network auto-created by Compose

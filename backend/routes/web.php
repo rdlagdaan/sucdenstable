@@ -32,6 +32,8 @@ Route::prefix('api')->group(function () {
     Route::get('/health', [HealthController::class, 'show']);
 });
 
+Route::get('/api/health', fn () => response()->json(['ok' => true, 'ts' => now()->toISOString()]));
+
 // ✅ Public GET routes that don’t need CSRF protection
 Route::get('/api/companies', [CompanyController::class, 'index'])->withoutMiddleware([
     \App\Http\Middleware\VerifyCsrfToken::class,

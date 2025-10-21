@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+node_modules
+vendor
+storage/logs
+storage/framework
+storage/app/public
+storage/app/private/reports
+tests
+*.log
+.DS_Store
