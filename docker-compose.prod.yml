@@ -26,10 +26,13 @@ services:
       APP_DEBUG: "false"
     command: >
       sh -lc "
+        # Ensure dependencies exist once per boot
+        [ -f vendor/autoload.php ] || composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader ;
         php artisan config:cache &&
         php artisan queue:work --queue=default --sleep=1 --tries=3 --timeout=120
       "
     restart: unless-stopped
+
 
   frontend:
     build:
