@@ -1,58 +1,60 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';  // Import useNavigate for redirection
-import api from '../utils/axiosnapi';
-import { getCsrfToken } from '../utils/csrf';
+import { useNavigate } from 'react-router-dom';
+import api, { ensureCsrf } from '../utils/axiosnapi';
 
-interface Company {
-  id: number;
-  company_name: string;
-}
+type Company = { id: number; company_name: string };
 
-const Login = () => {
+export default function Login() {
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [selectedCompany, setSelectedCompany] = useState('');
+  const [companyId, setCompanyId] = useState<string>('');
   const [form, setForm] = useState({ username: '', password: '' });
   const [errorMessage, setErrorMessage] = useState('');
-  const navigate = useNavigate();  // To handle the redirection
-  
-  useEffect(() => {
-    const fetchCompanies = async () => {
-      try {
-        const response = await api.get<Company[]>('/api/companies');
-        setCompanies(response.data);
-      } catch (error) {
-        console.error('Failed to fetch companies:', error);
-      }
-    };
+  const navigate = useNavigate();
 
-    fetchCompanies();
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get<Company[]>('/api/companies');
+        setCompanies(Array.isArray(data) ? data : []);
+      } catch (err) {
+        console.error('Failed to fetch companies:', err);
+      }
+    })();
   }, []);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    setForm({ ...form, [e.target.name]: e.target.value });
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
+  ) => {
+    const { name, value } = e.target;
+    if (name === 'company_id') setCompanyId(value);
+    else setForm((s) => ({ ...s, [name]: value }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    try {
-      await getCsrfToken();  // Ensure CSRF token is set for Sanctum
+    setErrorMessage('');
 
-      // Send login request
-      const response = await api.post('/api/login', {
-        ...form,
-        company_id: selectedCompany,
+    try {
+      // 1) Prime CSRF cookies (XSRF-TOKEN + session) for the :3001 origin
+      await ensureCsrf();
+
+      // 2) POST login with CSRF header auto-attached by axiosnapi
+      const { data } = await api.post('/api/login', {
+        username: form.username,
+        password: form.password,
+        company_id: companyId ? Number(companyId) : undefined,
       });
 
-      console.log(response.data);
-      // Store token and user in localStorage (or in memory, or context)
-      localStorage.setItem('token', response.data.token);
-      localStorage.setItem('user', JSON.stringify(response.data.user));
-
-      // Redirect to dashboard upon successful login
-      navigate('/dashboard');  // Redirect to dashboard page
-
+      // 3) Store auth & redirect
+      localStorage.setItem('token', data?.token ?? '');
+      localStorage.setItem('user', JSON.stringify(data?.user ?? {}));
+      navigate('/dashboard');
     } catch (error: any) {
-      setErrorMessage(error.response?.data?.message || 'Login failed');
+      const msg =
+        error?.response?.data?.message ||
+        error?.message ||
+        'Login failed';
+      setErrorMessage(msg);
     }
   };
 
@@ -69,7 +71,7 @@ const Login = () => {
 
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div>
-            <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+            <label htmlFor="username" className="block text-sm font-medium text-gray-700">
               Username
             </label>
             <input
@@ -101,21 +103,21 @@ const Login = () => {
           </div>
 
           <div>
-            <label htmlFor="company" className="block text-sm font-medium text-gray-700">
+            <label htmlFor="company_id" className="block text-sm font-medium text-gray-700">
               Company
             </label>
             <select
-              id="company"
-              name="company"
-              value={selectedCompany}
-              onChange={(e) => setSelectedCompany(e.target.value)}
+              id="company_id"
+              name="company_id"
+              value={companyId}
+              onChange={handleChange}
               required
               className="mt-1 w-full rounded-md border px-3 py-2 shadow-sm text-gray-800"
             >
               <option value="" disabled>Select a company</option>
-              {companies.map((company) => (
-                <option key={company.id} value={company.id}>
-                  {company.company_name}
+              {companies.map((c) => (
+                <option key={c.id} value={c.id.toString()}>
+                  {c.company_name}
                 </option>
               ))}
             </select>
@@ -133,6 +135,4 @@ const Login = () => {
       </div>
     </div>
   );
-};
-
-export default Login;
+}
