@@ -1,12 +1,11 @@
 .git
 .gitignore
 .env
+.env.dev
+.env.prod
 node_modules
 vendor
-storage/logs
-storage/framework
-storage/app/public
-storage/app/private/reports
+storage
 tests
 *.log
 .DS_Store

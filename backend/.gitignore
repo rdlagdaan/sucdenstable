@@ -1,45 +1,36 @@
-*.log
-.DS_Store
-.env
-.env.backup
-.env.production
-.phpactor.json
-.phpunit.result.cache
-/.fleet
-/.idea
-/.nova
-/.phpunit.cache
-/.vscode
-/.zed
-/auth.json
-/node_modules
-/public/build
-/public/hot
-/public/storage
-/storage/*.key
-/storage/pail
-/vendor
-Homestead.json
-Homestead.yaml
-Thumbs.db
-# Laravel
+# Laravel / PHP
 /vendor/
 /storage/*
 !/storage/.gitkeep
 /.env
+/.env.dev
+/.env.prod
+/.phpunit.result.cache
+/.phpunit.cache
+/.phpactor.json
+
+# Public build artifacts
+/public/build
+/public/hot
+/public/storage
 
 # Node
-node_modules/
-frontend-web/dist/
+/node_modules/
 
-# Build artifacts that showed up in your status
-backend/public/assets/
-backend/public/html/
+# Logs and cache (explicit; storage/* already covers most)
+/storage/pail
+/storage/logs
+/storage/framework
+/storage/*.key
 
-# OS/IDE
+# Misc / OS / IDE
 .DS_Store
 Thumbs.db
-.vscode/
+/.idea/
+/.vscode/
+/.fleet
+/.nova
+/.zed
 
-# Misc
-backend/127.0.0.1
+# Local-only artifact you mentioned
+/127.0.0.1

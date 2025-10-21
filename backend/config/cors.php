@@ -1,21 +1,19 @@
 <?php
-// config/cors.php
+
 return [
-    'paths' => ['api/*', 'sanctum/*'],
+    'paths' => ['api/*', 'sanctum/csrf-cookie'],
     'allowed_methods' => ['*'],
 
-    // Allow both localhost and your LAN IP while developing on the network
-    'allowed_origins' => [
-    'http://192.168.3.105:3001',
-    'http://192.168.3.105:8686',
-    'http://localhost:3001',
-    'http://localhost:8686',
-    ],
+    // Read from env so dev/prod can differ without code changes
+    'allowed_origins' => array_filter(
+        array_map('trim', explode(',', env('CORS_ALLOWED_ORIGINS', '')))
+    ),
 
     'allowed_headers' => ['*'],
     'exposed_headers' => [],
     'max_age' => 0,
 
-    // We use Bearer tokens (not cookies), so keep this false
+    // You’re using Bearer tokens; keep false.
+    // If later you move to Sanctum cookies, set this to true.
     'supports_credentials' => false,
 ];

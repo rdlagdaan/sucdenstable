@@ -3,13 +3,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    image: sucden-app                      # build once, reuse for queue
+    image: sucden-app
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
-    working_dir: /var/www/html             # must match Dockerfile WORKDIR
+    working_dir: /var/www/html
     env_file:
-      - ./backend/.env
+      - ./backend/.env.prod
     depends_on:
       - postgres
     command: >
@@ -28,15 +28,15 @@ services:
       retries: 5
       start_period: 25s
     ports:
-      - "8686:8686" 
-
+      - "8686:8686"
     restart: unless-stopped
     networks: [app-network]
 
   queue:
     image: sucden-app
     working_dir: /var/www/html
-    env_file: [ ./backend/.env ]
+    env_file:
+      - ./backend/.env.prod
     depends_on: [ app, postgres ]
     command: >
       sh -lc "
@@ -51,14 +51,12 @@ services:
     restart: unless-stopped
     networks: [ app-network ]
 
-
-
   frontend:
     build:
       context: ./frontend-web
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile   # ← moved under build
     restart: unless-stopped
     networks: [app-network]
 
 networks:
-  app-network: {}   # internal network auto-created by Compose
+  app-network: {}

@@ -4,8 +4,8 @@ import Cookies from 'js-cookie';
 import { clearAuth } from './auth';
 
 const napi = axios.create({
-  baseURL: '/',
-  withCredentials: true, // <- send/receive cookies
+  baseURL: '/api',                          // ← relative; works in dev & prod
+  withCredentials: true,
   headers: { 'X-Requested-With': 'XMLHttpRequest' },
 });
 
@@ -20,7 +20,7 @@ napi.interceptors.request.use((config: InternalAxiosRequestConfig) => {
     url.includes('/api/login') ||
     url.includes('/sanctum/csrf-cookie');
 
-  const xsrf = Cookies.get('XSRF-TOKEN'); // not HttpOnly, readable
+  const xsrf = Cookies.get('XSRF-TOKEN');
   if (xsrf) {
     if (!config.headers || !(config.headers instanceof AxiosHeaders)) {
       config.headers = new AxiosHeaders(config.headers || {});
