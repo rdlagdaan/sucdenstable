@@ -10,98 +10,84 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Throwable;
 
 class BuildAccountsPayableJournal implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public int $timeout = 900; // 15 minutes
+
     public function __construct(
         public string $ticket,
         public string $startDate,
         public string $endDate,
-        public string $format,    // pdf|excel
+        public string $format,     // 'pdf' | 'xls'
         public ?int $companyId,
         public ?int $userId,
         public ?string $query = null
     ) {}
 
+    private function key(): string { return "apj:{$this->ticket}"; }
+
     private function patchState(array $patch): void
     {
-        $key = "apj:{$this->ticket}";
-        $current = Cache::get($key);
-        if (!is_array($current)) $current = [];
-        Cache::put($key, array_merge($current, $patch), now()->addHours(2));
-    }
-
-    private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
-    {
-        $disk = Storage::disk('local'); // root: storage/app (mapped to app/private in your env)
-        $files = collect($disk->files('reports'))
-            ->filter(fn($p) => str_starts_with(basename($p), 'accounts_payable_journal_'))
-            ->when($sameFormatOnly, function ($c) use ($keepFile) {
-                $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
-                return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
-            })
-            ->sortByDesc(fn($p) => $disk->lastModified($p))
-            ->slice($keep);
-
-        $files->each(fn($p) => $disk->delete($p));
+        $cur = Cache::get($this->key(), []);
+        Cache::put($this->key(), array_merge($cur, $patch), now()->addHours(2));
     }
 
     public function handle(): void
     {
         $this->patchState([
-            'status'     => 'running',
-            'progress'   => 1,
-            'format'     => $this->format,
-            'file'       => null,
-            'error'      => null,
-            'range'      => [$this->startDate, $this->endDate],
-            'query'      => $this->query,
-            'user_id'    => $this->userId,
+            'status'   => 'running',
+            'progress' => 1,
+            'format'   => $this->format,  // 'pdf' | 'xls'
+            'file'     => null,
+            'error'    => null,
+            'range'    => [$this->startDate, $this->endDate],
+            'query'    => $this->query,
+            'user_id'  => $this->userId,
             'company_id' => $this->companyId,
         ]);
 
         try {
-            // Count headers for progress
-            $count = DB::table('cash_purchase')
-                ->when($this->companyId, fn($q) => $q->where('company_id', $this->companyId))
-                ->whereBetween('purchase_date', [$this->startDate, $this->endDate])
+            // Pre-count for progress
+            $total = DB::table('cash_purchase as r')
+                ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
+                ->whereBetween('r.purchase_date', [$this->startDate, $this->endDate])
                 ->when($this->query, function ($q) {
                     $q->where(function ($x) {
-                        // Free-text filter against useful fields
                         $like = '%'.$this->query.'%';
-                        $x->where('cp_no', 'ILIKE', $like)
-                          ->orWhere('booking_no', 'ILIKE', $like)
-                          ->orWhere('explanation', 'ILIKE', $like)
-                          ->orWhere('rr_no', 'ILIKE', $like)
-                          ->orWhere('bank_id', 'ILIKE', $like)
-                          ->orWhere('vend_id', 'ILIKE', $like)
-                          ->orWhere('mill_id', 'ILIKE', $like);
+                        $x->where('r.cp_no', 'ILIKE', $like)
+                          ->orWhere('r.booking_no', 'ILIKE', $like)
+                          ->orWhere('r.explanation', 'ILIKE', $like)
+                          ->orWhere('r.rr_no', 'ILIKE', $like)
+                          ->orWhere('r.bank_id', 'ILIKE', $like)
+                          ->orWhere('r.vend_id', 'ILIKE', $like)
+                          ->orWhere('r.mill_id', 'ILIKE', $like);
                     });
                 })
                 ->count();
 
-            $progress = function (int $done) use ($count) {
-                $pct = $count ? min(99, (int) floor(($done / max(1, $count)) * 98) + 1) : 50;
+            $step = function (int $done) use ($total) {
+                $pct = $total ? min(99, 1 + (int)floor(($done / max(1, $total)) * 98)) : 50;
                 $this->patchState(['progress' => $pct]);
             };
 
             $dir = 'reports';
-            if (!Storage::disk('local')->exists($dir)) {
-                Storage::disk('local')->makeDirectory($dir);
-            }
+            $disk = Storage::disk('local');
+            if (!$disk->exists($dir)) $disk->makeDirectory($dir);
 
-            $stamp = now()->format('Ymd_His');
+            $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
             $path  = $this->format === 'pdf'
                 ? "$dir/accounts_payable_journal_{$stamp}.pdf"
                 : "$dir/accounts_payable_journal_{$stamp}.xls";
 
             if ($this->format === 'pdf') {
-                $this->buildPdf($path, $progress);
+                $this->buildPdf($path, $step);
             } else {
-                $this->buildExcel($path, $progress);
+                $this->buildExcel($path, $step);
             }
 
             $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);
@@ -120,7 +106,23 @@ class BuildAccountsPayableJournal implements ShouldQueue
         }
     }
 
-    /** PDF via TCPDF; chunked DB reads; writes to disk. */
+    private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
+    {
+        $disk = Storage::disk('local');
+        $files = collect($disk->files('reports'))
+            ->filter(fn($p) => str_starts_with(basename($p), 'accounts_payable_journal_'))
+            ->when($sameFormatOnly, function ($c) use ($keepFile) {
+                $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
+                return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
+            })
+            ->sortByDesc(fn($p) => $disk->lastModified($p))
+            ->slice($keep);
+
+        $files->each(fn($p) => $disk->delete($p));
+    }
+
+    /** ---------- Writers ---------- */
+
     private function buildPdf(string $file, callable $progress): void
     {
         $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
@@ -132,7 +134,7 @@ class BuildAccountsPayableJournal implements ShouldQueue
         $pdf->SetFont('helvetica', '', 8);
         $pdf->AddPage();
 
-        $headerHtml = <<<HTML
+        $hdr = <<<HTML
           <table width="100%" cellspacing="0" cellpadding="0">
             <tr><td align="right"><b>SUCDEN PHILIPPINES, INC.</b><br/>
               <span style="font-size:9px">TIN- 000-105-267-000</span><br/>
@@ -141,16 +143,15 @@ class BuildAccountsPayableJournal implements ShouldQueue
             <tr><td><hr/></td></tr>
           </table>
           <h2>ACCOUNTS PAYABLE JOURNAL</h2>
-          <div><b>For the period covering {$this->startDate} -- {$this->endDate}</b></div>
+          <div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
           <br/>
           <table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
         HTML;
-        $pdf->writeHTML($headerHtml, true, false, false, false, '');
+        $pdf->writeHTML($hdr, true, false, false, false, '');
 
         $done = 0;
         $lineCount = 0;
 
-        // Chunked query: header + mill + bank + aggregated lines
         DB::table('cash_purchase as r')
             ->selectRaw("
                 r.id,
@@ -167,10 +168,13 @@ class BuildAccountsPayableJournal implements ShouldQueue
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->leftJoin('mill_list as m','m.mill_id','=','r.mill_id')             // mill name
-            ->join('cash_purchase_details as d','d.transaction_id','=','r.id')  // lines
-            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')     // acct desc
-            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')       // bank name
+            ->leftJoin('mill_list as m','m.mill_id','=','r.mill_id')
+            // If cash_purchase_details.transaction_id is VARCHAR, CAST to BIGINT (safe even if it's already numeric)
+            ->join('cash_purchase_details as d', function ($j) {
+                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+            })
+            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
+            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
             ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
             ->whereBetween('r.purchase_date', [$this->startDate, $this->endDate])
             ->when($this->query, function ($q) {
@@ -191,12 +195,11 @@ class BuildAccountsPayableJournal implements ShouldQueue
                 foreach ($chunk as $row) {
                     $apId = 'ARCP-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-                    // Voucher header block
                     $block = <<<HTML
                       <table width="100%" cellspacing="0" cellpadding="1">
                         <tr><td>{$row->purchase_date}</td><td colspan="6">{$apId}</td></tr>
-                        <tr><td><b>PJ - {$row->cp_no}</b></td><td colspan="6">OR#: {$row->rr_no}&nbsp;&nbsp;&nbsp;{$row->bank_name}</td></tr>
-                        <tr><td colspan="7">{$row->mill_name} - {$row->explanation}</td></tr>
+                        <tr><td><b>PJ - {$row->cp_no}</b></td><td colspan="6">RR#: {$row->rr_no} &nbsp;&nbsp;&nbsp; {$row->bank_name}</td></tr>
+                        <tr><td colspan="7">{$row->mill_name} — {$row->explanation}</td></tr>
                       </table>
                     HTML;
                     $pdf->writeHTML($block, true, false, false, false, '');
@@ -247,21 +250,10 @@ class BuildAccountsPayableJournal implements ShouldQueue
                 }
             });
 
-        // Footer (simple)
-        $pdf->SetY(-18);
-        $pdf->writeHTML(
-          '<table width="100%"><tr>
-             <td>Print Date: '.now()->format('M d, Y').'</td>
-             <td>Print Time: '.now()->format('h:i:s a').'</td>
-             <td align="right">'.$pdf->getAliasNumPage().'/'.$pdf->getAliasNbPages().'</td>
-           </tr></table>',
-           true,false,false,false,''
-        );
-
+        // Write to disk
         Storage::disk('local')->put($file, $pdf->Output('accounts-payable.pdf', 'S'));
     }
 
-    /** Excel via PhpSpreadsheet; chunked DB reads; writes to disk. */
     private function buildExcel(string $file, callable $progress): void
     {
         $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
@@ -273,9 +265,9 @@ class BuildAccountsPayableJournal implements ShouldQueue
         $ws->setCellValue("A{$r}", 'SUCDEN PHILIPPINES, INC.'); $r++;
         $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
         $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
-        $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r+=2;
+        $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r += 2;
         $ws->setCellValue("A{$r}", 'ACCOUNTS PAYABLE JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} of {$this->endDate}"); $r+=2;
+        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
         $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
 
         foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(15);
@@ -298,7 +290,9 @@ class BuildAccountsPayableJournal implements ShouldQueue
                 ) ORDER BY d.id) as lines
             ")
             ->leftJoin('mill_list as m','m.mill_id','=','r.mill_id')
-            ->join('cash_purchase_details as d','d.transaction_id','=','r.id')
+            ->join('cash_purchase_details as d', function ($j) {
+                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+            })
             ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
             ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
             ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
@@ -321,12 +315,11 @@ class BuildAccountsPayableJournal implements ShouldQueue
                 foreach ($chunk as $row) {
                     $apId = 'ARCP-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-                    // Voucher header
                     $ws->setCellValue("A{$r}", $row->purchase_date);
                     $ws->setCellValue("B{$r}", $apId); $r++;
 
                     $ws->setCellValue("A{$r}", "PJ - {$row->cp_no}");
-                    $ws->setCellValue("B{$r}", "OR#: {$row->rr_no} --- {$row->bank_name}"); $r++;
+                    $ws->setCellValue("B{$r}", "RR#: {$row->rr_no} --- {$row->bank_name}"); $r++;
 
                     $ws->setCellValue("A{$r}", $row->mill_name);
                     $ws->setCellValue("B{$r}", $row->explanation); $r++;
@@ -343,7 +336,6 @@ class BuildAccountsPayableJournal implements ShouldQueue
                         $r++;
                     }
 
-                    // Per-voucher totals
                     $ws->setCellValue("E{$r}", 'TOTAL');
                     $ws->setCellValue("F{$r}", $itemDebit);
                     $ws->setCellValue("G{$r}", $itemCredit);
@@ -359,5 +351,7 @@ class BuildAccountsPayableJournal implements ShouldQueue
         $writer->save($stream); rewind($stream);
         Storage::disk('local')->put($file, stream_get_contents($stream));
         fclose($stream);
+        $wb->disconnectWorksheets();
+        unset($writer);
     }
 }

@@ -110,7 +110,7 @@ export default function General_accounting_form() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await napi.get('/api/ga/accounts', { params: { company_id: user?.company_id }});
+        const { data } = await napi.get('/ga/accounts', { params: { company_id: user?.company_id }});
         setAccounts(Array.isArray(data) ? data : []);
       } catch {
         setAccounts([]);
@@ -121,7 +121,7 @@ export default function General_accounting_form() {
   // fetch transactions for the JE searchable dropdown
   const fetchTransactions = async () => {
     try {
-      const { data } = await napi.get<GaTxOption[]>('/api/ga/list', {
+      const { data } = await napi.get<GaTxOption[]>('/ga/list', {
         params: { company_id: user?.company_id || '', q: txSearch || '' },
       });
       setTxOptions(Array.isArray(data) ? data : []);
@@ -175,9 +175,9 @@ export default function General_accounting_form() {
 
     // preflight: block if other GA transactions are unbalanced
     try {
-      const existsResp = await napi.get('/api/ga/unbalanced-exists', { params: { company_id: user?.company_id || '' }});
+      const existsResp = await napi.get('/ga/unbalanced-exists', { params: { company_id: user?.company_id || '' }});
       if (existsResp.data?.exists) {
-        const listResp = await napi.get('/api/ga/unbalanced', { params: { company_id: user?.company_id || '', limit: 20 }});
+        const listResp = await napi.get('/ga/unbalanced', { params: { company_id: user?.company_id || '', limit: 20 }});
         const items = Array.isArray(listResp.data?.items) ? listResp.data.items : [];
         const htmlRows = items.map((r: any) => `
           <tr>
@@ -208,11 +208,11 @@ export default function General_accounting_form() {
     }
 
     try {
-      const gen = await napi.get('/api/ga/generate-ga-number', { params: { company_id: user?.company_id }});
+      const gen = await napi.get('/ga/generate-ga-number', { params: { company_id: user?.company_id }});
       const nextNo = gen.data?.ga_no ?? gen.data;
       setGaNo(nextNo);
 
-      const res = await napi.post('/api/ga/save-main', {
+      const res = await napi.post('/ga/save-main', {
         ga_no: nextNo,
         gen_acct_date: genAcctDate,
         explanation,
@@ -252,7 +252,7 @@ export default function General_accounting_form() {
     if (!confirmed.isConfirmed) return;
 
     try {
-      await napi.post('/api/ga/cancel', { id: mainId, flag: cancel ? '1' : '0' });
+      await napi.post('/ga/cancel', { id: mainId, flag: cancel ? '1' : '0' });
       setIsCancelled(cancel);
       setGridLocked(true);
       setLocked(true);
@@ -276,7 +276,7 @@ export default function General_accounting_form() {
     if (!confirmed.isConfirmed) return;
 
     try {
-      await napi.delete(`/api/ga/${mainId}`);
+      await napi.delete(`/ga/${mainId}`);
       resetForm();
       toast.success('Journal deleted.');
       fetchTransactions();
@@ -297,7 +297,7 @@ export default function General_accounting_form() {
     const code = onlyCode(row.acct_code);
     try {
       if (!row.persisted) {
-        const res = await napi.post('/api/ga/save-detail', {
+        const res = await napi.post('/ga/save-detail', {
           transaction_id: mainId,
           acct_code: code,
           debit: row.debit || 0,
@@ -311,7 +311,7 @@ export default function General_accounting_form() {
         if (!src.find(r => !r.acct_code)) src.push(emptyRow());
         setTableData([...src]);
       } else {
-        await napi.post('/api/ga/update-detail', {
+        await napi.post('/ga/update-detail', {
           id: row.id,
           transaction_id: mainId,
           acct_code: code,
@@ -329,7 +329,7 @@ export default function General_accounting_form() {
     if (!selectedId) return;
     try {
       setSearchId(selectedId);
-      const { data } = await napi.get(`/api/ga/${selectedId}`, { params: { company_id: user?.company_id }});
+      const { data } = await napi.get(`/ga/${selectedId}`, { params: { company_id: user?.company_id }});
       const m = data.main ?? data;
 
       setMainId(m.id);
@@ -423,24 +423,74 @@ export default function General_accounting_form() {
   };
 
   // Print / Download
-  const handleOpenPdf = () => {
-    if (!mainId) return toast.info('Select or save a journal first.');
-    const url = `/api/ga/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`;
-    setPdfUrl(url);
-    setShowPdf(true);
-  };
-  const handleDownloadExcel = async () => {
-    if (!mainId) return toast.info('Select or save a journal first.');
-    const res = await napi.get(`/api/ga/form-excel/${mainId}`, {
+const handleOpenPdf = () => {
+  if (!mainId) return toast.info('Select or save a journal first.');
+  const url = `/api/ga/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}&_=${Date.now()}`;
+  setPdfUrl(url);
+  setShowPdf(true);
+};
+
+
+  
+const handleDownloadExcel = async () => {
+  if (!mainId) return toast.info('Select or save a journal first.');
+
+  try {
+    const res = await napi.get(`/ga/form-excel/${mainId}`, {
       responseType: 'blob',
-      params: { company_id: user?.company_id||'' }
+      params: { company_id: user?.company_id || '' },
     });
-    const name = res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1] || `JournalVoucher_${gaNo||mainId}.xlsx`;
-    const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+
+    const ct = String(res.headers['content-type'] || '');
+
+    // Guard: only proceed for real file responses
+    if (
+      !ct.includes('spreadsheet') &&
+      !ct.includes('octet-stream') &&
+      !ct.includes('application/vnd')
+    ) {
+      // If server sent JSON error body, show it
+      if (ct.includes('application/json')) {
+        try {
+          const txt = await res.data.text?.() ?? await new Response(res.data).text();
+          const j = JSON.parse(txt);
+          toast.error(j?.message || 'Export failed.');
+        } catch {
+          toast.error('Excel export failed (unexpected response).');
+        }
+      } else {
+        toast.error('Excel export failed (unexpected response).');
+      }
+      return;
+    }
+
+    // Filename from header or fallback
+    const cd = String(res.headers['content-disposition'] || '');
+    const m  = cd.match(/filename\*?=(?:UTF-8'')?("?)([^";]+)\1/i) || [];
+    const name = decodeURIComponent(m[2] || `JournalVoucher_${gaNo || mainId}.xlsx`);
+
+    // Download
+    const blob = new Blob([res.data], { type: ct || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  };
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e: any) {
+    // If backend returned 422 with JSON, Axios still gives a Blob
+    const blob = e?.response?.data;
+    if (blob instanceof Blob) {
+      try {
+        const txt = await blob.text();
+        const j = JSON.parse(txt);
+        toast.error(j?.message || 'Export failed.');
+        return;
+      } catch {/* fall through */}
+    }
+    toast.error(e?.response?.data?.message || 'Export failed.');
+  }
+};
+
 
   return (
     <div className="space-y-4 p-6">
@@ -647,7 +697,7 @@ export default function General_accounting_form() {
                     if (!row?.id) { src.splice(rowIndex,1); setTableData([...src]); return; }
                     const ok = await Swal.fire({ title:'Delete this line?', icon:'warning', showCancelButton:true });
                     if (!ok.isConfirmed) return;
-                    await napi.post('/api/ga/delete-detail',{ id: row.id, transaction_id: mainId });
+                    await napi.post('/ga/delete-detail',{ id: row.id, transaction_id: mainId });
                     src.splice(rowIndex,1);
                     setTableData([...src]);
                     toast.success('Row deleted');

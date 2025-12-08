@@ -28,7 +28,7 @@ export default function ApprovalCenter() {
       const params: any = { company_id: user?.company_id ?? '' };
       if (statusFilter !== 'all') params.status = statusFilter;
 
-      const { data } = await napi.get('/api/approvals/inbox', { params });
+      const { data } = await napi.get('/approvals/inbox', { params });
 
       // Accept [] or { data: [] }. Ignore accidental HTML payloads.
       const list: Row[] =
@@ -67,7 +67,7 @@ export default function ApprovalCenter() {
 
   const approve = async (id: number) => {
     try {
-      await napi.post(`/api/approvals/${id}/approve`, { expires_minutes: 120 });
+      await napi.post(`/approvals/${id}/approve`, { expires_minutes: 120 });
       toast.success('Approved');
       await load(true); // refresh quietly to reflect any server-side changes
       setRows(prev => prev.filter(r => r.id !== id)); // optimistic removal
@@ -78,7 +78,7 @@ export default function ApprovalCenter() {
 
   const reject = async (id: number) => {
     try {
-      await napi.post(`/api/approvals/${id}/reject`, { response_message: 'Denied' });
+      await napi.post(`/approvals/${id}/reject`, { response_message: 'Denied' });
       toast.info('Rejected');
       await load(true);
       setRows(prev => prev.filter(r => r.id !== id));

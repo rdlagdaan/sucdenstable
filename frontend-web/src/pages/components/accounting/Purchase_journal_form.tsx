@@ -140,7 +140,7 @@ export default function Purchase_journal_form() {
     (async () => {
       try {
         // Vendors: controller already shapes { code, label, description }
-        const { data } = await napi.get('/api/pj/vendors', { params: { company_id: user?.company_id }});
+        const { data } = await napi.get('/pj/vendors', { params: { company_id: user?.company_id }});
         const items: DropdownItem[] = (data || []).map((v: any) => ({
           code: String(v.code ?? v.vend_code ?? v.vend_id ?? ''),
           description: v.description ?? v.vend_name ?? v.vendor_name ?? '',
@@ -154,7 +154,7 @@ export default function Purchase_journal_form() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await napi.get('/api/pj/accounts', { params: { company_id: user?.company_id }});
+        const { data } = await napi.get('/pj/accounts', { params: { company_id: user?.company_id }});
         setAccounts(Array.isArray(data) ? data : []);
       } catch { setAccounts([]); }
     })();
@@ -163,7 +163,7 @@ export default function Purchase_journal_form() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await napi.get('/api/sugar-types');
+        const { data } = await napi.get('/sugar-types');
         const items: DropdownItem[] = (Array.isArray(data) ? data : []).map((r: any) => ({
           code: String(r.code ?? r.sugar_code ?? r.sugar_type ?? r.type ?? ''),
           description: String(r.description ?? r.sugar_desc ?? r.name ?? r.code ?? ''),
@@ -177,7 +177,7 @@ export default function Purchase_journal_form() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await napi.get('/api/crop-years');
+        const { data } = await napi.get('/crop-years');
         const items: DropdownItem[] = (Array.isArray(data) ? data : []).map((r: any) => ({
           code: String(r.code ?? r.crop_year ?? r.year ?? ''),
           description: String(r.description ?? r.crop_year ?? r.year ?? ''),
@@ -211,7 +211,7 @@ const loadMills = async (asOf?: string) => {
     const params: any = { company_id: user?.company_id };
     if (asOf) params.as_of = asOf;
 
-    const url = asOf ? '/api/mills/effective' : '/api/mills';
+    const url = asOf ? '/mills/effective' : '/mills';
     const { data } = await napi.get(url, { params });
 
     // Map to exactly two fields in a fixed order: code, description
@@ -248,7 +248,7 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
   // -------------------------------
   const fetchTransactions = async () => {
     try {
-      const { data } = await napi.get<TxOption[]>('/api/purchase/list', {
+      const { data } = await napi.get<TxOption[]>('/purchase/list', {
         params: { company_id: user?.company_id || '', q: txSearch || '' },
       });
       setTxOptions(Array.isArray(data) ? data : []);
@@ -292,9 +292,9 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
 
     // preflight: other unbalanced purchases
     try {
-      const existsResp = await napi.get('/api/purchase/unbalanced-exists', { params: { company_id: user?.company_id || '' } });
+      const existsResp = await napi.get('/purchase/unbalanced-exists', { params: { company_id: user?.company_id || '' } });
       if (existsResp.data?.exists) {
-        const listResp = await napi.get('/api/purchase/unbalanced', { params: { company_id: user?.company_id || '', limit: 20 } });
+        const listResp = await napi.get('/purchase/unbalanced', { params: { company_id: user?.company_id || '', limit: 20 } });
         const items = Array.isArray(listResp.data?.items) ? listResp.data.items : [];
         const htmlRows = items.map((r: any) => `
           <tr>
@@ -324,11 +324,11 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     } catch (_) {}
 
     try {
-      const gen = await napi.get('/api/purchase/generate-cp-number', { params: { company_id: user?.company_id } });
+      const gen = await napi.get('/purchase/generate-cp-number', { params: { company_id: user?.company_id } });
       const nextNo = gen.data?.cp_no ?? gen.data;
       setCpNo(nextNo);
 
-      const res = await napi.post('/api/purchase/save-main', {
+      const res = await napi.post('/purchase/save-main', {
         cp_no: nextNo,
         vend_id: vendorId,
         purchase_date: purchaseDate,
@@ -363,7 +363,7 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     const confirmed = await Swal.fire({ title: 'Cancel this transaction?', text: 'This will mark the transaction as CANCELLED.', icon: 'warning', showCancelButton: true, confirmButtonText: 'Yes, cancel it' });
     if (!confirmed.isConfirmed) return;
     try {
-      await napi.post('/api/purchase/cancel', { id: mainId, flag: '1', company_id: user?.company_id || '' });
+      await napi.post('/purchase/cancel', { id: mainId, flag: '1', company_id: user?.company_id || '' });
       setLocked(true); setGridLocked(true); toast.success('Transaction has been cancelled.'); fetchTransactions();
     } catch { toast.error('Failed to cancel transaction.'); }
   };
@@ -372,7 +372,7 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     if (!mainId) return;
     const confirmed = await Swal.fire({ title: 'Delete this transaction?', text: 'This action is irreversible.', icon: 'error', showCancelButton: true, confirmButtonText: 'Delete' });
     if (!confirmed.isConfirmed) return;
-    try { await napi.delete(`/api/purchase/${mainId}`); resetForm(); toast.success('Transaction deleted.'); fetchTransactions(); }
+    try { await napi.delete(`/purchase/${mainId}`); resetForm(); toast.success('Transaction deleted.'); fetchTransactions(); }
     catch { toast.error('Failed to delete transaction.'); }
   };
 
@@ -388,7 +388,7 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     const code = onlyCode(row.acct_code);
     try {
       if (!row.persisted) {
-        const res = await napi.post('/api/purchase/save-detail', {
+        const res = await napi.post('/purchase/save-detail', {
           transaction_id: mainId,
           acct_code: code,
           debit: row.debit || 0,
@@ -400,7 +400,7 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
         if (src[rowIndex]) src[rowIndex].persisted = true, src[rowIndex].id = res.data.detail_id;
         setTableData([...src, ...(src.find(r => !r.acct_code) ? [] : [emptyRow()])]);
       } else {
-        await napi.post('/api/purchase/update-detail', {
+        await napi.post('/purchase/update-detail', {
           id: row.id, transaction_id: mainId, acct_code: code,
           debit: row.debit || 0, credit: row.credit || 0,
         });
@@ -417,7 +417,7 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     if (!selectedId) return;
     try {
       setSearchId(selectedId);
-      const { data } = await napi.get(`/api/purchase/${selectedId}`, { params: { company_id: user?.company_id } });
+      const { data } = await napi.get(`/purchase/${selectedId}`, { params: { company_id: user?.company_id } });
 
       const m = data.main ?? data;
       setMainId(m.id);
@@ -451,25 +451,58 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     }
   };
 
+  const apiBase = (napi.defaults.baseURL || '/api').replace(/\/+$/,'');
+
+
   // -------------------------------
   // Print / Download helpers
   // -------------------------------
-  const handleOpenPdf = () => {
-    if (!mainId) return toast.info('Select or save a transaction first.');
-    const url = `/api/purchase/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`;
-    setPdfUrl(url); setShowPdf(true);
-  };
-  const handleDownloadExcel = async () => {
-    if (!mainId) return toast.info('Select or save a transaction first.');
-    const res = await napi.get(`/api/purchase/form-excel/${mainId}`, {
-      responseType: 'blob', params: { company_id: user?.company_id||'' }
+const handleOpenPdf = () => {
+  if (!mainId) return toast.info('Select or save a transaction first.');
+  const url = `${apiBase}/purchase/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`;
+  setPdfUrl(url);
+  setShowPdf(true);
+};
+
+const handleDownloadExcel = async () => {
+  if (!mainId) return toast.info('Select or save a transaction first.');
+  try {
+    const res = await napi.get(`/purchase/form-excel/${mainId}`, {
+      responseType: 'blob',
+      params: { company_id: user?.company_id || '' },
+      withCredentials: true,
     });
-    const name = res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1] || `PurchaseVoucher_${cpNo||mainId}.xlsx`;
-    const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+
+    // If server returned HTML (e.g., unbalanced warning), show it
+    const ct = String(res.headers['content-type'] || '');
+    if (!ct.includes('sheet') && !ct.includes('excel') && !ct.includes('octet-stream')) {
+      // Try to read error text (best-effort)
+      const text = await (res.data?.text?.().catch(()=>null));
+      toast.error(text ? `Download failed: ${text.slice(0,200)}…` : 'Download failed.');
+      return;
+    }
+
+    const name =
+      res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1]
+      || `PurchaseVoucher_${cpNo || mainId}.xlsx`;
+
+    const blob = new Blob([res.data], {
+      type: ct || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  };
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast.success('Excel downloaded.');
+  } catch (e: any) {
+    const msg = e?.response?.status
+      ? `HTTP ${e.response.status}: ${e.response.statusText || 'Error'}`
+      : (e?.message || 'Download failed.');
+    toast.error(msg);
+  }
+};
+
 
   // -------------------------------
   // UI callbacks
@@ -561,7 +594,7 @@ const loadPbns = async () => {
     if (sugarType) params.sugar_type = sugarType;
     if (cropYear)  params.crop_year  = cropYear;
 
-    const { data } = await napi.get('/api/pbn/list', { params });
+    const { data } = await napi.get('/pbn/list', { params });
 
     const items: DropdownItem[] = (Array.isArray(data) ? data : []).map((r: any) => ({
       code: String(r.pbn_number),              // what you’ll save into booking_no
@@ -841,7 +874,7 @@ useEffect(() => { loadPbns(); },
                     if (!row?.id) { src.splice(rowIndex,1); setTableData([...src]); return; }
                     const ok = await Swal.fire({ title:'Delete this line?', icon:'warning', showCancelButton:true });
                     if (!ok.isConfirmed) return;
-                    await napi.post('/api/purchase/delete-detail',{ id: row.id, transaction_id: mainId });
+                    await napi.post('/purchase/delete-detail',{ id: row.id, transaction_id: mainId });
                     src.splice(rowIndex,1);
                     setTableData([...src]);
                     toast.success('Row deleted');
@@ -867,8 +900,9 @@ useEffect(() => { loadPbns(); },
             <span>Download</span>
             <ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
+
           {downloadOpen && (
-            <div className="absolute left-0 top-full z-50">
+            <div className="absolute left-0 top-full z-50" onClick={(e)=>e.stopPropagation()}>
               <div className="mt-1 w-60 rounded-md border bg-white shadow-lg py-1">
                 <button type="button" onClick={handleDownloadExcel} disabled={!mainId} className={`flex w-full items-center gap-3 px-3 py-2 text-sm ${mainId ? 'text-gray-800 hover:bg-blue-50' : 'text-gray-400 cursor-not-allowed'}`}>
                   <DocumentArrowDownIcon className={`h-5 w-5 ${mainId ? 'text-blue-600' : 'text-gray-400'}`} />
@@ -878,6 +912,7 @@ useEffect(() => { loadPbns(); },
               </div>
             </div>
           )}
+
         </div>
 
         {/* PRINT */}
@@ -897,7 +932,14 @@ useEffect(() => { loadPbns(); },
                   type="button"
                   onClick={()=>{
                     if (!mainId) return toast.info('Select or save a transaction.');
-                    window.open(`/api/purchase/check-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`,'_blank');
+                    
+                    window.open(
+                      `${apiBase}/purchase/check-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`,
+                      '_blank',
+                      'noopener'
+                    );
+                  
+                  
                   }}
                   className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
                 >

@@ -199,34 +199,33 @@ public function deleteDetailAndLog(Request $request)
 {
     $validated = $request->validate([
         'pbn_entry_id' => 'required|integer',
-        'pbn_number' => 'required|string',
-        'row' => 'required|integer',
+        'pbn_number'   => 'required|string',
+        'row'          => 'required|integer',
+        'company_id'   => 'required|integer',
     ]);
+    $companyId = (int) $validated['company_id'];
 
-    // ✅ Step 1: Fetch the original record to be deleted
     $record = DB::table('pbn_entry_details')
         ->where('pbn_entry_id', $validated['pbn_entry_id'])
         ->where('pbn_number', $validated['pbn_number'])
+        ->where('company_id', $companyId)
         ->where('id', $validated['row'])
         ->first();
 
-    // 🔒 Step 2: If record doesn't exist, return 404
     if (!$record) {
         return response()->json(['message' => 'Record not found.'], 404);
     }
 
-    // ✅ Step 3: Prepare the data for logging
     $data = (array) $record;
-    $data['nid'] = $data['id'];  // move original id to `nid` field
-    unset($data['id']);          // let the log table auto-increment its own id
+    $data['nid'] = $data['id'];
+    unset($data['id']);
 
-    // ✅ Step 4: Insert to log table
     DB::table('pbn_entry_details_log')->insert($data);
 
-    // ✅ Step 5: Delete the original record
     DB::table('pbn_entry_details')
         ->where('pbn_entry_id', $validated['pbn_entry_id'])
         ->where('pbn_number', $validated['pbn_number'])
+        ->where('company_id', $companyId)
         ->where('id', $validated['row'])
         ->delete();
 
@@ -234,41 +233,38 @@ public function deleteDetailAndLog(Request $request)
 }
 
 
+
 public function getPbnDropdownList(Request $request)
 {
-    $companyId = $request->query('company_id');
+    $data = $request->validate([
+        'company_id'     => ['required','integer'],
+        'include_posted' => ['nullable','in:true,false,1,0'],
+    ]);
 
-    // Checkbox sends "true" (string) if checked → show posted (1)
-    // Otherwise show unposted (0)
-    $includePosted = $request->query('include_posted') === 'true';
-    $postedFlag = $includePosted ? 1 : 0;
+    $companyId    = (int) $data['company_id'];
+    $includePosted = $request->query('include_posted') === 'true' || $request->query('include_posted') === '1';
+    $postedFlag    = $includePosted ? 1 : 0;
 
     $entries = DB::table('pbn_entry')
         ->where('company_id', $companyId)
         ->where('posted_flag', $postedFlag)
-        ->select([
-            'id',
-            'pbn_number',
-            'sugar_type',
-            //'vend_code',
-            'vendor_name',
-            'crop_year',
-            'pbn_date',
-            'posted_flag'
-        ])
+        ->select(['id','pbn_number','sugar_type','vendor_name','crop_year','pbn_date','posted_flag'])
         ->orderByDesc('pbn_number')
         ->get();
 
-       
     return response()->json($entries);
 }
 
 
+
 public function show(Request $request, $id)
 {
-    $companyId = $request->query('company_id'); // ✅ Read from query params
+    $data = $request->validate([
+        'company_id' => ['required','integer'],
+    ]);
+    $companyId = (int) $data['company_id'];
 
-    $main = PbnEntry::where('id', intval($id))
+    $main = PbnEntry::where('id', (int)$id)
         ->where('company_id', $companyId)
         ->first();
 
@@ -278,6 +274,7 @@ public function show(Request $request, $id)
 
     $details = PbnEntryDetail::where('pbn_entry_id', $main->id)
         ->where('company_id', $companyId)
+        ->orderBy('row')
         ->get();
 
     return response()->json([
@@ -291,18 +288,15 @@ public function show(Request $request, $id)
 
 public function formPdf(\Illuminate\Http\Request $request, $id = null)
 {
-    // Accept id either as route param or as ?id= in the query string
     $id = $id ?? $request->query('id');
-
     if (!$id) {
-        return response()->json([
-            'message' => 'Missing PBN id. Call /api/pbn/form-pdf/{id} or /api/pbn/form-pdf?id={id}',
-        ], 422);
+        return response()->json(['message' => 'Missing PBN id.'], 422);
     }
-    // 1) Load the main record + details (same company scoping as show())
+
+    // strict company scoping
     $companyId = $request->query('company_id');
 
-    $main = \App\Models\PbnEntry::where('id', (int) $id)
+    $main = \App\Models\PbnEntry::where('id', (int)$id)
         ->when($companyId, fn($q) => $q->where('company_id', $companyId))
         ->firstOrFail();
 
@@ -311,199 +305,191 @@ public function formPdf(\Illuminate\Http\Request $request, $id = null)
         ->orderBy('row')
         ->get();
 
-    // 2) Ensure TCPDF is available (safe under Octane workers)
     if (!class_exists('\TCPDF', false)) {
         $tcpdfPath = base_path('vendor/tecnickcom/tcpdf/tcpdf.php');
-        if (file_exists($tcpdfPath)) {
-            require_once $tcpdfPath;
-        } else {
-            abort(500, 'TCPDF not installed. Run: composer require tecnickcom/tcpdf');
-        }
+        if (file_exists($tcpdfPath)) require_once $tcpdfPath;
+        else abort(500, 'TCPDF not installed. Run: composer require tecnickcom/tcpdf');
     }
 
-    // 3) Map fields exactly like the legacy template expects
+    // Map fields
     $pbnNo      = $main->pbn_number ?? '';
     $vendorID   = $main->vend_code ?? '';
     $vendorName = $main->vendor_name ?? '';
     $pbnDate    = $main->pbn_date ? \Carbon\Carbon::parse($main->pbn_date)->format('m/d/Y') : '';
     $cropYear   = $main->crop_year ?? '';
 
-    $grandTotalQuantity = 0.0;
-    $grandTotalGross    = 0.0;
-
-    $rowsMill  = '';
-    $rowsQty   = '';
-    $rowsUC    = '';
-    $rowsCom   = '';
-    $rowsGross = '';
+    // Prepare column content strings
+    $grandQty = 0.0; $grandGross = 0.0;
+    $colMill=''; $colQty=''; $colUC=''; $colCom=''; $colGross='';
 
     foreach ($details as $d) {
-        $qty = (float) ($d->quantity ?? 0);
-        $uc  = (float) ($d->unit_cost ?? 0);
-        $com = (float) ($d->commission ?? 0);
+        $qty = (float)($d->quantity ?? 0);
+        $uc  = (float)($d->unit_cost ?? 0);
+        $com = (float)($d->commission ?? 0);
         $gross = ($uc + $com) * $qty;
 
-        $grandTotalQuantity += $qty;
-        $grandTotalGross    += $gross;
+        $grandQty  += $qty;
+        $grandGross += $gross;
 
-        // Match legacy display: use mill_code if present, otherwise mill; uppercase
-        $millMark = strtoupper($d->mill_code ?: ($d->mill ?? ''));
-        $rowsMill  .= '<font size="10"> '.$millMark.' </font><br>';
-        $rowsQty   .= '<font size="10">'.number_format($qty, 2).'</font><br>';
-        $rowsUC    .= '<font size="10">'.number_format($uc, 2).'</font><br>';
-        $rowsCom   .= '<font size="10">'.number_format($com, 2).'</font><br>';
-        $rowsGross .= '<font size="10">'.number_format($gross, 2).'</font><br>';
+        $mill = strtoupper($d->mill_code ?: ($d->mill ?? ''));
+        $colMill  .= " {$mill}\n";
+        $colQty   .= number_format($qty, 2) . "\n";
+        $colUC    .= number_format($uc, 2) . "\n";
+        $colCom   .= number_format($com, 2) . "\n";
+        $colGross .= number_format($gross, 2) . "\n";
     }
+    $grandQtyF   = number_format($grandQty, 2);
+    $grandGrossF = number_format($grandGross, 2);
 
-    $grandQty   = number_format($grandTotalQuantity, 2);
-    $grandGross = number_format($grandTotalGross, 2);
-
-    // 4) Create a TCPDF instance that draws the exact header and NO footer
-    $logoPath = public_path('sucdenLogo.jpg'); // put your logo file here (backend/public)
-
+    // --- Build PDF ---
+    $logoPath = public_path('sucdenLogo.jpg');
     $pdf = new class('P', PDF_UNIT, 'LETTER', true, 'UTF-8', false) extends \TCPDF {
         public string $logoPath = '';
-        protected $last_page_flag = false;
-        public function Close() { $this->last_page_flag = true; parent::Close(); }
         public function Header() {
             if ($this->logoPath && is_file($this->logoPath)) {
-                // x=15, y=10, width=50 — matches your legacy form
-                $this->Image($this->logoPath, 15, 10, 50, '', 'JPG', '', 'T', false, 200, '', false, false, 0, false, false, false);
+                $this->Image($this->logoPath, 15, 12, 42, '', (strtolower(pathinfo($this->logoPath, PATHINFO_EXTENSION))==='png'?'PNG':'JPG'));
             }
         }
-        public function Footer() { /* no TCPDF watermark/page number */ }
+        public function Footer() {}
     };
     $pdf->logoPath = $logoPath;
 
-    $pdf->setPrintHeader(true);
-    $pdf->setPrintFooter(false);
-    $pdf->SetDefaultMonospacedFont(PDF_FONT_MONOSPACED);
-    $pdf->SetMargins(PDF_MARGIN_LEFT, PDF_MARGIN_TOP, PDF_MARGIN_RIGHT);
-    $pdf->SetHeaderMargin(PDF_MARGIN_HEADER);
-    $pdf->SetFooterMargin(PDF_MARGIN_FOOTER);
-    $pdf->SetAutoPageBreak(true, PDF_MARGIN_BOTTOM);
-    $pdf->setImageScale(PDF_IMAGE_SCALE_RATIO);
+    // Margins and manual layout (mm)
+    $left=12; $top=16; $right=12; $bottom=12;
+    $pdf->SetMargins($left, $top, $right);
+    $pdf->SetHeaderMargin(4);
+    $pdf->SetFooterMargin(0);
+    $pdf->SetAutoPageBreak(false, $bottom);
 
-    $pdf->SetFont('helvetica', 'B', 20);
     $pdf->AddPage('P', 'LETTER');
-    $pdf->SetFont('helvetica', '', 7);
+    $pageW = $pdf->getPageWidth();
+    $pageH = $pdf->getPageHeight();
+    $innerW = $pageW - $left - $right;
 
-    // Match the legacy fixed content box height
-    $detailsHeight = 450;
+    // Title
+    $pdf->Ln(14);
+    $pdf->SetFont('helvetica','B',12);
+    $pdf->Cell(0, 6, 'PURCHASE BOOK NOTE', 0, 1, 'R');
+    $pdf->SetFont('helvetica','',10);
+    $pdf->writeHTML(
+        '<div style="text-align:right;"><font size="10">PBN No. </font>'.
+        '<font size="12"><b><u><a href="#">'.htmlspecialchars($pbnNo,ENT_QUOTES,'UTF-8').'</a></u></b></font></div>',
+        true,false,false,false,''
+    );
 
-    $html = <<<EOD
-<br><br>
-
-<table border="0" cellpadding="1" cellspacing="2" nobr="true" width="100%">
-  <tr>
-    <td colspan="5" align="right">
-      <div><font size="14"><b>PURCHASE BOOK NOTE </b></font></div>
-      <div><font size="14">PBN No. </font> <font size="18" color="blue"><b><u>{$pbnNo}</u></b></font></div>
-    </td>
+    // Info band (HTML is fine)
+    $infoHtml = <<<EOD
+<table border="1" cellpadding="2" cellspacing="0" width="100%">
+  <tr bgcolor="#E6E6E6">
+    <td width="10%"><font size="9">Trader:</font></td>
+    <td width="38%"><font size="9"><u>{$vendorID}</u></font></td>
+    <td width="14%"><font size="9">PBN Date:</font></td>
+    <td width="16%"><font size="9"><u>{$pbnDate}</u></font></td>
+    <td width="22%"></td>
   </tr>
-  <tr><td colspan="5"></td></tr>
-</table>
-<br>
-
-<table border="1" cellpadding="1" cellspacing="1" nobr="true" width="100%">
-  <tr>
-    <td colspan="5" bgcolor="lightgrey">
-      <table>
-        <tr>
-          <td width="15%" height="25px"><font size="10">Trader: </font></td>
-          <td width="34%" height="25px"><font size="10"><u>{$vendorID}</u></font></td>
-          <td width="4%"  height="25px"></td>
-          <td width="15%" height="25px"></td>
-          <td width="32%" height="25px"></td>
-        </tr>
-        <tr>
-          <td width="15%" height="25px"><font size="10">Supplier: </font></td>
-          <td width="45%" height="25px"><font size="10"><u><b>{$vendorName}</b></u></font></td>
-          <td width="10%" height="25px"></td>
-          <td width="15%" height="25px"><font size="10">PBN Date: </font></td>
-          <td width="15%" height="25px"><font size="10"><u>{$pbnDate}</u></font></td>
-        </tr>
-        <tr>
-          <td height="25px"><font size="10">Crop Year: </font></td>
-          <td height="25px"><font size="10"><u>{$cropYear}</u></font></td>
-          <td height="25px"></td>
-          <td height="25px"></td>
-          <td height="25px"></td>
-        </tr>
-      </table>
-    </td>
-  </tr>
-
-  <tr align="center" valign="middle">
-    <td width="33%" height="25"><font size="10">MillMark </font></td>
-    <td width="18%" height="25"><font size="10">Qty in LKG </font></td>
-    <td width="15%" height="25"><font size="10">Price/LKG </font></td>
-    <td width="15%" height="25"><font size="10">Commission </font></td>
-    <td width="19%" height="25"><font size="10">Gross Amount </font></td>
-  </tr>
-
-  <tr>
-    <td height="{$detailsHeight}">
-      {$rowsMill}
-    </td>
-    <td align="right">
-      {$rowsQty}
-    </td>
-    <td align="right">
-      {$rowsUC}
-    </td>
-    <td align="right">
-      {$rowsCom}
-    </td>
-    <td align="right">
-      {$rowsGross}
-    </td>
-  </tr>
-
-  <tr>
-    <td colspan="4" height="25">
-      <table>
-        <tr>
-          <td width="47%"><font size="10">TOTAL</font></td>
-          <td><font size="10">{$grandQty}</font></td>
-          <td></td>
-          <td></td>
-        </tr>
-      </table>
-    </td>
-    <td align="right" height="25">
-      <font size="10">{$grandGross}</font>
-    </td>
-  </tr>
-
-  <tr>
-    <td colspan="5">
-      <table width="100%">
-        <tr>
-          <td width="18%"></td>
-          <td width="30%" align="center" valign="middle">
-            <br><br><br><br>
-            <font size="10">_____________________</font><br>
-            <font size="10">Posted By:</font>
-          </td>
-          <td width="6%" height="100"></td>
-          <td width="30%" align="center" valign="middle">
-            <br><br><br><br>
-            <font size="10">_____________________</font><br>
-            <font size="10">Prepared By:</font>
-          </td>
-          <td width="18%"></td>
-        </tr>
-      </table>
-    </td>
+  <tr bgcolor="#E6E6E6">
+    <td><font size="9">Supplier:</font></td>
+    <td><font size="9"><u><b>{$vendorName}</b></u></font></td>
+    <td><font size="9">Crop Year:</font></td>
+    <td><font size="9"><u>{$cropYear}</u></font></td>
+    <td></td>
   </tr>
 </table>
 EOD;
+    $pdf->writeHTML($infoHtml, true, false, false, false, '');
 
-    // 5) Render & return inline (so your modal iframe can display it)
-    $pdf->writeHTML($html, true, false, false, false, '');
+    // ===== Geometry so grid sticks to signature band =====
+    $yAfterInfo    = $pdf->GetY();
+    $usableBottomY = $pageH - $bottom;
+
+    $SIGNATURE_H     = 18.0; // signature band height
+    $GAP_ABOVE_SIGN  = 3.0;  // space between grid and signatures
+    $GAP_AFTER_INFO  = 1.0;  // space after info band
+
+    $gridTopY      = $yAfterInfo + $GAP_AFTER_INFO;
+    $gridBottomY   = $usableBottomY - $SIGNATURE_H - $GAP_ABOVE_SIGN;
+    $gridBoxH      = $gridBottomY - $gridTopY;     // final exact height for the WHOLE grid (header+body+total)
+
+    // Row heights (mm)
+    $HDR_H   = 10.0;
+    $TOTAL_H = 10.0;
+    $BODY_H  = max(60.0, $gridBoxH - $HDR_H - $TOTAL_H); // will stretch to fill
+
+    // Column widths (percent of inner width)
+    $wMill = 0.33 * $innerW;
+    $wQty  = 0.18 * $innerW;
+    $wUC   = 0.15 * $innerW;
+    $wCom  = 0.15 * $innerW;
+    $wGross= $innerW - ($wMill+$wQty+$wUC+$wCom);
+
+    // Column X positions
+    $xMill = $left;
+    $xQty  = $xMill + $wMill;
+    $xUC   = $xQty  + $wQty;
+    $xCom  = $xUC   + $wUC;
+    $xGross= $xCom  + $wCom;
+
+    // ---- Draw grid header row with borders ----
+    $pdf->SetFont('helvetica','B',9);
+    $pdf->SetXY($left, $gridTopY);
+    $pdf->Cell($wMill,  $HDR_H, 'MillMark',     1, 0, 'C');
+    $pdf->Cell($wQty,   $HDR_H, 'Qty in LKG',   1, 0, 'C');
+    $pdf->Cell($wUC,    $HDR_H, 'Price/LKG',    1, 0, 'C');
+    $pdf->Cell($wCom,   $HDR_H, 'Commission',   1, 0, 'C');
+    $pdf->Cell($wGross, $HDR_H, 'Gross Amount', 1, 1, 'C');
+
+    // ---- Draw body rectangle to an exact height + vertical lines ----
+    $bodyTopY = $gridTopY + $HDR_H;
+    $pdf->Rect($left, $bodyTopY, $innerW, $BODY_H); // outer body rectangle
+    // vertical splits inside the body rect
+    $pdf->Line($xQty,   $bodyTopY, $xQty,   $bodyTopY + $BODY_H);
+    $pdf->Line($xUC,    $bodyTopY, $xUC,    $bodyTopY + $BODY_H);
+    $pdf->Line($xCom,   $bodyTopY, $xCom,   $bodyTopY + $BODY_H);
+    $pdf->Line($xGross, $bodyTopY, $xGross, $bodyTopY + $BODY_H);
+
+    // ---- Write body text (no borders) inside the rectangle ----
+    $pdf->SetFont('helvetica','',9);
+    // small inner padding
+    $pad = 1.5;
+
+    // Mill
+    $pdf->SetXY($xMill + $pad, $bodyTopY + $pad);
+    $pdf->MultiCell($wMill - 2*$pad, $BODY_H - 2*$pad, $colMill, 0, 'L', false, 1);
+    // Qty (right)
+    $pdf->SetXY($xQty + $pad, $bodyTopY + $pad);
+    $pdf->MultiCell($wQty - 2*$pad, $BODY_H - 2*$pad, $colQty, 0, 'R', false, 1);
+    // Price
+    $pdf->SetXY($xUC + $pad, $bodyTopY + $pad);
+    $pdf->MultiCell($wUC - 2*$pad, $BODY_H - 2*$pad, $colUC, 0, 'R', false, 1);
+    // Commission
+    $pdf->SetXY($xCom + $pad, $bodyTopY + $pad);
+    $pdf->MultiCell($wCom - 2*$pad, $BODY_H - 2*$pad, $colCom, 0, 'R', false, 1);
+    // Gross
+    $pdf->SetXY($xGross + $pad, $bodyTopY + $pad);
+    $pdf->MultiCell($wGross - 2*$pad, $BODY_H - 2*$pad, $colGross, 0, 'R', false, 1);
+
+    // ---- Totals row (exactly under the body) ----
+    $totTopY = $bodyTopY + $BODY_H;
+    $pdf->SetFont('helvetica','B',9);
+    $pdf->SetXY($left, $totTopY);
+    $pdf->Cell($wMill + $wQty + $wUC, $TOTAL_H, 'TOTAL', 1, 0, 'L');
+    $pdf->Cell($wCom,   $TOTAL_H, $grandQtyF,   1, 0, 'R');
+    $pdf->Cell($wGross, $TOTAL_H, $grandGrossF, 1, 1, 'R');
+
+    // ---- Signature band at fixed bottom ----
+    $pdf->SetY($usableBottomY - $SIGNATURE_H);
+    $signHtml = <<<EOD
+<table border="1" cellpadding="4" cellspacing="0" width="100%">
+  <tr>
+    <td width="50%" align="center">___________ Posted By: ___________</td>
+    <td width="50%" align="center">___________ Prepared By: ___________</td>
+  </tr>
+</table>
+EOD;
+    $pdf->writeHTML($signHtml, true, false, false, false, '');
+
+    // Output inline
     $content = $pdf->Output('pbnForm.pdf', 'S');
-
     return response($content, 200)
         ->header('Content-Type', 'application/pdf')
         ->header('Content-Disposition', 'inline; filename="pbnForm.pdf"')
@@ -511,10 +497,20 @@ EOD;
 }
 
 
-
-public function formExcel(\Illuminate\Http\Request $request, $id = null)
+/**
+ * Small number formatter for local use.
+ * If you prefer, move this to a shared helper.
+ */
+private function numFmt($n): string
 {
-    // Accept id either as route param or as ?id=
+    return number_format((float)$n, 2);
+}
+
+
+
+
+public function formExcel(Request $request, $id = null)
+{
     $id = $id ?? $request->query('id');
     if (!$id) {
         return response()->json([
@@ -522,24 +518,24 @@ public function formExcel(\Illuminate\Http\Request $request, $id = null)
         ], 422);
     }
 
-    // Load main + details (same scoping as PDF)
-    $companyId = $request->query('company_id');
+    $validated = $request->validate([
+        'company_id' => ['required','integer'],
+    ]);
+    $companyId = (int) $validated['company_id'];
 
-    $main = \App\Models\PbnEntry::where('id', (int) $id)
-        ->when($companyId, fn($q) => $q->where('company_id', $companyId))
+    $main = PbnEntry::where('id', (int)$id)
+        ->where('company_id', $companyId)
         ->firstOrFail();
 
-    $details = \App\Models\PbnEntryDetail::where('pbn_entry_id', $main->id)
-        ->when($companyId, fn($q) => $q->where('company_id', $companyId))
+    $details = PbnEntryDetail::where('pbn_entry_id', $main->id)
+        ->where('company_id', $companyId)
         ->orderBy('row')
         ->get();
 
-    // Header data
     $cropYear    = $main->crop_year ?? '';
     $currentDate = now()->format('M d, Y h:i');
-    $receiptNo   = '';                 // 🔧 if you have RR No., set it here
+    $receiptNo   = '';
 
-    // Build workbook (PhpSpreadsheet)
     $spreadsheet = new Spreadsheet();
     $spreadsheet->getProperties()
         ->setCreator('Randy D. Lagdaan')
@@ -553,33 +549,28 @@ public function formExcel(\Illuminate\Http\Request $request, $id = null)
     $sheet = $spreadsheet->getActiveSheet();
     $sheet->setTitle('Quedan Listing');
 
-    // A1..A5 header block
-    $sheet->setCellValue('A1', 'Shipper: SUCDEN PHILIPPINES, INC');
-    $sheet->mergeCells('A1:H1');
+    // (same body as your current Excel builder; unchanged below this comment)
+    // --- header block ---
+    $sheet->setCellValue('A1', 'Shipper: SUCDEN PHILIPPINES, INC'); $sheet->mergeCells('A1:H1');
     $sheet->getStyle('A1')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
     $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(10);
 
-    $sheet->setCellValue('A2', 'Buyer: SUCDEN AMERICAS CORP.');
-    $sheet->mergeCells('A2:H2');
+    $sheet->setCellValue('A2', 'Buyer: SUCDEN AMERICAS CORP.');     $sheet->mergeCells('A2:H2');
     $sheet->getStyle('A2')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
     $sheet->getStyle('A2')->getFont()->setBold(true)->setSize(10);
 
-    $sheet->setCellValue('A3', 'Quedan Listings (CY' . $cropYear . ')');
-    $sheet->mergeCells('A3:H3');
+    $sheet->setCellValue('A3', 'Quedan Listings (CY' . $cropYear . ')'); $sheet->mergeCells('A3:H3');
     $sheet->getStyle('A3')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
     $sheet->getStyle('A3')->getFont()->setBold(true)->setSize(10);
 
-    $sheet->setCellValue('A4', $currentDate);
-    $sheet->mergeCells('A4:H4');
+    $sheet->setCellValue('A4', $currentDate);                       $sheet->mergeCells('A4:H4');
     $sheet->getStyle('A4')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
     $sheet->getStyle('A4')->getFont()->setBold(true)->setSize(10);
 
-    $sheet->setCellValue('A5', 'RR No.:' . $receiptNo);
-    $sheet->mergeCells('A5:H5');
+    $sheet->setCellValue('A5', 'RR No.:' . $receiptNo);             $sheet->mergeCells('A5:H5');
     $sheet->getStyle('A5')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
     $sheet->getStyle('A5')->getFont()->setBold(true)->setSize(10);
 
-    // Column widths
     $sheet->getColumnDimension('A')->setWidth(15);
     $sheet->getColumnDimension('B')->setWidth(15);
     $sheet->getColumnDimension('C')->setWidth(15);
@@ -589,7 +580,6 @@ public function formExcel(\Illuminate\Http\Request $request, $id = null)
     $sheet->getColumnDimension('G')->setWidth(15);
     $sheet->getColumnDimension('H')->setWidth(20);
 
-    // Header row labels (A7:H7)
     $sheet->setCellValue('A7', 'MillMark');
     $sheet->setCellValue('B7', 'Quedan No.');
     $sheet->setCellValue('C7', 'Quantity');
@@ -599,7 +589,6 @@ public function formExcel(\Illuminate\Http\Request $request, $id = null)
     $sheet->setCellValue('G7', 'TIN');
     $sheet->setCellValue('H7', 'Planter');
 
-    // Header row styles
     $sheet->getStyle('A7')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
     $sheet->getStyle('B7')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
     $sheet->getStyle('C7')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
@@ -611,50 +600,31 @@ public function formExcel(\Illuminate\Http\Request $request, $id = null)
     $sheet->getStyle('A7:H7')->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
     $sheet->freezePane('A8');
 
-    // Counters & totals
-    $row = 7;                // header row
-    $pageCount = 0;
-    $pcs = 0;                // page pcs
-    $totalPcs = 0;
-    $pageQty = 0;
-    $pageLiens = 0;
-    $grandQty = 0;
-    $grandLiens = 0;
+    $row = 7; $pageCount = 0; $pcs = 0; $totalPcs = 0;
+    $pageQty = 0; $pageLiens = 0; $grandQty = 0; $grandLiens = 0;
 
     if ($details->isNotEmpty()) {
-        // pad “Quedan No.” as 6 digits if you later have numbers there:
-        // $sheet->getStyle('B')->getNumberFormat()->setFormatCode('000000');
-
         foreach ($details as $d) {
             $millMark = strtoupper($d->mill_code ?: ($d->mill ?? ''));
             $qty      = (int) round((float) ($d->quantity ?? 0));
             $liens    = (int) round(((float) ($d->quantity ?? 0)) * ((float) ($d->commission ?? 0)));
 
-            $pageCount++;
-            $pcs++;
-            $totalPcs++;
-
-            $pageQty   += $qty;
-            $pageLiens += $liens;
-            $grandQty  += $qty;
-            $grandLiens += $liens;
+            $pageCount++; $pcs++; $totalPcs++;
+            $pageQty += $qty; $pageLiens += $liens; $grandQty += $qty; $grandLiens += $liens;
 
             $row++;
             $sheet->setCellValue('A' . $row, $millMark);
-            $sheet->setCellValueExplicit('B' . $row, '', \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING); // Quedan No. (blank)
+            $sheet->setCellValueExplicit('B' . $row, '', \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
             $sheet->setCellValue('C' . $row, $qty);
             $sheet->setCellValue('D' . $row, $liens);
-            $sheet->setCellValue('E' . $row, '');   // Week Ending
-            $sheet->setCellValue('F' . $row, '');   // Date Issued
-            $sheet->setCellValue('G' . $row, '');   // TIN
-            $sheet->setCellValue('H' . $row, '');   // Planter
-
+            $sheet->setCellValue('E' . $row, '');
+            $sheet->setCellValue('F' . $row, '');
+            $sheet->setCellValue('G' . $row, '');
+            $sheet->setCellValue('H' . $row, '');
             $sheet->getStyle('C' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
             $sheet->getStyle('D' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-            // Every 50 rows → PAGE TOTAL + repeat page header block (exactly like legacy)
             if (($pageCount % 50) === 0) {
-                // PAGE TOTAL
                 $row++;
                 $sheet->setCellValue('A' . $row, 'PAGE TOTAL:');
                 $sheet->getStyle('A' . $row)->getFont()->setSize(12);
@@ -672,48 +642,34 @@ public function formExcel(\Illuminate\Http\Request $request, $id = null)
                 $sheet->getStyle('D' . $row)->getFont()->setSize(12);
                 $sheet->getStyle('D' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-                // spacer
                 $row++;
-                $sheet->setCellValue('A' . $row, '');
-                $sheet->mergeCells("A{$row}:H{$row}");
+                $sheet->setCellValue('A' . $row, ''); $sheet->mergeCells("A{$row}:H{$row}");
 
-                // Repeat header block like legacy
                 $row++;
-                $sheet->setCellValue('A' . $row, 'Shipper: SUCDEN PHILIPPINES, INC.');
-                $sheet->mergeCells("A{$row}:H{$row}");
+                $sheet->setCellValue('A' . $row, 'Shipper: SUCDEN PHILIPPINES, INC.'); $sheet->mergeCells("A{$row}:H{$row}");
                 $sheet->getStyle('A' . $row)->getFont()->setBold(true)->setSize(10);
                 $sheet->getStyle('A' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
 
                 $row++;
-                $sheet->setCellValue('A' . $row, 'Buyer: SUCDEN AMERICAS CORP.');
-                $sheet->mergeCells("A{$row}:H{$row}");
+                $sheet->setCellValue('A' . $row, 'Buyer: SUCDEN AMERICAS CORP.'); $sheet->mergeCells("A{$row}:H{$row}");
                 $sheet->getStyle('A' . $row)->getFont()->setBold(true)->setSize(10);
                 $sheet->getStyle('A' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
 
                 $row++;
-                $sheet->setCellValue('A' . $row, 'Quedan Listings (CY' . $cropYear . ')');
-                $sheet->mergeCells("A{$row}:H{$row}");
+                $sheet->setCellValue('A' . $row, 'Quedan Listings (CY' . $cropYear . ')'); $sheet->mergeCells("A{$row}:H{$row}");
                 $sheet->getStyle('A' . $row)->getFont()->setBold(true)->setSize(10);
                 $sheet->getStyle('A' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
 
                 $row++;
-                $sheet->setCellValue('A' . $row, $currentDate);
-                $sheet->mergeCells("A{$row}:H{$row}");
+                $sheet->setCellValue('A' . $row, $currentDate); $sheet->mergeCells("A{$row}:H{$row}");
                 $sheet->getStyle('A' . $row)->getFont()->setBold(true)->setSize(10);
                 $sheet->getStyle('A' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
 
                 $row++;
-                $sheet->setCellValue('A' . $row, 'RR No.:' . $receiptNo);
-                $sheet->mergeCells("A{$row}:H{$row}");
+                $sheet->setCellValue('A' . $row, 'RR No.:' . $receiptNo); $sheet->mergeCells("A{$row}:H{$row}");
                 $sheet->getStyle('A' . $row)->getFont()->setBold(true)->setSize(10);
                 $sheet->getStyle('A' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
 
-                // widths again (legacy did it)
-                foreach (range('A','H') as $col) {
-                    // keep same widths; no-op if unchanged
-                }
-
-                // Column header row (MillMark..Planter)
                 $row += 2;
                 $sheet->setCellValue('A' . $row, 'MillMark');
                 $sheet->setCellValue('B' . $row, 'Quedan No.');
@@ -725,58 +681,43 @@ public function formExcel(\Illuminate\Http\Request $request, $id = null)
                 $sheet->setCellValue('H' . $row, 'Planter');
                 $sheet->getStyle("A{$row}:H{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
 
-                // Reset page counters
                 $sheet->freezePane('A' . ($row + 1));
-                $pageQty = 0;
-                $pageLiens = 0;
-                $pcs = 0;
-                // next data row will be ++$row at loop top
+                $pageQty = 0; $pageLiens = 0; $pcs = 0;
             }
         }
     }
 
-    // Final PAGE TOTAL
     $row++;
     $sheet->setCellValue('A' . $row, 'PAGE TOTAL:');
     $sheet->getStyle('A' . $row)->getFont()->setSize(12);
     $sheet->getStyle('A' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-
     $sheet->setCellValue('B' . $row, $pcs . ' PCS.');
     $sheet->getStyle('B' . $row)->getFont()->setSize(12);
     $sheet->getStyle('B' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-
     $sheet->setCellValue('C' . $row, $pageQty);
     $sheet->getStyle('C' . $row)->getFont()->setSize(12);
     $sheet->getStyle('C' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-
     $sheet->setCellValue('D' . $row, $pageLiens);
     $sheet->getStyle('D' . $row)->getFont()->setSize(12);
     $sheet->getStyle('D' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-    // GRAND TOTAL
     $row++;
     $sheet->setCellValue('A' . $row, 'GRAND TOTAL:');
     $sheet->getStyle('A' . $row)->getFont()->setSize(12);
     $sheet->getStyle('A' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-
     $sheet->setCellValue('B' . $row, $totalPcs . ' PCS.');
     $sheet->getStyle('B' . $row)->getFont()->setSize(12);
     $sheet->getStyle('B' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-
     $sheet->setCellValue('C' . $row, $grandQty);
     $sheet->getStyle('C' . $row)->getFont()->setSize(12);
     $sheet->getStyle('C' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-
     $sheet->setCellValue('D' . $row, $grandLiens);
     $sheet->getStyle('D' . $row)->getFont()->setSize(12);
     $sheet->getStyle('D' . $row)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-    // Output as .xls (Excel5) to match your old file
     $filename = 'quedanListingExcel.xls';
     $tmpDir = storage_path('app/tmp');
-    if (!is_dir($tmpDir)) {
-        @mkdir($tmpDir, 0775, true);
-    }
+    if (!is_dir($tmpDir)) { @mkdir($tmpDir, 0775, true); }
     $path = $tmpDir . '/' . $filename;
 
     $writer = new Xls($spreadsheet);

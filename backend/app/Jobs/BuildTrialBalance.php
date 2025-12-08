@@ -557,26 +557,37 @@ private function n2(float $v): string
         return "TrialBalance_{$acc}_{$s}_to_{$e}.{$ext}";
     }
 
-    private function targetLocal(string $base, string $ext, string $downloadName): array
-    {
-        $disk = Storage::disk('local'); // storage/app
-        $dir  = 'reports';
-        $disk->makeDirectory($dir);
-
-        $internal = sprintf('%s_%s_%s.%s', $base, now()->format('YmdHis'), Str::uuid(), $ext);
-        $rel = "{$dir}/{$internal}";
-        $abs = storage_path("app/{$rel}");
-
-        return [
-            'disk'          => 'local',
-            'rel'           => $rel,
-            'abs'           => $abs,
-            'url'           => null,
-            'ext'           => $ext,
-            'download_name' => $downloadName,
-            'filename'      => basename($rel),
-        ];
+private function targetLocal(string $base, string $ext, string $downloadName): array
+{
+    $baseDir = storage_path('app');             // /var/www/html/storage/app
+    if (!is_dir($baseDir)) {
+        @mkdir($baseDir, 0775, true);
     }
+
+    $dir = 'reports';
+    $fullDir = $baseDir . DIRECTORY_SEPARATOR . $dir;
+    if (!is_dir($fullDir)) {
+        @mkdir($fullDir, 0775, true);
+    }
+
+    // Optional: permission guard
+    @chmod($fullDir, 0775);
+
+    $internal = sprintf('%s_%s_%s.%s', $base, now()->format('YmdHis'), \Illuminate\Support\Str::uuid(), $ext);
+    $rel = "{$dir}/{$internal}";
+    $abs = $fullDir . DIRECTORY_SEPARATOR . basename($internal);
+
+    return [
+        'disk'          => 'local',
+        'rel'           => $rel,
+        'abs'           => $abs,
+        'url'           => null,
+        'ext'           => $ext,
+        'download_name' => $downloadName,
+        'filename'      => basename($rel),
+    ];
+}
+
 
     private function prune(string $dir, int $days = 2, string $disk = 'local'): void
     {

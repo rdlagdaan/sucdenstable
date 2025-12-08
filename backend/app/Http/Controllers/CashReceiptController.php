@@ -10,15 +10,17 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
-/**
- * PDF class (Receipt Voucher) – matches your SalesJournal TCPDF style and
- * the legacy RV layout: title, RV number, date, collection receipt, payor,
- * amount (in words), details, and GL lines.
- */
+// ⬇️ Excel export
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
+use PhpOffice\PhpSpreadsheet\Writer\Xls  as XlsWriter;
+use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Border;
+
 /**
  * PDF class (Receipt Voucher)
- * - Draws logo from public/images/sucdenLogo.jpg OR public/sucdenLogo.jpg
- * - Exposes setters for created date/time text (used in the footer)
+ * - Draws logo from common locations (jpg/png)
+ * - Exposes setters for created date/time text (footer)
  */
 class MyReceiptVoucherPDF extends \TCPDF {
     public $receiptDate;
@@ -28,16 +30,18 @@ class MyReceiptVoucherPDF extends \TCPDF {
     public function setDataReceiptTime($time) { $this->receiptTime = $time; }
 
     public function Header() {
-        // Try both common locations
+        // Try several common logo locations & extensions
         $candidates = [
             public_path('images/sucdenLogo.jpg'),
+            public_path('images/sucdenLogo.png'),
             public_path('sucdenLogo.jpg'),
+            public_path('sucdenLogo.png'),
         ];
         foreach ($candidates as $image) {
             if ($image && is_file($image)) {
                 // x=15, y=10, width=50 matches your legacy layout
                 $this->Image(
-                    $image, 15, 10, 50, '', 'JPG', '', 'T',
+                    $image, 15, 10, 50, '', '', '', 'T',
                     false, 300, '', false, false, 0, false, false, false
                 );
                 break;
@@ -89,10 +93,9 @@ class MyReceiptVoucherPDF extends \TCPDF {
     }
 }
 
-
 class CashReceiptController extends Controller
 {
-    // === 1) Generate next CR number (incremental, numeric-like) ===
+    // === 1) Generate next CR number ===
     public function generateCrNumber(Request $req)
     {
         $companyId = $req->query('company_id');
@@ -122,7 +125,6 @@ class CashReceiptController extends Controller
             'user_id'            => ['nullable','integer'],
         ]);
 
-        // Generate CR number if missing
         if (empty($data['cr_no'])) {
             $next = $this->generateCrNumber(new Request(['company_id' => $data['company_id']]));
             $data['cr_no'] = $next->getData()->cr_no ?? null;
@@ -136,7 +138,7 @@ class CashReceiptController extends Controller
 
         $main = CashReceipts::create($data);
 
-        // Auto-insert first detail = BANK GL (if resolvable from bank_id -> account_code.bank_id)
+        // Auto-insert BANK GL line if resolvable
         $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
             ->where('active_flag', 1)
             ->first(['acct_code']);
@@ -146,9 +148,9 @@ class CashReceiptController extends Controller
                 'acct_code'      => $bankAcct->acct_code,
                 'debit'          => 0,
                 'credit'         => 0,
-                'workstation_id' => 'BANK',     // marker to identify the bank line
-                'company_id'     => $data['company_id'], 
-                'user_id'    => $data['user_id'] ?? null,
+                'workstation_id' => 'BANK',
+                'company_id'     => $data['company_id'],
+                'user_id'        => $data['user_id'] ?? null,
             ]);
         }
 
@@ -158,7 +160,7 @@ class CashReceiptController extends Controller
         ]);
     }
 
-    // === 3) Insert a detail row (enforce one-sided amount, valid acct, no duplicates) ===
+    // === 3) Insert a detail row ===
     public function saveDetail(Request $req)
     {
         $payload = $req->validate([
@@ -167,7 +169,7 @@ class CashReceiptController extends Controller
             'debit'          => ['nullable','numeric'],
             'credit'         => ['nullable','numeric'],
             'workstation_id' => ['nullable','string','max:25'],
-            'user_id'    => ['nullable','integer'],
+            'user_id'        => ['nullable','integer'],
         ]);
 
         $debit  = (float)($payload['debit']  ?? 0);
@@ -179,13 +181,11 @@ class CashReceiptController extends Controller
             return response()->json(['message' => 'Debit or credit is required.'], 422);
         }
 
-        // Valid and active account?
         $exists = AccountCode::where('acct_code', $payload['acct_code'])
             ->where('active_flag', 1)
             ->exists();
         if (!$exists) return response()->json(['message' => 'Invalid or inactive account.'], 422);
 
-        // No duplicate acct_code in same transaction
         $dup = CashReceiptDetails::where('transaction_id',$payload['transaction_id'])
             ->where('acct_code',$payload['acct_code'])
             ->exists();
@@ -196,14 +196,13 @@ class CashReceiptController extends Controller
         $detail = CashReceiptDetails::create([
             'transaction_id' => $payload['transaction_id'],
             'acct_code'      => $payload['acct_code'],
-            'debit'          => $debit,   // from your computed values above
-            'credit'         => $credit,  // from your computed values above
+            'debit'          => $debit,
+            'credit'         => $credit,
             'workstation_id' => $payload['workstation_id'] ?? null,
             'user_id'        => $payload['user_id'] ?? null,
-            'company_id'     => $companyId,   // <-- IMPORTANT
+            'company_id'     => $companyId,
         ]);
 
-        // Adjust BANK debit line after any change and recalc totals
         $this->adjustBankDebit($payload['transaction_id']);
         $totals = $this->recalcTotals($payload['transaction_id']);
 
@@ -232,14 +231,12 @@ class CashReceiptController extends Controller
         if (array_key_exists('debit', $payload))     $apply['debit']     = $payload['debit'];
         if (array_key_exists('credit', $payload))    $apply['credit']    = $payload['credit'];
 
-        // If both provided, must be one-sided
         if (array_key_exists('debit',$apply) && array_key_exists('credit',$apply)) {
             $d = (float)$apply['debit']; $c = (float)$apply['credit'];
             if ($d > 0 && $c > 0) return response()->json(['message'=>'Provide either debit OR credit.'], 422);
             if ($d <= 0 && $c <= 0) return response()->json(['message'=>'Debit or credit is required.'], 422);
         }
 
-        // If acct_code is changing, validate & prevent duplicates
         if (array_key_exists('acct_code', $apply) && $apply['acct_code'] !== $detail->acct_code) {
             $exists = AccountCode::where('acct_code', $apply['acct_code'])
                 ->where('active_flag', 1)->exists();
@@ -265,7 +262,6 @@ class CashReceiptController extends Controller
             'transaction_id' => ['required','integer','exists:cash_receipts,id'],
         ]);
 
-        // Prevent deleting the BANK row (workstation_id='BANK')
         $row = CashReceiptDetails::find($payload['id']);
         if ($row && ($row->workstation_id === 'BANK')) {
             return response()->json(['message' => 'Cannot delete the bank line.'], 422);
@@ -279,7 +275,7 @@ class CashReceiptController extends Controller
         return response()->json(['ok'=>true,'totals'=>$totals]);
     }
 
-    // === 6) Show main + details (for Search Transaction) ===
+    // === 6) Show main + details ===
     public function show($id, Request $req)
     {
         $companyId = $req->query('company_id');
@@ -303,7 +299,7 @@ class CashReceiptController extends Controller
         return response()->json(['main'=>$main,'details'=>$details]);
     }
 
-    // === 7) Search list for combobox (search by rv/cr no, customer, bank, etc.) ===
+    // === 7) Search list ===
     public function list(Request $req)
     {
         $companyId = $req->query('company_id');
@@ -335,7 +331,7 @@ class CashReceiptController extends Controller
         return response()->json($rows);
     }
 
-    // === 8) Dropdowns (customers, accounts, banks, payment methods) ===
+    // === 8) Dropdowns ===
     public function customers(Request $req)
     {
         $companyId = $req->query('company_id');
@@ -364,7 +360,6 @@ class CashReceiptController extends Controller
                 $k->where('acct_code','like',"%$q%")->orWhere('acct_desc','like',"%$q%");
             }))
             ->orderBy('acct_desc')
-            //->limit(200)
             ->get(['acct_code','acct_desc','bank_id']);
 
         return response()->json($rows);
@@ -378,7 +373,6 @@ class CashReceiptController extends Controller
             ->orderBy('bank_name')
             ->get(['bank_id','bank_name']);
 
-        // shape for dropdown-with-headers
         $items = $rows->map(fn($r)=>[
             'code' => $r->bank_id,
             'label' => $r->bank_id,
@@ -416,7 +410,6 @@ class CashReceiptController extends Controller
         CashReceipts::where('id',$data['id'])->update(['is_cancel'=>$val]);
         return response()->json(['ok'=>true,'is_cancel'=>$val]);
     }
-
 
     /** Convert 0..999 into words (english) */
     private function chunkToWords(int $n): string {
@@ -467,64 +460,60 @@ class CashReceiptController extends Controller
         return $words . $tail;
     }
 
-
-
-
     // === 10) Print Receipt Voucher (PDF) ===
-// === 10) Print Receipt Voucher (PDF) ===
-public function formPdf(Request $req, $id)
-{
-    $header = DB::table('cash_receipts as r')
-        ->leftJoin('customer_list as c', 'r.cust_id', '=', 'c.cust_id')
-        ->select(
-            'r.id','r.cr_no','r.cust_id','r.receipt_amount','r.pay_method',
-            'r.bank_id','r.details','r.is_cancel','r.collection_receipt',
-            DB::raw("to_char(r.receipt_date, 'MM/DD/YYYY') as receipt_date"),
-            'c.cust_name','r.amount_in_words','r.workstation_id','r.user_id','r.created_at'
-        )
-        ->where('r.id', $id)
-        ->first();
+    public function formPdf(Request $req, $id)
+    {
+        $header = DB::table('cash_receipts as r')
+            ->leftJoin('customer_list as c', 'r.cust_id', '=', 'c.cust_id')
+            ->select(
+                'r.id','r.cr_no','r.cust_id','r.receipt_amount','r.pay_method',
+                'r.bank_id','r.details','r.is_cancel','r.collection_receipt',
+                DB::raw("to_char(r.receipt_date, 'MM/DD/YYYY') as receipt_date"),
+                'c.cust_name','r.amount_in_words','r.workstation_id','r.user_id','r.created_at'
+            )
+            ->where('r.id', $id)
+            ->first();
 
-    if (!$header || $header->is_cancel === 'y') {
-        abort(404, 'Receipt Voucher not found or cancelled');
-    }
+        if (!$header || $header->is_cancel === 'y') {
+            abort(404, 'Receipt Voucher not found or cancelled');
+        }
 
-    $details = DB::table('cash_receipt_details as d')
-        ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
-        ->where('d.transaction_id', $id)
-        ->orderBy('d.workstation_id','desc') // BANK row first (to mimic legacy)
-        ->orderBy('d.debit','desc')
-        ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
-        ->get();
+        $details = DB::table('cash_receipt_details as d')
+            ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
+            ->where('d.transaction_id', $id)
+            ->orderBy('d.workstation_id','desc') // BANK row first
+            ->orderBy('d.debit','desc')
+            ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
+            ->get();
 
-    $totalDebit  = (float)$details->sum('debit');
-    $totalCredit = (float)$details->sum('credit');
+        $totalDebit  = (float)$details->sum('debit');
+        $totalCredit = (float)$details->sum('credit');
 
-    // ✅ Amount in words MUST follow receipt_amount (figures shown)
-    $receiptAmount = (float)($header->receipt_amount ?? 0);
-    $amountInWords = $this->pesoWords($receiptAmount); // <-- compute from figures
-    $receiptAmountFmt = number_format($receiptAmount, 2);
+        // Amount in words must reflect the figure printed
+        $receiptAmount   = (float)($header->receipt_amount ?? 0);
+        $amountInWords   = $this->pesoWords($receiptAmount);
+        $receiptAmtFmt   = number_format($receiptAmount, 2);
 
-    $pdf = new MyReceiptVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-    $pdf->setPrintHeader(true);   // <-- ensure Header() runs (logo)
-    $pdf->setPrintFooter(true);
-    $pdf->SetMargins(15,30,15);   // left, top, right
-    $pdf->SetHeaderMargin(8);
-    $pdf->SetFooterMargin(10);
-    $pdf->AddPage();
-    $pdf->SetFont('helvetica','',7);
+        $pdf = new MyReceiptVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
+        $pdf->setPrintHeader(true);
+        $pdf->setPrintFooter(true);
+        $pdf->setImageScale(1.25);
+        $pdf->SetMargins(15,30,15);   // left, top, right
+        $pdf->SetHeaderMargin(8);
+        $pdf->SetFooterMargin(10);
+        $pdf->AddPage();
+        $pdf->SetFont('helvetica','',7);
 
-    $pdf->setDataReceiptDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
-    $pdf->setDataReceiptTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
+        $pdf->setDataReceiptDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
+        $pdf->setDataReceiptTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
 
-    $rvNumber        = $header->cr_no;
-    $receiptDateText = $header->receipt_date;
-    $collectionNo    = $header->collection_receipt;
-    $custName        = (string)($header->cust_name ?? $header->cust_id);
-    $explanation     = (string)($header->details ?? '');
+        $rvNumber        = $header->cr_no;
+        $receiptDateText = $header->receipt_date;
+        $collectionNo    = $header->collection_receipt;
+        $custName        = (string)($header->cust_name ?? $header->cust_id);
+        $explanation     = (string)($header->details ?? '');
 
-    // Body
-    $tbl = <<<EOD
+        $tbl = <<<EOD
 <br><br>
 <table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
 <tr>
@@ -567,7 +556,7 @@ public function formPdf(Request $req, $id)
   </tr>
   <tr>
     <td height="80"><font size="10">{$explanation}</font></td>
-    <td align="right"><font size="10">{$receiptAmountFmt}</font></td>
+    <td align="right"><font size="10">{$receiptAmtFmt}</font></td>
   </tr>
 </table>
 
@@ -581,10 +570,10 @@ public function formPdf(Request $req, $id)
  </tr>
 EOD;
 
-    foreach ($details as $d) {
-        $debit  = $d->debit  ? number_format((float)$d->debit, 2) : '';
-        $credit = $d->credit ? number_format((float)$d->credit, 2) : '';
-        $tbl .= <<<EOD
+        foreach ($details as $d) {
+            $debit  = $d->debit  ? number_format((float)$d->debit, 2) : '';
+            $credit = $d->credit ? number_format((float)$d->credit, 2) : '';
+            $tbl .= <<<EOD
   <tr>
     <td align="left"><font size="10">{$d->acct_code}</font></td>
     <td align="left"><font size="10">{$d->acct_desc}</font></td>
@@ -592,11 +581,11 @@ EOD;
     <td align="right"><font size="10">{$credit}</font></td>
   </tr>
 EOD;
-    }
+        }
 
-    $fmtD = number_format($totalDebit, 2);
-    $fmtC = number_format($totalCredit, 2);
-    $tbl .= <<<EOD
+        $fmtD = number_format($totalDebit, 2);
+        $fmtC = number_format($totalCredit, 2);
+        $tbl .= <<<EOD
   <tr>
     <td></td>
     <td align="left"><font size="10">TOTAL</font></td>
@@ -606,33 +595,153 @@ EOD;
 </table>
 EOD;
 
-    $pdf->writeHTML($tbl, true, false, false, false, '');
+        $pdf->writeHTML($tbl, true, false, false, false, '');
 
-    // Don’t allow printing if not balanced
-    if (abs($totalDebit - $totalCredit) > 0.005) {
-        $html = sprintf(
-            '<!doctype html><meta charset="utf-8">
-            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
-            <h2>Cannot print Receipt Voucher</h2>
-            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
-            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
-            number_format($totalDebit, 2),
-            number_format($totalCredit, 2)
-        );
-        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+        // Don’t allow printing if not balanced
+        if (abs($totalDebit - $totalCredit) > 0.005) {
+            $html = sprintf(
+                '<!doctype html><meta charset="utf-8">
+                <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+                <h2>Cannot print Receipt Voucher</h2>
+                <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
+                <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+                number_format($totalDebit, 2),
+                number_format($totalCredit, 2)
+            );
+            return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+        }
+
+        $pdfContent = $pdf->Output('receiptVoucher.pdf', 'S');
+
+        return response($pdfContent, 200)
+            ->header('Content-Type', 'application/pdf')
+            ->header('Content-Disposition', 'inline; filename="receiptVoucher.pdf"');
     }
 
-    $pdfContent = $pdf->Output('receiptVoucher.pdf', 'S');
+    // === 10b) Excel (XLSX default; ?format=xls optional) ===
+    public function formExcel(Request $req, $id)
+    {
+        $header = DB::table('cash_receipts as r')
+            ->leftJoin('customer_list as c', 'r.cust_id', '=', 'c.cust_id')
+            ->select(
+                'r.id','r.cr_no','r.cust_id','r.receipt_amount','r.pay_method',
+                'r.bank_id','r.details','r.is_cancel','r.collection_receipt',
+                DB::raw("to_char(r.receipt_date, 'MM/DD/YYYY') as receipt_date"),
+                'c.cust_name','r.amount_in_words','r.created_at'
+            )
+            ->where('r.id', $id)
+            ->first();
 
-    return response($pdfContent, 200)
-        ->header('Content-Type', 'application/pdf')
-        ->header('Content-Disposition', 'inline; filename="receiptVoucher.pdf"');
-}
+        if (!$header || $header->is_cancel === 'y') {
+            abort(404, 'Receipt Voucher not found or cancelled');
+        }
 
+        $details = DB::table('cash_receipt_details as d')
+            ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
+            ->where('d.transaction_id', $id)
+            ->orderBy('d.workstation_id','desc') // BANK row first
+            ->orderBy('d.debit','desc')
+            ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
+            ->get();
 
-    public function formExcel($id) { return response('Excel stub – implement renderer', 200); }
+        $totalDebit  = (float)$details->sum('debit');
+        $totalCredit = (float)$details->sum('credit');
+        $receiptAmount = (float)($header->receipt_amount ?? 0);
+        $amountInWords = $this->pesoWords($receiptAmount);
 
-    // === 11) Unbalanced helpers (optional parity with Sales Journal) ===
+        // Build spreadsheet
+        $ss = new Spreadsheet();
+        $sheet = $ss->getActiveSheet();
+        $sheet->setTitle('Receipt Voucher');
+
+        $row = 1;
+        $sheet->setCellValue("A{$row}", 'RECEIPT VOUCHER'); $row++;
+        $sheet->setCellValue("A{$row}", 'RV Number:');      $sheet->setCellValue("B{$row}", $header->cr_no); $row++;
+        $sheet->setCellValue("A{$row}", 'Date:');           $sheet->setCellValue("B{$row}", $header->receipt_date); $row++;
+        $sheet->setCellValue("A{$row}", 'Receipt Number:'); $sheet->setCellValue("B{$row}", $header->collection_receipt); $row++;
+        $sheet->setCellValue("A{$row}", 'Payor:');          $sheet->setCellValue("B{$row}", (string)($header->cust_name ?? $header->cust_id)); $row++;
+        $sheet->setCellValue("A{$row}", 'Amount (in words):'); $sheet->setCellValue("B{$row}", $amountInWords); $row += 2;
+
+        // Details box
+        $sheet->setCellValue("A{$row}", 'DETAILS');
+        $sheet->setCellValue("B{$row}", 'AMOUNT');
+        $sheet->getStyle("A{$row}:B{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+        $sheet->getStyle("A{$row}:B{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+        $row++;
+
+        $sheet->setCellValue("A{$row}", (string)($header->details ?? ''));
+        $sheet->setCellValue("B{$row}", $receiptAmount);
+        $sheet->getStyle("A{$row}:B{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+        $sheet->getStyle("B{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+        $row += 2;
+
+        // GL lines
+        $sheet->setCellValue("A{$row}", 'ACCOUNT');
+        $sheet->setCellValue("B{$row}", 'GL ACCOUNT');
+        $sheet->setCellValue("C{$row}", 'DEBIT');
+        $sheet->setCellValue("D{$row}", 'CREDIT');
+        $sheet->getStyle("A{$row}:D{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+        $sheet->getStyle("A{$row}:D{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+        $row++;
+
+        foreach ($details as $d) {
+            $sheet->setCellValue("A{$row}", $d->acct_code);
+            $sheet->setCellValue("B{$row}", $d->acct_desc);
+            if ($d->debit)  $sheet->setCellValue("C{$row}", (float)$d->debit);
+            if ($d->credit) $sheet->setCellValue("D{$row}", (float)$d->credit);
+            $sheet->getStyle("A{$row}:D{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+            $sheet->getStyle("C{$row}:D{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+            $row++;
+        }
+
+        // Totals
+        $sheet->setCellValue("B{$row}", 'TOTAL');
+        $sheet->setCellValue("C{$row}", $totalDebit);
+        $sheet->setCellValue("D{$row}", $totalCredit);
+        $sheet->getStyle("A{$row}:D{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+        $sheet->getStyle("C{$row}:D{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+
+        // Column widths
+        $sheet->getColumnDimension('A')->setWidth(18);
+        $sheet->getColumnDimension('B')->setWidth(40);
+        $sheet->getColumnDimension('C')->setWidth(14);
+        $sheet->getColumnDimension('D')->setWidth(14);
+
+        // Bold headings
+        $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
+        $sheet->getStyle('A1:D1')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        foreach (['A2','A3','A4','A5','A6'] as $addr) {
+            $sheet->getStyle($addr)->getFont()->setBold(true);
+        }
+
+        // Stream to browser
+        $format = strtolower((string)$req->query('format','xlsx'));
+        $fileBase = 'receipt-voucher-'.($header->cr_no ?: $id);
+        if ($format === 'xls') {
+            $writer = new XlsWriter($ss);
+            $filename = $fileBase.'.xls';
+            $contentType = 'application/vnd.ms-excel';
+        } else {
+            $writer = new XlsxWriter($ss);
+            $filename = $fileBase.'.xlsx';
+            $contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        }
+
+        // Output buffer clean (Octane/Swoole safe)
+        if (ob_get_length()) { ob_end_clean(); }
+
+        return response()->stream(function () use ($writer) {
+            $writer->save('php://output');
+        }, 200, [
+            'Content-Type'        => $contentType,
+            'Content-Disposition' => 'inline; filename="'.$filename.'"',
+            'Cache-Control'       => 'max-age=0, no-cache, no-store, must-revalidate',
+            'Pragma'              => 'no-cache',
+            'Expires'             => '0',
+        ]);
+    }
+
+    // === 11) Unbalanced helpers ===
     public function unbalancedExists(Request $req)
     {
         $companyId = $req->query('company_id');
@@ -662,25 +771,17 @@ EOD;
     }
 
     // ---- Private helpers ----
-
-    /**
-     * Adjust the BANK row debit so that:
-     *   bank_debit = (sum of credits) - (sum of debits excluding bank row)
-     * Auto-inserts the bank row if it’s missing and a mapping exists for bank_id.
-     */
     protected function adjustBankDebit(int $transactionId): void
     {
         $main = CashReceipts::find($transactionId);
         if (!$main) return;
 
-        // Resolve bank acct_code
         $bankAcct = AccountCode::where('bank_id', $main->bank_id)
             ->where('active_flag', 1)
             ->first(['acct_code']);
 
         if (!$bankAcct) return;
 
-        // Find (or create) the BANK row
         $bankRow = CashReceiptDetails::where('transaction_id', $transactionId)
             ->where('acct_code', $bankAcct->acct_code)
             ->first();
@@ -693,31 +794,20 @@ EOD;
                 'credit'         => 0,
                 'workstation_id' => 'BANK',
                 'user_id'        => $main->user_id ?? null,
-                'company_id'     => $main->company_id,   // <-- IMPORTANT
+                'company_id'     => $main->company_id,
             ]);
         } elseif ($bankRow->company_id === null) {
-            // backfill if an old BANK row exists without company_id
             $bankRow->update(['company_id' => $main->company_id]);
         }
 
-
-        $sumCredit = (float) CashReceiptDetails::where('transaction_id', $transactionId)
-            ->sum('credit');
-
+        $sumCredit = (float) CashReceiptDetails::where('transaction_id', $transactionId)->sum('credit');
         $sumDebitExBank = (float) CashReceiptDetails::where('transaction_id', $transactionId)
-            ->where('id', '<>', $bankRow->id)
-            ->sum('debit');
+            ->where('id', '<>', $bankRow->id)->sum('debit');
 
         $newBankDebit = max(0, $sumCredit - $sumDebitExBank);
-
         $bankRow->update(['debit' => $newBankDebit, 'credit' => 0]);
     }
 
-    /**
-     * Recalc totals and update main:
-     *   - receipt_amount = sum_credit (per requirement)
-     *   - sum_debit, sum_credit, is_balanced
-     */
     protected function recalcTotals(int $transactionId): array
     {
         $tot = CashReceiptDetails::where('transaction_id',$transactionId)

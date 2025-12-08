@@ -55,6 +55,8 @@ services:
     build:
       context: ./frontend-web
       dockerfile: Dockerfile   # ← moved under build
+    ports:
+      - "3001:80"      
     restart: unless-stopped
     networks: [app-network]
 

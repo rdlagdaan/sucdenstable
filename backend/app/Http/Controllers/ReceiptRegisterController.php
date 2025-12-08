@@ -2,29 +2,27 @@
 
 namespace App\Http\Controllers;
 
-use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use App\Jobs\BuildReceiptRegister; // <-- from the earlier backend we generated
+use Illuminate\Http\JsonResponse;
+use App\Jobs\BuildReceiptRegister;
 
 class ReceiptRegisterController extends Controller
 {
-    /** Month options from month_list (ordered numerically). */
-    public function months()
+    public function months(): JsonResponse
     {
         $rows = DB::table('month_list')
-            ->selectRaw("month_num, month_desc")
-            ->orderByRaw("CAST(NULLIF(month_num,'') AS integer)")
+            ->selectRaw('month_num, month_desc')
+            ->orderByRaw('CAST(NULLIF(month_num, \'\') AS integer)')
             ->get();
 
         return response()->json($rows);
     }
 
-    /** Year options from cash_receipts.receipt_date (desc). */
-    public function years()
+    public function years(): JsonResponse
     {
         $years = DB::table('cash_receipts')
             ->selectRaw("DISTINCT EXTRACT(YEAR FROM receipt_date)::int AS year")
@@ -37,40 +35,44 @@ class ReceiptRegisterController extends Controller
             $years = range($y, $y - 5);
         }
 
-        // return [{year: 2025}, ...]
         return response()->json(array_map(fn($yr)=>['year'=>(int)$yr], $years));
     }
 
-    /** Start the report build (pdf|excel). */
-    public function start(Request $req)
+    public function start(Request $req): JsonResponse
     {
         $v = $req->validate([
             'month'  => 'required|integer|min:1|max:12',
             'year'   => 'required|integer|min:1900|max:3000',
-            'format' => 'required|in:pdf,excel',
+            'format' => 'required|string|in:pdf,excel',
             'query'  => 'nullable|string|max:200',
         ]);
 
-        $ticket = Str::uuid()->toString();
+        $fmt = $v['format']; // keep 'pdf' | 'excel' (Excel writer still saves .xls)
+
+        $ticket     = Str::uuid()->toString();
+        $companyId  = $req->user()->company_id ?? null;
+        $userId     = $req->user()->id ?? null;
+
         Cache::put("rr:$ticket", [
             'status'     => 'queued',
             'progress'   => 0,
-            'format'     => $v['format'],
+            'format'     => $fmt, // 'pdf' | 'excel'
             'file'       => null,
             'error'      => null,
-            'period'     => [$v['month'], $v['year']],
-            'user_id'    => $req->user()->id ?? null,
-            'company_id' => $req->user()->company_id ?? null,
+            'period'     => [(int)$v['month'], (int)$v['year']],
+            'user_id'    => $userId,
+            'company_id' => $companyId,
             'query'      => $v['query'] ?? null,
         ], now()->addHours(2));
 
-        BuildReceiptRegister::dispatch(
+        // Octane-safe
+        BuildReceiptRegister::dispatchAfterResponse(
             ticket:    $ticket,
             month:     (int)$v['month'],
             year:      (int)$v['year'],
-            format:    $v['format'],
-            companyId: $req->user()->company_id ?? null,
-            userId:    $req->user()->id ?? null,
+            format:    $fmt,
+            companyId: $companyId,
+            userId:    $userId,
             query:     $v['query'] ?? null
         );
 

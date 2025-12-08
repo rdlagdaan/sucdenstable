@@ -5,10 +5,28 @@ import napi from '../../../../utils/axiosnapi';
 type Status = {
   status: 'queued' | 'running' | 'done' | 'error';
   progress: number;
-  format: 'pdf' | 'excel';
+  format: 'pdf' | 'xls';        // normalized
   file?: string | null;
   error?: string | null;
 };
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function openBlob(blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+const POLL_MS = 1500;
 
 export default function GeneralJournalBook() {
   const [startDate, setStartDate] = useState(dayjs().startOf('month').format('YYYY-MM-DD'));
@@ -20,20 +38,24 @@ export default function GeneralJournalBook() {
   const [showModal, setShowModal] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<number | null>(null);
 
-  async function begin(format: 'pdf' | 'excel') {
+  const friendlyName = () =>
+    `GeneralJournal_${startDate}_to_${endDate}.${status?.format === 'pdf' ? 'pdf' : 'xls'}`;
+
+  async function begin(requested: 'pdf' | 'excel') {
     if (busy) return;
     setBusy(true);
     try {
-      const { data } = await napi.post('/general-journal/report', {
+      // normalize to controller expectation (pdf | excel/xls/xlsx → controller maps to pdf|xls)
+      const { data } = await napi.post('general-journal/report', {
         start_date: startDate,
         end_date: endDate,
-        format,
+        format: requested,
         query: searchTerm || undefined,
       });
       setTicket(data.ticket);
-      setStatus({ status: 'queued', progress: 1, format } as Status);
+      setStatus({ status: 'queued', progress: 1, format: requested === 'pdf' ? 'pdf' : 'xls' } as Status);
       setShowModal(true);
     } catch (e) {
       console.error(e);
@@ -48,45 +70,35 @@ export default function GeneralJournalBook() {
 
     const poll = async () => {
       try {
-        const { data } = await napi.get(`/general-journal/report/${ticket}/status`);
+        const { data } = await napi.get<Status>(`general-journal/report/${ticket}/status`);
         setStatus(data);
         if (data.status === 'done' || data.status === 'error') {
-          if (pollRef.current) clearInterval(pollRef.current);
+          if (pollRef.current) window.clearInterval(pollRef.current);
           pollRef.current = null;
         }
-      } catch {/* ignore */ }
+      } catch {
+        /* ignore transient polls */
+      }
     };
 
     poll();
-    pollRef.current = setInterval(poll, 1500);
+    pollRef.current = window.setInterval(poll, POLL_MS) as unknown as number;
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      if (pollRef.current) window.clearInterval(pollRef.current);
       pollRef.current = null;
     };
   }, [ticket]);
 
   const download = async () => {
     if (!ticket || !status || status.status !== 'done') return;
-    const url = `/general-journal/report/${ticket}/download`;
-
-    const res = await fetch(url, { credentials: 'include' });
-    if (!res.ok) {
-      alert('Download is not ready yet.');
-      return;
-    }
-    const blob = await res.blob();
-    const href = URL.createObjectURL(blob);
-
-    const a = document.createElement('a');
-    a.href = href;
-    a.download = status.format === 'pdf' ? 'general_journal_book.pdf' : 'general_journal_book.xls';
-    a.click();
-    URL.revokeObjectURL(href);
+    const res = await napi.get(`general-journal/report/${ticket}/download`, { responseType: 'blob' });
+    saveBlob(res.data, friendlyName());
   };
 
-  const viewPdf = () => {
+  const viewPdf = async () => {
     if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
-    window.open(`/general-journal/report/${ticket}/view`, '_blank', 'noopener');
+    const res = await napi.get(`general-journal/report/${ticket}/view`, { responseType: 'blob' });
+    openBlob(res.data);
   };
 
   const reset = () => {
@@ -102,42 +114,27 @@ export default function GeneralJournalBook() {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <div>
           <label className="block text-sm mb-1">Start Date</label>
-          <input
-            type="date"
-            className="w-full border p-2 rounded"
-            value={startDate}
-            onChange={(e) => setStartDate(e.target.value)}
-          />
+          <input type="date" className="w-full border p-2 rounded" value={startDate}
+                 onChange={(e) => setStartDate(e.target.value)} />
         </div>
         <div>
           <label className="block text-sm mb-1">End Date</label>
-          <input
-            type="date"
-            className="w-full border p-2 rounded"
-            value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-          />
+          <input type="date" className="w-full border p-2 rounded" value={endDate}
+                 onChange={(e) => setEndDate(e.target.value)} />
         </div>
         <div className="flex items-end gap-2">
-            <button
+          <button
             className={`px-4 py-2 rounded text-white ${busy ? 'bg-emerald-400' : 'bg-emerald-600 hover:bg-emerald-700'}`}
             onClick={() => begin('pdf')}
             disabled={busy}
-            >
-            Generate
-            </button>
-            <button
+          >Generate</button>
+          <button
             className={`px-4 py-2 rounded border ${busy ? 'opacity-50 cursor-not-allowed' : ''}`}
             onClick={() => begin('excel')}
             disabled={busy}
-            >
-            EXCEL
-            </button>
+          >EXCEL</button>
         </div>
-
       </div>
-
-
 
       <div className="text-sm text-blue-700">
         After clicking the EXCEL button, use the modal’s Download when ready.
@@ -172,16 +169,12 @@ export default function GeneralJournalBook() {
                   className={`px-3 py-2 rounded ${status?.status === 'done' ? 'bg-blue-600 text-white' : 'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
                   disabled={status?.status !== 'done'}
                   onClick={download}
-                >
-                  Download
-                </button>
+                >Download</button>
                 <button
                   className={`px-3 py-2 rounded ${status?.status === 'done' && status?.format === 'pdf' ? 'bg-indigo-600 text-white' : 'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
                   disabled={status?.status !== 'done' || status?.format !== 'pdf'}
                   onClick={viewPdf}
-                >
-                  View
-                </button>
+                >View</button>
               </div>
             </div>
 

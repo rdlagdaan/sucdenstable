@@ -9,6 +9,13 @@ use App\Models\VendorList;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
+use PhpOffice\PhpSpreadsheet\Style\NumberFormat;
+
+
+
 class MyPurchaseVoucherPDF extends \TCPDF {
     public $createdDate;
     public $createdTime;
@@ -340,52 +347,64 @@ public function updateCancel(Request $req)
 }
 
     // 10) Print/Download PDF (unchanged)
-    public function formPdf(Request $request, $id)
-    {
-        // In PurchaseJournalController@formPdf (the query that builds $header)
-        $header = DB::table('cash_purchase as cp')
-            ->leftJoin('vendor_list as v', 'cp.vend_id', '=', 'v.vend_code') // <-- FIX HERE
-            ->select(
-                'cp.id','cp.cp_no','cp.vend_id','cp.purchase_amount',
-                'cp.explanation','cp.is_cancel',
-                DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
-                'v.vend_name','cp.workstation_id','cp.user_id','cp.created_at'
-            )
-            ->where('cp.id', $id)
-            ->first();
+public function formPdf(Request $request, $id)
+{
+    $header = DB::table('cash_purchase as cp')
+        ->leftJoin('vendor_list as v', 'cp.vend_id', '=', 'v.vend_code') // correct mapping
+        ->select(
+            'cp.id','cp.cp_no','cp.vend_id','cp.purchase_amount',
+            'cp.explanation','cp.is_cancel',
+            DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
+            'v.vend_name','cp.workstation_id','cp.user_id','cp.created_at'
+        )
+        ->where('cp.id', $id)
+        ->first();
 
+    if (!$header || strtoupper((string)$header->is_cancel) === 'Y') {
+        abort(404, 'Purchase Voucher not found or cancelled');
+    }
 
-        if (!$header || $header->is_cancel === 'y') {
-            abort(404, 'Purchase Voucher not found or cancelled');
-        }
+    $details = DB::table('cash_purchase_details as d')
+        ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
+        ->where('d.transaction_id', $id)
+        ->orderBy('d.workstation_id','desc')
+        ->orderBy('d.credit','desc')
+        ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
+        ->get();
 
-        $details = DB::table('cash_purchase_details as d')
-            ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
-            ->where('d.transaction_id', $id)
-            ->orderBy('d.workstation_id','desc')
-            ->orderBy('d.credit','desc')
-            ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
-            ->get();
+    $totalDebit  = (float)$details->sum('debit');
+    $totalCredit = (float)$details->sum('credit');
 
-        $totalDebit  = $details->sum('debit');
-        $totalCredit = $details->sum('credit');
-
-        $pdf = new MyPurchaseVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-        $pdf->setPrintHeader(true);
-        $pdf->SetHeaderMargin(8);
-        $pdf->SetMargins(15,30,15);
-        $pdf->AddPage();
-        $pdf->SetFont('helvetica','',7);
-
-        $pdf->setCreatedMeta(
-            \Carbon\Carbon::parse($header->created_at)->format('M d, Y'),
-            \Carbon\Carbon::parse($header->created_at)->format('h:i:sa')
+    // If unbalanced, return an HTML explanation (consistent with other modules)
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        $html = sprintf(
+            '<!doctype html><meta charset="utf-8">
+             <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+             <h2>Cannot print Purchase Voucher</h2>
+             <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
+             <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+            number_format($totalDebit, 2),
+            number_format($totalCredit, 2)
         );
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
 
-        $formattedDebit  = number_format($totalDebit, 2);
-        $formattedCredit = number_format($totalCredit, 2);
+    $pdf = new MyPurchaseVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
+    $pdf->setPrintHeader(true);
+    $pdf->SetHeaderMargin(8);
+    $pdf->SetMargins(15,30,15);
+    $pdf->AddPage();
+    $pdf->SetFont('helvetica','',7);
 
-        $tbl = <<<EOD
+    $pdf->setCreatedMeta(
+        \Carbon\Carbon::parse($header->created_at)->format('M d, Y'),
+        \Carbon\Carbon::parse($header->created_at)->format('h:i:sa')
+    );
+
+    $formattedDebit  = number_format($totalDebit, 2);
+    $formattedCredit = number_format($totalCredit, 2);
+
+    $tbl = <<<EOD
 <br><br>
 <table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
 <tr>
@@ -405,12 +424,10 @@ public function updateCancel(Request $req)
   <td width="20%" align="left"><font size="10"><b>Receipt Date:</b></font></td>
   <td width="15%"><font size="10"><u>{$header->purchase_date}</u></font></td>
 </tr>
-
 <tr>
   <td width="15%"><font size="10"><b>VENDOR:</b></font></td>
   <td width="80%" colspan="4"><font size="10"><u>{$header->vend_name}</u></font></td>
 </tr>
-
 </table>
 
 <table><tr><td><br><br></td></tr></table>
@@ -429,10 +446,10 @@ public function updateCancel(Request $req)
  </tr>
 EOD;
 
-        foreach ($details as $d) {
-            $debit  = $d->debit  ? number_format($d->debit, 2) : '';
-            $credit = $d->credit ? number_format($d->credit, 2) : '';
-            $tbl .= <<<EOD
+    foreach ($details as $d) {
+        $debit  = $d->debit  ? number_format($d->debit, 2) : '';
+        $credit = $d->credit ? number_format($d->credit, 2) : '';
+        $tbl .= <<<EOD
   <tr>
     <td align="left"><font size="10">{$d->acct_code}</font></td>
     <td align="left"><font size="10">{$d->acct_desc}</font></td>
@@ -440,9 +457,9 @@ EOD;
     <td align="right"><font size="10">{$credit}</font></td>
   </tr>
 EOD;
-        }
+    }
 
-        $tbl .= <<<EOD
+    $tbl .= <<<EOD
   <tr>
     <td align="left"></td>
     <td align="left"><font size="10">TOTAL</font></td>
@@ -452,30 +469,133 @@ EOD;
 </table>
 EOD;
 
-        $pdf->writeHTML($tbl, true, false, false, false, '');
+    $pdf->writeHTML($tbl, true, false, false, false, '');
 
-        if (abs($totalDebit - $totalCredit) > 0.005) {
-            $html = sprintf(
-                '<!doctype html><meta charset="utf-8">
-                <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
-                <h2>Cannot print Purchase Voucher</h2>
-                <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
-                <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
-                number_format($totalDebit, 2),
-                number_format($totalCredit, 2)
-            );
-            return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
-        }
+    $pdfContent = $pdf->Output('purchaseVoucher.pdf', 'S');
 
-        $pdfContent = $pdf->Output('purchaseVoucher.pdf', 'S');
+    return response($pdfContent, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="PurchaseVoucher_'.$header->cp_no.'.pdf"');
+}
 
-        return response($pdfContent, 200)
-            ->header('Content-Type', 'application/pdf')
-            ->header('Content-Disposition', 'inline; filename="purchaseVoucher.pdf"');
-    }
 
     public function checkPdf($id)  { return response('Check PDF stub – implement renderer', 200); }
-    public function formExcel($id) { return response('Excel stub – implement renderer', 200); }
+    
+public function formExcel(Request $request, $id)
+{
+    // 1) Header (same join logic as PDF — note vend_id ↔ vend_code)
+    $header = DB::table('cash_purchase as cp')
+        ->leftJoin('vendor_list as v', 'cp.vend_id', '=', 'v.vend_code')
+        ->select(
+            'cp.id','cp.cp_no','cp.vend_id','cp.purchase_amount',
+            'cp.explanation','cp.is_cancel',
+            DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
+            'v.vend_name','cp.created_at'
+        )
+        ->where('cp.id', $id)
+        ->first();
+
+    if (!$header) {
+        return response()->json(['message' => 'Purchase voucher not found'], 404);
+    }
+    // Your app uses uppercase flags ('Y'/'N'); avoid the old 'y' lowercase check
+    if (strtoupper((string)($header->is_cancel ?? 'N')) === 'Y') {
+        return response()->json(['message' => 'Cancelled voucher cannot be exported'], 422);
+    }
+
+    // 2) Details
+    $details = DB::table('cash_purchase_details as d')
+        ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
+        ->where('d.transaction_id', $id)
+        ->orderBy('d.id')
+        ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
+        ->get();
+
+    $totalDebit  = (float) $details->sum('debit');
+    $totalCredit = (float) $details->sum('credit');
+
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        // Return a *proper* error so the frontend toast shows it
+        return response()->json([
+            'message' => sprintf(
+                'Cannot export: details are not balanced. Debit=%0.2f, Credit=%0.2f',
+                $totalDebit, $totalCredit
+            )
+        ], 422);
+    }
+
+    // 3) Build spreadsheet
+    $s = new Spreadsheet();
+    $sheet = $s->getActiveSheet();
+    $row = 1;
+
+    // Title
+    $sheet->setCellValue("A{$row}", 'PURCHASE VOUCHER');
+    $sheet->mergeCells("A{$row}:D{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setBold(true)->setSize(14);
+    $row += 2;
+
+    // Header block
+    $sheet->setCellValue("A{$row}", 'RR Number:');
+    $sheet->setCellValue("B{$row}", (string)$header->cp_no);
+    $sheet->setCellValue("C{$row}", 'Receipt Date:');
+    $sheet->setCellValue("D{$row}", (string)$header->purchase_date);
+    $row++;
+
+    $sheet->setCellValue("A{$row}", 'Vendor:');
+    $sheet->setCellValue("B{$row}", (string)($header->vend_name ?? $header->vend_id));
+    $row++;
+
+    $sheet->setCellValue("A{$row}", 'Explanation:');
+    $sheet->setCellValue("B{$row}", (string)$header->explanation);
+    $sheet->mergeCells("B{$row}:D{$row}");
+    $row += 2;
+
+    // Table header
+    $sheet->setCellValue("A{$row}", 'ACCOUNT');
+    $sheet->setCellValue("B{$row}", 'GL ACCOUNT');
+    $sheet->setCellValue("C{$row}", 'DEBIT');
+    $sheet->setCellValue("D{$row}", 'CREDIT');
+    $sheet->getStyle("A{$row}:D{$row}")->getFont()->setBold(true);
+    $row++;
+
+    // Rows
+    foreach ($details as $d) {
+        $sheet->setCellValue("A{$row}", (string)$d->acct_code);
+        $sheet->setCellValue("B{$row}", (string)$d->acct_desc);
+        if ($d->debit !== null)  $sheet->setCellValue("C{$row}", (float)$d->debit);
+        if ($d->credit !== null) $sheet->setCellValue("D{$row}", (float)$d->credit);
+        $row++;
+    }
+
+    // Totals
+    $sheet->setCellValue("B{$row}", 'TOTAL');
+    $sheet->setCellValue("C{$row}", $totalDebit);
+    $sheet->setCellValue("D{$row}", $totalCredit);
+    $sheet->getStyle("B{$row}:D{$row}")->getFont()->setBold(true);
+
+    // Formats & sizing
+    $sheet->getStyle("C1:D{$row}")
+        ->getNumberFormat()->setFormatCode('#,##0.00');
+    foreach (['A'=>18,'B'=>48,'C'=>16,'D'=>16] as $col=>$w) {
+        $sheet->getColumnDimension($col)->setWidth($w);
+    }
+
+    // 4) Stream as XLSX
+    $filename = 'PurchaseVoucher_' . preg_replace('/[^\w\-]/','', (string)$header->cp_no) . '.xlsx';
+    $writer = new XlsxWriter($s);
+
+    $response = new StreamedResponse(function() use ($writer) {
+        $writer->save('php://output');
+    });
+
+    $response->headers->set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    $response->headers->set('Content-Disposition', 'attachment; filename="'.$filename.'"');
+    $response->headers->set('Cache-Control', 'max-age=0');
+
+    return $response;
+}
+
 
     // ---- helpers ----
     protected function recalcTotals(int $transactionId): array

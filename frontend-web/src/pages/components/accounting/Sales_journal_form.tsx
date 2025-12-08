@@ -121,7 +121,7 @@ export default function SalesJournalForm() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await napi.get('/api/customers', { params: { company_id: user?.company_id }});
+        const { data } = await napi.get('/customers', { params: { company_id: user?.company_id }});
         const mapped: DropdownItem[] = (data || []).map((c: any) => ({
           code: String(c.cust_id ?? c.code),
           description: c.cust_name ?? c.description ?? '',
@@ -137,7 +137,7 @@ export default function SalesJournalForm() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await napi.get('/api/accounts', { params: { company_id: user?.company_id }});
+        const { data } = await napi.get('/accounts', { params: { company_id: user?.company_id }});
         setAccounts(Array.isArray(data) ? data : []);
       } catch {
         setAccounts([]);
@@ -148,7 +148,7 @@ export default function SalesJournalForm() {
   // search transaction (cash_sales) list
   const fetchTransactions = async () => {
     try {
-      const { data } = await napi.get<TxOption[]>('/api/sales/list', {
+      const { data } = await napi.get<TxOption[]>('/sales/list', {
         params: { company_id: user?.company_id || '', q: txSearch || '' },
       });
       setTxOptions(Array.isArray(data) ? data : []);
@@ -211,13 +211,13 @@ const handleSaveMain = async () => {
 
   // 2) Preflight: block if there are OTHER unbalanced transactions in this company
   try {
-    const existsResp = await napi.get('/api/sales/unbalanced-exists', {
+    const existsResp = await napi.get('/sales/unbalanced-exists', {
       params: { company_id: user?.company_id || '' },
     });
 
     if (existsResp.data?.exists) {
       // fetch a short list to show in the popup
-      const listResp = await napi.get('/api/sales/unbalanced', {
+      const listResp = await napi.get('/sales/unbalanced', {
         params: { company_id: user?.company_id || '', limit: 20 },
       });
       const items = Array.isArray(listResp.data?.items) ? listResp.data.items : [];
@@ -271,13 +271,13 @@ const handleSaveMain = async () => {
 
   // 3) Proceed with normal save
   try {
-    const gen = await napi.get('/api/sales/generate-cs-number', {
+    const gen = await napi.get('/sales/generate-cs-number', {
       params: { company_id: user?.company_id },
     });
     const nextNo = gen.data?.cs_no ?? gen.data;
     setCsNo(nextNo);
 
-    const res = await napi.post('/api/sales/save-main', {
+    const res = await napi.post('/sales/save-main', {
       cs_no: nextNo,
       cust_id: custId,
       sales_date: salesDate,
@@ -322,7 +322,7 @@ const handleSaveMain = async () => {
     if (!confirmed.isConfirmed) return;
 
     try {
-      await napi.post('/api/sales/cancel', {
+      await napi.post('/sales/cancel', {
         id: mainId,
         is_cancel: 'y',
         company_id: user?.company_id || '',
@@ -349,7 +349,7 @@ const handleSaveMain = async () => {
     if (!confirmed.isConfirmed) return;
 
     try {
-      await napi.delete(`/api/sales/${mainId}`);
+      await napi.delete(`/sales/${mainId}`);
       resetForm();
       toast.success('Transaction deleted.');
       fetchTransactions();
@@ -370,7 +370,7 @@ const handleSaveMain = async () => {
     const code = onlyCode(row.acct_code);
     try {
       if (!row.persisted) {
-        const res = await napi.post('/api/sales/save-detail', {
+        const res = await napi.post('/sales/save-detail', {
           transaction_id: mainId,
           acct_code: code,
           debit: row.debit || 0,
@@ -383,7 +383,7 @@ const handleSaveMain = async () => {
         if (src[rowIndex]) src[rowIndex].persisted = true, src[rowIndex].id = res.data.detail_id;
         setTableData([...src, ...(src.find(r => !r.acct_code) ? [] : [emptyRow()])]);
       } else {
-        await napi.post('/api/sales/update-detail', {
+        await napi.post('/sales/update-detail', {
           id: row.id,
           transaction_id: mainId,
           acct_code: code,
@@ -401,7 +401,7 @@ const handleSaveMain = async () => {
     if (!selectedId) return;
     try {
       setSearchId(selectedId);
-      const { data } = await napi.get(`/api/sales/${selectedId}`, {
+      const { data } = await napi.get(`/sales/${selectedId}`, {
         params: { company_id: user?.company_id },
       });
 
@@ -445,13 +445,15 @@ const handleSaveMain = async () => {
   // Download & Print
   const handleOpenPdf = () => {
     if (!mainId) return toast.info('Select or save a transaction first.');
-    const url = `/api/sales/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`;
+    
+    const url = `/api/sales/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id || '')}&t=${Date.now()}`;    
+    
     setPdfUrl(url);
     setShowPdf(true);
   };
   const handleDownloadExcel = async () => {
     if (!mainId) return toast.info('Select or save a transaction first.');
-    const res = await napi.get(`/api/sales/form-excel/${mainId}`, {
+    const res = await napi.get(`/sales/form-excel/${mainId}`, {
       responseType: 'blob',
       params: { company_id: user?.company_id||'' }
     });
@@ -776,7 +778,7 @@ const handleNew = async () => {
                     if (!row?.id) { src.splice(rowIndex,1); setTableData([...src]); return; }
                     const ok = await Swal.fire({ title:'Delete this line?', icon:'warning', showCancelButton:true });
                     if (!ok.isConfirmed) return;
-                    await napi.post('/api/sales/delete-detail',{ id: row.id, transaction_id: mainId });
+                    await napi.post('/sales/delete-detail',{ id: row.id, transaction_id: mainId });
                     src.splice(rowIndex,1);
                     setTableData([...src]);
                     toast.success('Row deleted');
@@ -859,8 +861,8 @@ const handleNew = async () => {
                 <button
                   type="button"
                   onClick={()=>{
-                    if (!mainId) return toast.info('Select or save a transaction.');
-                    window.open(`/api/sales/check-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`,'_blank');
+                    if (!mainId) return toast.info('Select or save a transaction.');            
+                    window.open(`/api/sales/check-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id || '')}&t=${Date.now()}`, '_blank');                  
                   }}
                   className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
                 >

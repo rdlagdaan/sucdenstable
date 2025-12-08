@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -12,7 +11,6 @@ use App\Jobs\BuildCheckRegister;
 
 class CheckRegisterController extends Controller
 {
-    /** Month options from month_list. */
     public function months()
     {
         $rows = DB::table('month_list')
@@ -23,7 +21,6 @@ class CheckRegisterController extends Controller
         return response()->json($rows);
     }
 
-    /** Year options (distinct years from cash_disbursement; fall back to ±5 years). */
     public function years()
     {
         $years = DB::table('cash_disbursement')
@@ -34,13 +31,13 @@ class CheckRegisterController extends Controller
 
         if (empty($years)) {
             $y = (int) date('Y');
-            $years = range($y + 1, $y - 5); // simple fallback
+            $years = range($y - 5, $y + 1);
+            rsort($years);
         }
 
         return response()->json(array_map(fn($y)=>['year'=>(int)$y], $years));
     }
 
-    /** Start the report build (pdf|excel). */
     public function start(Request $req)
     {
         $v = $req->validate([
@@ -61,7 +58,7 @@ class CheckRegisterController extends Controller
             'company_id' => $req->user()->company_id ?? null,
         ], now()->addHours(2));
 
-        BuildCheckRegister::dispatch(
+        BuildCheckRegister::dispatchAfterResponse(
             ticket:    $ticket,
             month:     (int)$v['month'],
             year:      (int)$v['year'],

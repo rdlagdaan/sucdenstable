@@ -9,3 +9,5 @@ storage
 tests
 *.log
 .DS_Store
+public/storage
+

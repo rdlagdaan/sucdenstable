@@ -291,62 +291,68 @@ class GeneralAccountingController extends Controller
     }
 
     /** 11) Print Journal Voucher PDF */
-    public function formPdf($id, Request $req)
-    {
-        $companyId = $req->query('company_id');
+public function formPdf(Request $request, $id)
+{
+    $companyId = $request->query('company_id');
 
-        $header = DB::table('general_accounting as g')
-            ->select(
-                'g.id','g.ga_no','g.explanation','g.is_cancel',
-                DB::raw("to_char(g.gen_acct_date, 'MM/DD/YYYY') as gen_acct_date"),
-                'g.amount_in_words','g.workstation_id','g.user_id','g.created_at',
-                DB::raw('COALESCE(g.sum_debit,0) as sum_debit'),
-                DB::raw('COALESCE(g.sum_credit,0) as sum_credit'),
-                'g.is_balanced'
-            )
-            ->when($companyId, fn($q)=>$q->where('g.company_id',$companyId))
-            ->where('g.id',$id)
-            ->first();
+    // 1) Header (company-scoped)
+    $header = DB::table('general_accounting as g')
+        ->select(
+            'g.id',
+            'g.ga_no',
+            'g.explanation',
+            'g.is_cancel',
+            DB::raw("to_char(g.gen_acct_date, 'MM/DD/YYYY') as gen_acct_date"),
+            'g.created_at'
+        )
+        ->when($companyId, fn($q) => $q->where('g.company_id', $companyId))
+        ->where('g.id', $id)
+        ->first();
 
-        if (!$header || $header->is_cancel === 'y') {
-            abort(404, 'Journal Voucher not found or cancelled');
-        }
-        if (!$header->is_balanced || abs(($header->sum_debit ?? 0) - ($header->sum_credit ?? 0)) > 0.005) {
-            $html = sprintf(
-                '<!doctype html><meta charset="utf-8">
-                <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
-                <h2>Cannot print Journal Voucher</h2>
-                <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
-                <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
-                number_format((float)$header->sum_debit, 2),
-                number_format((float)$header->sum_credit, 2)
-            );
-            return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
-        }
+    if (!$header || strtoupper((string)$header->is_cancel) === 'Y') {
+        abort(404, 'Journal Voucher not found or cancelled');
+    }
 
-        $details = DB::table('general_accounting_details as d')
-            ->join('account_code as a','d.acct_code','=','a.acct_code')
-            ->where('d.transaction_id',$id)
-            ->orderBy('d.id')
-            ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
+    // 2) Details + live totals (don’t trust stored flags)
+    $details = DB::table('general_accounting_details as d')
+        ->join('account_code as a','d.acct_code','=','a.acct_code')
+        ->where('d.transaction_id', $id)
+        ->orderBy('d.id')
+        ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
 
-        $totalDebit  = $details->sum('debit');
-        $totalCredit = $details->sum('credit');
+    $totalDebit  = (float)$details->sum('debit');
+    $totalCredit = (float)$details->sum('credit');
 
-        $pdf = new MyJournalVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-        $pdf->setPrintHeader(true);
-        $pdf->SetHeaderMargin(8);
-        $pdf->SetMargins(15,30,15);
-        $pdf->AddPage();
-        $pdf->SetFont('helvetica','',7);
+    // 3) If unbalanced, return HTML (same behavior as your working Purchase PDF)
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        $html = sprintf(
+            '<!doctype html><meta charset="utf-8">
+             <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+             <h2>Cannot print Journal Voucher</h2>
+             <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
+             <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+            number_format($totalDebit, 2),
+            number_format($totalCredit, 2)
+        );
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
 
-        $pdf->setDataJournalDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
-        $pdf->setDataJournalTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
+    // 4) Build PDF exactly like the working Purchase flow (no streamDownload)
+    $pdf = new MyJournalVoucherPDF('P','mm','LETTER', true, 'UTF-8', false);
+    $pdf->setPrintHeader(true);
+    $pdf->SetHeaderMargin(8);
+    $pdf->SetMargins(15, 30, 15);
+    $pdf->AddPage();
+    $pdf->SetFont('helvetica','',7);
 
-        $formattedDebit  = number_format($totalDebit, 2);
-        $formattedCredit = number_format($totalCredit, 2);
+    // footer metadata (your subclass already exposes these setters)
+    $pdf->setDataJournalDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
+    $pdf->setDataJournalTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
 
-        $tbl = <<<EOD
+    $formattedDebit  = number_format($totalDebit, 2);
+    $formattedCredit = number_format($totalCredit, 2);
+
+    $tbl = <<<EOD
 <br><br>
 <table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
 <tr>
@@ -378,19 +384,22 @@ class GeneralAccountingController extends Controller
  </tr>
 EOD;
 
-        foreach ($details as $d) {
-            $debit  = $d->debit  ? number_format($d->debit, 2) : '';
-            $credit = $d->credit ? number_format($d->credit, 2) : '';
-            $tbl .= <<<EOD
+    foreach ($details as $d) {
+        $debit  = $d->debit  ? number_format($d->debit, 2) : '';
+        $credit = $d->credit ? number_format($d->credit, 2) : '';
+        $acct   = htmlspecialchars($d->acct_code ?? '', ENT_QUOTES, 'UTF-8');
+        $desc   = htmlspecialchars($d->acct_desc ?? '', ENT_QUOTES, 'UTF-8');
+        $tbl .= <<<EOD
   <tr>
-    <td align="left"><font size="10">{$d->acct_code}</font></td>
-    <td align="left"><font size="10">{$d->acct_desc}</font></td>
+    <td align="left"><font size="10">{$acct}</font></td>
+    <td align="left"><font size="10">{$desc}</font></td>
     <td align="right"><font size="10">{$debit}</font></td>
     <td align="right"><font size="10">{$credit}</font></td>
   </tr>
 EOD;
-        }
-        $tbl .= <<<EOD
+    }
+
+    $tbl .= <<<EOD
   <tr>
     <td align="left"></td>
     <td align="left"><font size="10">TOTAL</font></td>
@@ -400,48 +409,127 @@ EOD;
 </table>
 EOD;
 
-        $pdf->writeHTML($tbl, true, false, false, false, '');
+    $pdf->writeHTML($tbl, true, false, false, false, '');
 
-        $pdfContent = $pdf->Output('journalVoucher.pdf', 'S');
-        return response($pdfContent, 200)
-            ->header('Content-Type', 'application/pdf')
-            ->header('Content-Disposition', 'inline; filename="journalVoucher.pdf"');
-    }
+    // 5) Return bytes (no streaming); inline so your iframe shows it
+    $pdfContent = $pdf->Output('journalVoucher.pdf', 'S');
+
+    return response($pdfContent, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="JournalVoucher_'.$header->ga_no.'.pdf"');
+}
+
+
 
     /** 12) Excel stub (optional) */
-    public function formExcel($id)
-    {
-        return response('Excel stub – implement renderer', 200);
+public function formExcel($id, Request $req)
+{
+    $companyId = $req->query('company_id');
+
+    // Header
+    $header = DB::table('general_accounting as g')
+        ->select(
+            'g.id','g.ga_no','g.explanation','g.is_cancel',
+            DB::raw("to_char(g.gen_acct_date, 'YYYY-MM-DD') as gen_acct_date"),
+            'g.created_at'
+        )
+        ->when($companyId, fn($q)=>$q->where('g.company_id',$companyId))
+        ->where('g.id',$id)
+        ->first();
+
+    if (!$header || $header->is_cancel === 'y') {
+        return response()->json(['message' => 'Journal Voucher not found or cancelled'], 404);
     }
 
-    /** 13) Unbalanced helpers (optional, GA-only) */
-    public function unbalancedExists(Request $req)
-    {
-        $companyId = $req->query('company_id');
-        $exists = GeneralAccounting::when($companyId, fn($q)=>$q->where('company_id',$companyId))
-            ->where('is_balanced', false)
-            ->exists();
-        return response()->json(['exists' => $exists]);
+    // 🔴 Live totals
+    $totals = DB::table('general_accounting_details')
+        ->where('transaction_id', $id)
+        ->selectRaw('COALESCE(SUM(debit),0) AS sum_debit, COALESCE(SUM(credit),0) AS sum_credit')
+        ->first();
+
+    $totalDebit  = round((float)($totals->sum_debit ?? 0), 2);
+    $totalCredit = round((float)($totals->sum_credit ?? 0), 2);
+    $balanced    = abs($totalDebit - $totalCredit) < 0.005;
+
+    if (!$balanced) {
+        return response()->json([
+            'message' => 'Cannot export: details are not balanced.',
+            'debit'   => $totalDebit,
+            'credit'  => $totalCredit,
+        ], 422);
     }
 
-    public function unbalanced(Request $req)
-    {
-        $companyId = $req->query('company_id');
-        $limit = (int) $req->query('limit', 20);
+    // Details
+    $details = DB::table('general_accounting_details as d')
+        ->join('account_code as a','d.acct_code','=','a.acct_code')
+        ->where('d.transaction_id',$id)
+        ->orderBy('d.id')
+        ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
 
-        $rows = GeneralAccounting::when($companyId, fn($q)=>$q->where('company_id',$companyId))
-            ->where('is_balanced', false)
-            ->orderByDesc('updated_at')
-            ->limit($limit)
-            ->get([
-                'id',
-                'ga_no',
-                DB::raw('COALESCE(sum_debit,0)  as sum_debit'),
-                DB::raw('COALESCE(sum_credit,0) as sum_credit'),
-            ]);
+    // Spreadsheet
+    $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $sheet = $spreadsheet->getActiveSheet();
+    $sheet->setTitle('Journal Voucher');
 
-        return response()->json(['items' => $rows]);
+    $row = 1;
+    $sheet->setCellValue("A{$row}", 'JOURNAL VOUCHER'); $sheet->mergeCells("A{$row}:D{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setBold(true)->setSize(14); $row += 2;
+
+    $sheet->setCellValue("A{$row}", 'JE No:');   $sheet->setCellValue("B{$row}", 'JE - '.$header->ga_no);
+    $sheet->setCellValue("C{$row}", 'Date:');    $sheet->setCellValue("D{$row}", $header->gen_acct_date);
+    $row++;
+
+    $sheet->setCellValue("A{$row}", 'Explanation:'); $sheet->mergeCells("A{$row}:D{$row}"); $row++;
+    $sheet->setCellValue("A{$row}", (string)$header->explanation); $sheet->mergeCells("A{$row}:D{$row}");
+    $row += 2;
+
+    // Table header
+    $sheet->fromArray(['Account','GL Account','Debit','Credit'], NULL, "A{$row}");
+    $sheet->getStyle("A{$row}:D{$row}")->getFont()->setBold(true);
+    $sheet->getStyle("A{$row}:D{$row}")
+          ->getBorders()->getAllBorders()->setBorderStyle(\PhpOffice\PhpSpreadsheet\Style\Border::BORDER_THIN);
+    $row++;
+
+    // Rows
+    foreach ($details as $d) {
+        $sheet->setCellValueExplicit("A{$row}", $d->acct_code, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
+        $sheet->setCellValue("B{$row}", $d->acct_desc);
+        $sheet->setCellValue("C{$row}", (float)($d->debit ?? 0));
+        $sheet->setCellValue("D{$row}", (float)($d->credit ?? 0));
+        $row++;
     }
+
+    // Totals row
+    $sheet->setCellValue("B{$row}", 'TOTAL');
+    $sheet->setCellValue("C{$row}", $totalDebit);
+    $sheet->setCellValue("D{$row}", $totalCredit);
+    $sheet->getStyle("B{$row}:D{$row}")->getFont()->setBold(true);
+
+    // Formats/borders/widths
+    $firstDetailRow = $row - max(1, count($details));
+    $sheet->getStyle("C1:D{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+    $sheet->getStyle("A{$firstDetailRow}:D{$row}")
+          ->getBorders()->getAllBorders()->setBorderStyle(\PhpOffice\PhpSpreadsheet\Style\Border::BORDER_THIN);
+    foreach (['A'=>14,'B'=>44,'C'=>16,'D'=>16] as $col=>$w) {
+        $sheet->getColumnDimension($col)->setWidth($w);
+    }
+
+    // Stream
+    $fileName = 'JournalVoucher_'.$header->ga_no.'.xlsx';
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+
+    if (ob_get_length()) { ob_end_clean(); }
+    return response()->streamDownload(function() use ($writer) {
+        $writer->save('php://output');
+    }, $fileName, [
+        'Content-Type'        => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Cache-Control'       => 'max-age=0, private',
+        'Pragma'              => 'public',
+        'Content-Disposition' => "attachment; filename=\"{$fileName}\"",
+        'X-Accel-Buffering'   => 'no',
+    ]);
+}
+
 
     /** ---- helper ---- */
     protected function recalcTotals(int $transactionId): array

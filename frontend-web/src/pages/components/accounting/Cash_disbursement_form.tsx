@@ -186,10 +186,10 @@ export default function CashDisbursementForm() {
     (async () => {
       try {
         const [vendRes, bankRes, pmRes, acctRes] = await Promise.all([
-          napi.get('/api/cd/vendors', { params: { company_id: companyId } }),
-          napi.get('/api/cd/banks', { params: { company_id: companyId } }),
-          napi.get('/api/cd/payment-methods'),
-          napi.get('/api/cd/accounts', { params: { company_id: companyId } }),
+          napi.get('/cd/vendors', { params: { company_id: companyId } }),
+          napi.get('/cd/banks', { params: { company_id: companyId } }),
+          napi.get('/cd/payment-methods'),
+          napi.get('/cd/accounts', { params: { company_id: companyId } }),
         ]);
 
         setVendors((vendRes.data || []).map((v: any) => ({
@@ -217,7 +217,7 @@ export default function CashDisbursementForm() {
   /* --------- search list --------- */
   const fetchTransactions = useCallback(async () => {
     try {
-      const { data } = await napi.get<DisbursementListRow[]>('/api/cash-disbursement/list', {
+      const { data } = await napi.get<DisbursementListRow[]>('/cash-disbursement/list', {
         params: { company_id: companyId || '', q: txSearch || '' },
       });
       setTxOptions(Array.isArray(data) ? data : []);
@@ -238,7 +238,7 @@ export default function CashDisbursementForm() {
   /* --------- load one disbursement --------- */
   const loadDisbursement = useCallback(async (rid: string | number) => {
     try {
-      const { data } = await napi.get(`/api/cash-disbursement/${rid}`, {
+      const { data } = await napi.get(`/cash-disbursement/${rid}`, {
         params: { company_id: companyId },
       });
       const m = data.main ?? data;
@@ -297,7 +297,7 @@ export default function CashDisbursementForm() {
     if (!ok.isConfirmed) return;
 
     try {
-      const res = await napi.post('/api/cash-disbursement/save-main', {
+      const res = await napi.post('/cash-disbursement/save-main', {
         cd_no: cdNo || undefined,
         vend_id: vendId,
         disburse_date: disburseDate,
@@ -339,7 +339,7 @@ export default function CashDisbursementForm() {
     const ok = await Swal.fire({ title: 'Cancel this disbursement?', icon: 'warning', showCancelButton: true, confirmButtonText: 'Cancel' });
     if (!ok.isConfirmed) return;
     try {
-      const { data } = await napi.post('/api/cash-disbursement/cancel', { id: mainId, flag: 1 });
+      const { data } = await napi.post('/cash-disbursement/cancel', { id: mainId, flag: 1 });
       setIsCancelled((data?.is_cancel || data?.is_cancelled) === 'y');
       setLocked(true);
       setGridLocked(true);
@@ -355,7 +355,7 @@ export default function CashDisbursementForm() {
     const ok = await Swal.fire({ title: 'Uncancel this disbursement?', icon: 'question', showCancelButton: true, confirmButtonText: 'Uncancel' });
     if (!ok.isConfirmed) return;
     try {
-      const { data } = await napi.post('/api/cash-disbursement/cancel', { id: mainId, flag: 0 });
+      const { data } = await napi.post('/cash-disbursement/cancel', { id: mainId, flag: 0 });
       setIsCancelled((data?.is_cancel || data?.is_cancelled) !== 'y');
       setLocked(true);
       setGridLocked(false);
@@ -371,7 +371,7 @@ export default function CashDisbursementForm() {
     const ok = await Swal.fire({ title: 'Delete this disbursement?', text: 'This action is irreversible.', icon: 'error', showCancelButton: true, confirmButtonText: 'Delete' });
     if (!ok.isConfirmed) return;
     try {
-      await napi.delete(`/api/cash-disbursement/${mainId}`);
+      await napi.delete(`/cash-disbursement/${mainId}`);
       handleNew(); // reset
       toast.success('Disbursement deleted.');
       fetchTransactions();
@@ -470,7 +470,7 @@ export default function CashDisbursementForm() {
   };
 
   const deleteDetail = async (payload: any) => {
-    const { data } = await napi.post('/api/cash-disbursement/delete-detail', payload);
+    const { data } = await napi.post('/cash-disbursement/delete-detail', payload);
     refreshHeaderTotals(data?.totals);
     await loadDisbursement(payload.transaction_id);
   };
@@ -483,7 +483,7 @@ export default function CashDisbursementForm() {
 
     try {
       if (!row.persisted) {
-        const { data } = await napi.post('/api/cash-disbursement/save-detail', {
+        const { data } = await napi.post('/cash-disbursement/save-detail', {
           transaction_id: mainId,
           acct_code: code,
           debit: row.debit || 0,
@@ -495,7 +495,7 @@ export default function CashDisbursementForm() {
         refreshHeaderTotals(data?.totals);
         await loadDisbursement(mainId);
       } else {
-        const { data } = await napi.post('/api/cash-disbursement/update-detail', {
+        const { data } = await napi.post('/cash-disbursement/update-detail', {
           id: row.id,
           transaction_id: mainId,
           acct_code: code,
@@ -556,7 +556,7 @@ export default function CashDisbursementForm() {
   };
   const handleDownloadExcel = async () => {
     if (!mainId) return toast.info('Save or select a disbursement first.');
-    const res = await napi.get(`/api/cash-disbursement/form-excel/${mainId}`, {
+    const res = await napi.get(`/cash-disbursement/form-excel/${mainId}`, {
       responseType: 'blob',
       params: { company_id: companyId||'' },
     });

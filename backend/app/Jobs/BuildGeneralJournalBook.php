@@ -10,62 +10,77 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Throwable;
 
 class BuildGeneralJournalBook implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public int $timeout = 900; // 15 min
+
     public function __construct(
         public string $ticket,
         public string $startDate,
         public string $endDate,
-        public string $format,          // pdf|excel
+        public string $format,          // 'pdf' | 'xls'
         public ?int $companyId,
         public ?int $userId,
         public ?string $query = null
     ) {}
 
-    // keep the newest one per format; delete older files
-    private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
-    {
-        $disk = Storage::disk('local'); // root = storage/app/private
-        $files = collect($disk->files('reports'))
-            ->filter(fn($p) => str_starts_with(basename($p), 'general_journal_book_'))
-            ->when($sameFormatOnly, function ($c) use ($keepFile) {
-                $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
-                return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
-            })
-            ->sortByDesc(fn($p) => $disk->lastModified($p))
-            ->slice($keep);
-
-        $files->each(fn($p) => $disk->delete($p));
-    }
+    private function key(): string { return "gjb:{$this->ticket}"; }
 
     private function patchState(array $patch): void
     {
-        $key = "gjb:{$this->ticket}";
-        $current = Cache::get($key);
-        if (!is_array($current)) $current = [];
-        Cache::put($key, array_merge($current, $patch), now()->addHours(2));
+        $cur = Cache::get($this->key(), []);
+        Cache::put($this->key(), array_merge($cur, $patch), now()->addHours(2));
+    }
+
+    private function friendlyName(): string
+    {
+        return sprintf(
+            'GeneralJournal_%s_to_%s.%s',
+            date('Y-m-d', strtotime($this->startDate)),
+            date('Y-m-d', strtotime($this->endDate)),
+            $this->format
+        );
+    }
+
+    private function targetPath(): string
+    {
+        $dir = 'reports';
+        if (!Storage::disk('local')->exists($dir)) {
+            Storage::disk('local')->makeDirectory($dir);
+        }
+        $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
+        return "{$dir}/" . $this->friendlyName();
+    }
+
+    private function pruneSiblings(string $keepPath, int $keep = 1): void
+    {
+        $disk = Storage::disk('local');
+        $ext  = pathinfo($keepPath, PATHINFO_EXTENSION);
+        $files = collect($disk->files('reports'))
+            ->filter(fn($p) => str_starts_with(basename($p), 'GeneralJournal_'))
+            ->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext)
+            ->sortByDesc(fn($p) => $disk->lastModified($p))
+            ->slice($keep);
+        $files->each(fn($p) => $disk->delete($p));
     }
 
     public function handle(): void
     {
         $this->patchState([
-            'status'     => 'running',
-            'progress'   => 1,
-            'format'     => $this->format,
-            'file'       => null,
-            'error'      => null,
-            'range'      => [$this->startDate, $this->endDate],
-            'query'      => $this->query,
-            'user_id'    => $this->userId,
-            'company_id' => $this->companyId,
+            'status'   => 'running',
+            'progress' => 1,
+            'format'   => $this->format,
+            'file'     => null,
+            'error'    => null,
         ]);
 
         try {
-            // Count rows for progress
+            // count for progress
             $countQ = DB::table('general_accounting as r')
                 ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
                 ->whereBetween('r.gen_acct_date', [$this->startDate, $this->endDate]);
@@ -86,38 +101,27 @@ class BuildGeneralJournalBook implements ShouldQueue
                       });
                 });
             }
-
-            $count = (clone $countQ)->count();
-
-            $progress = function (int $done) use ($count) {
-                $pct = $count ? min(99, (int) floor(($done / max(1, $count)) * 98) + 1) : 50;
+            $total = (clone $countQ)->count();
+            $step  = function(int $done) use ($total) {
+                $pct = $total ? min(99, 1 + (int)floor(($done / max(1,$total)) * 98)) : 50;
                 $this->patchState(['progress' => $pct]);
             };
 
-            $dir = "reports";
-            if (!Storage::disk('local')->exists($dir)) {
-                Storage::disk('local')->makeDirectory($dir);
-            }
-
-            $stamp = now()->format('Ymd_His');
-            $path  = $this->format === 'pdf'
-                ? "$dir/general_journal_book_{$stamp}.pdf"
-                : "$dir/general_journal_book_{$stamp}.xls";
+            $path = $this->targetPath();
 
             if ($this->format === 'pdf') {
-                $this->buildPdf($path, $progress);
+                $this->buildPdf($path, $step);
             } else {
-                $this->buildExcel($path, $progress);
+                $this->buildXls($path, $step);
             }
 
-            $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);
+            $this->pruneSiblings($path, keep: 1);
 
             $this->patchState([
                 'status'   => 'done',
                 'progress' => 100,
                 'file'     => $path,
             ]);
-
         } catch (Throwable $e) {
             $this->patchState([
                 'status' => 'error',
@@ -127,8 +131,8 @@ class BuildGeneralJournalBook implements ShouldQueue
         }
     }
 
-    /** PDF via TCPDF; chunked DB reads; writes to disk. */
-    private function buildPdf(string $file, callable $progress): void
+    /** PDF writer (TCPDF). */
+    private function buildPdf(string $path, callable $progress): void
     {
         $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
         $pdf->setPrintHeader(false);
@@ -139,7 +143,7 @@ class BuildGeneralJournalBook implements ShouldQueue
         $pdf->SetFont('helvetica', '', 8);
         $pdf->AddPage();
 
-        $headerHtml = <<<HTML
+        $header = <<<HTML
           <table width="100%" cellspacing="0" cellpadding="0">
             <tr><td align="right"><b>SUCDEN PHILIPPINES, INC.</b><br/>
               <span style="font-size:9px">TIN- 000-105-267-000</span><br/>
@@ -152,12 +156,12 @@ class BuildGeneralJournalBook implements ShouldQueue
           <br/>
           <table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
         HTML;
-        $pdf->writeHTML($headerHtml, true, false, false, false, '');
+        $pdf->writeHTML($header, true, false, false, false, '');
 
         $done = 0;
         $lineCount = 0;
 
-        $query = DB::table('general_accounting as r')
+        $q = DB::table('general_accounting as r')
             ->selectRaw("
                 r.id,
                 to_char(r.gen_acct_date,'MM/DD/YYYY') as gen_date,
@@ -170,7 +174,7 @@ class BuildGeneralJournalBook implements ShouldQueue
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->join('general_accounting_details as d', DB::raw("d.transaction_id"), '=', DB::raw("r.id::text"))
+            ->join('general_accounting_details as d', DB::raw('d.transaction_id'), '=', DB::raw('r.id::text'))
             ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
             ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
             ->whereBetween('r.gen_acct_date', [$this->startDate, $this->endDate])
@@ -186,7 +190,7 @@ class BuildGeneralJournalBook implements ShouldQueue
             ->groupBy('r.id','r.gen_acct_date','r.ga_no','r.explanation')
             ->orderBy('r.id');
 
-        $query->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
+        $q->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
             foreach ($chunk as $row) {
                 $gjId = 'GLGJ-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
@@ -198,8 +202,8 @@ class BuildGeneralJournalBook implements ShouldQueue
                 HTML;
                 $pdf->writeHTML($block, true, false, false, false, '');
 
-                $itemDebit=0; $itemCredit=0;
                 $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+                $itemDebit=0; $itemCredit=0;
 
                 foreach (json_decode($row->lines, true) as $ln) {
                     $itemDebit  += (float)($ln['debit'] ?? 0);
@@ -244,22 +248,11 @@ class BuildGeneralJournalBook implements ShouldQueue
             }
         });
 
-        // Simple footer
-        $pdf->SetY(-18);
-        $pdf->writeHTML(
-          '<table width="100%"><tr>
-             <td>Print Date: '.now()->format('M d, Y').'</td>
-             <td>Print Time: '.now()->format('h:i:s a').'</td>
-             <td align="right">'.$pdf->getAliasNumPage().'/'.$pdf->getAliasNbPages().'</td>
-           </tr></table>',
-           true,false,false,false,''
-        );
-
-        Storage::disk('local')->put($file, $pdf->Output('general-journal.pdf', 'S'));
+        Storage::disk('local')->put($path, $pdf->Output($this->friendlyName(), 'S'));
     }
 
-    /** Excel via PhpSpreadsheet; chunked DB reads; writes to disk. */
-    private function buildExcel(string $file, callable $progress): void
+    /** Excel (XLS) via PhpSpreadsheet. */
+    private function buildXls(string $path, callable $progress): void
     {
         $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
         $ws = $wb->getActiveSheet();
@@ -271,8 +264,7 @@ class BuildGeneralJournalBook implements ShouldQueue
         $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
         $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
         $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r+=2;
-        $ws->setCellValue("A{$r}", 'GENERAL JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} of {$this->endDate}"); $r+=2;
+        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r+=2;
         $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
 
         $done = 0;
@@ -290,7 +282,7 @@ class BuildGeneralJournalBook implements ShouldQueue
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->join('general_accounting_details as d', DB::raw("d.transaction_id"), '=', DB::raw("r.id::text"))
+            ->join('general_accounting_details as d', DB::raw('d.transaction_id'), '=', DB::raw('r.id::text'))
             ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
             ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
             ->whereBetween('r.gen_acct_date', [$this->startDate, $this->endDate])
@@ -311,7 +303,6 @@ class BuildGeneralJournalBook implements ShouldQueue
 
                     $ws->setCellValue("A{$r}", $gjId);
                     $ws->setCellValue("B{$r}", "JE - {$row->ga_no}"); $r++;
-
                     $ws->setCellValue("A{$r}", $row->gen_date);
                     $ws->setCellValue("B{$r}", $row->explanation); $r++;
 
@@ -339,7 +330,9 @@ class BuildGeneralJournalBook implements ShouldQueue
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
         $stream = fopen('php://temp', 'r+');
         $writer->save($stream); rewind($stream);
-        Storage::disk('local')->put($file, stream_get_contents($stream));
+        Storage::disk('local')->put($path, stream_get_contents($stream));
         fclose($stream);
+        $wb->disconnectWorksheets();
+        unset($writer);
     }
 }

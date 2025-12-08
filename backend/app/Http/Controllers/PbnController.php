@@ -52,22 +52,26 @@ class PbnController extends Controller
     // Item # combobox for a given PBN
     public function items(Request $req)
     {
-        $pbn = $req->query('pbn_number', '');
+        $data = $req->validate([
+            'company_id'  => 'required|integer',
+            'pbn_number'  => 'required|string',
+        ]);
 
-        // Adjust table/columns below to your actual PBN item detail table
         $rows = DB::table('pbn_entry_details as d')
-            ->select([
+            ->join('pbn_entry as e', 'e.id', '=', 'd.pbn_entry_id')
+            ->where('e.company_id', (int) $data['company_id'])
+            ->where('d.pbn_number', $data['pbn_number'])
+            ->orderBy('d.row')
+            ->get([
                 'd.row',
                 'd.mill',
                 'd.quantity',
                 'd.unit_cost',
                 'd.commission',
                 DB::raw('NULL as mill_code'),
-            ])
-            ->where('d.pbn_number', $pbn)
-            ->orderBy('d.row')
-            ->get();
+            ]);
 
         return response()->json($rows);
     }
+
 }

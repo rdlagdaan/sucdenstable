@@ -328,10 +328,16 @@ public function list(Request $req)
     // 10) Print/Download placeholders
 public function formPdf(Request $request, $id)
 {
-       
-    // --- Header info
+    $companyId = $request->query('company_id');
+
+    // --- Header info (scoped by company)
     $header = DB::table('cash_sales as cs')
-        ->join('customer_list as c', 'cs.cust_id', '=', 'c.cust_id') // varchar join
+        ->join('customer_list as c', function ($j) use ($companyId) {
+            $j->on('cs.cust_id', '=', 'c.cust_id');
+            if ($companyId) {
+                $j->where('c.company_id', '=', $companyId);
+            }
+        })
         ->select(
             'cs.id','cs.cs_no','cs.cust_id','cs.sales_amount','cs.pay_method',
             'cs.bank_id','cs.explanation','cs.is_cancel','cs.si_no',
@@ -340,16 +346,18 @@ public function formPdf(Request $request, $id)
             'cs.workstation_id','cs.user_id','cs.created_at'
         )
         ->where('cs.id', $id)
+        ->when($companyId, fn($q) => $q->where('cs.company_id', $companyId))
         ->first();
 
     if (!$header || $header->is_cancel === 'y') {
         abort(404, 'Sales Voucher not found or cancelled');
     }
 
-    // --- Details
+    // --- Details (scoped by company)
     $details = DB::table('cash_sales_details as d')
         ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
         ->where('d.transaction_id', $id)
+        ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
         ->orderBy('d.workstation_id','desc')
         ->orderBy('d.credit','desc')
         ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
@@ -358,13 +366,24 @@ public function formPdf(Request $request, $id)
     $totalDebit  = $details->sum('debit');
     $totalCredit = $details->sum('credit');
 
+    // --- Early guard: if not balanced, return the existing HTML notice
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        $html = sprintf(
+            '<!doctype html><meta charset="utf-8">
+            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+            <h2>Cannot print Sales Voucher</h2>
+            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
+            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+            number_format($totalDebit, 2),
+            number_format($totalCredit, 2)
+        );
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
     // --- TCPDF with custom header/footer
     $pdf = new MySalesVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-
-        // 🔽 ADD THESE TWO LINES
-    $pdf->setPrintHeader(true);   // ensure Header() (logo) runs
-    $pdf->SetHeaderMargin(8);     // avoid overlap with content
-    
+    $pdf->setPrintHeader(true);
+    $pdf->SetHeaderMargin(8);
     $pdf->SetMargins(15,30,15);
     $pdf->AddPage();
     $pdf->SetFont('helvetica','',7);
@@ -375,7 +394,7 @@ public function formPdf(Request $request, $id)
     $formattedDebit  = number_format($totalDebit, 2);
     $formattedCredit = number_format($totalCredit, 2);
 
-    // --- Build body (legacy layout)
+    // --- Build body (existing layout)
     $tbl = <<<EOD
 <br><br>
 <table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
@@ -452,20 +471,6 @@ EOD;
 
     $pdf->writeHTML($tbl, true, false, false, false, '');
 
-    if (abs($totalDebit - $totalCredit) > 0.005) {
-        $html = sprintf(
-            '<!doctype html><meta charset="utf-8">
-            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
-            <h2>Cannot print Sales Voucher</h2>
-            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
-            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
-            number_format($totalDebit, 2),
-            number_format($totalCredit, 2)
-        );
-        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
-    }
-
-
     // --- Stream PDF to browser
     $pdfContent = $pdf->Output('salesVoucher.pdf', 'S');
 
@@ -474,11 +479,106 @@ EOD;
         ->header('Content-Disposition', 'inline; filename="salesVoucher.pdf"');
 }
 
+
   
    
    
     public function checkPdf($id)       { return response('Check PDF stub – implement renderer', 200); }
-    public function formExcel($id)      { return response('Excel stub – implement renderer', 200); }
+public function formExcel(Request $request, $id)
+{
+    $companyId = $request->query('company_id');
+
+    // Header (scoped)
+    $header = DB::table('cash_sales as cs')
+        ->join('customer_list as c', function ($j) use ($companyId) {
+            $j->on('cs.cust_id', '=', 'c.cust_id');
+            if ($companyId) $j->where('c.company_id', '=', $companyId);
+        })
+        ->select(
+            'cs.id','cs.cs_no','cs.cust_id','cs.sales_amount',
+            DB::raw("to_char(cs.sales_date, 'YYYY-MM-DD') as sales_date"),
+            'cs.si_no','cs.explanation','cs.is_cancel','c.cust_name'
+        )
+        ->where('cs.id', $id)
+        ->when($companyId, fn($q) => $q->where('cs.company_id', $companyId))
+        ->first();
+
+    if (!$header || $header->is_cancel === 'y') {
+        abort(404, 'Sales Voucher not found or cancelled');
+    }
+
+    // Details (scoped)
+    $details = DB::table('cash_sales_details as d')
+        ->leftJoin('account_code as a','d.acct_code','=','a.acct_code')
+        ->where('d.transaction_id', $id)
+        ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+        ->orderBy('d.id')
+        ->get([
+            'd.acct_code',
+            DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
+            'd.debit','d.credit'
+        ]);
+
+    $totalDebit  = $details->sum('debit');
+    $totalCredit = $details->sum('credit');
+
+    // Build XLSX
+    $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $sheet = $spreadsheet->getActiveSheet();
+    $sheet->setTitle('Sales Voucher');
+
+    // Header block
+    $r = 1;
+    $sheet->setCellValue("A{$r}", 'SALES VOUCHER'); $r += 2;
+
+    $sheet->setCellValue("A{$r}", 'SV Number:');  $sheet->setCellValue("B{$r}", $header->cs_no);       $r++;
+    $sheet->setCellValue("A{$r}", 'Invoice Date:');$sheet->setCellValue("B{$r}", $header->sales_date);  $r++;
+    $sheet->setCellValue("A{$r}", 'Sales Invoice #:'); $sheet->setCellValue("B{$r}", $header->si_no);   $r++;
+    $sheet->setCellValue("A{$r}", 'Customer:');   $sheet->setCellValue("B{$r}", $header->cust_name);    $r++;
+    $sheet->setCellValue("A{$r}", 'Explanation:');$sheet->setCellValue("B{$r}", $header->explanation);  $r += 2;
+
+    // Table headers
+    $sheet->setCellValue("A{$r}", 'ACCOUNT');
+    $sheet->setCellValue("B{$r}", 'GL ACCOUNT');
+    $sheet->setCellValue("C{$r}", 'DEBIT');
+    $sheet->setCellValue("D{$r}", 'CREDIT');
+    $sheet->getStyle("A{$r}:D{$r}")->getFont()->setBold(true);
+    $r++;
+
+    // Rows
+    foreach ($details as $d) {
+        $sheet->setCellValue("A{$r}", $d->acct_code);
+        $sheet->setCellValue("B{$r}", $d->acct_desc);
+        $sheet->setCellValueExplicit("C{$r}", (float)($d->debit ?? 0), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+        $sheet->setCellValueExplicit("D{$r}", (float)($d->credit ?? 0), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+        $r++;
+    }
+
+    // Totals
+    $sheet->setCellValue("B{$r}", 'TOTAL');
+    $sheet->setCellValue("C{$r}", (float)$totalDebit);
+    $sheet->setCellValue("D{$r}", (float)$totalCredit);
+    $sheet->getStyle("B{$r}:D{$r}")->getFont()->setBold(true);
+
+    // Formats & widths
+    $sheet->getStyle("C1:D{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+    foreach (['A'=>18,'B'=>45,'C'=>16,'D'=>16] as $col => $w) {
+        $sheet->getColumnDimension($col)->setWidth($w);
+    }
+
+    // Stream to memory
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+    ob_start();
+    $writer->save('php://output');
+    $xlsData = ob_get_clean();
+
+    $fileName = 'SalesVoucher_' . ($header->cs_no ?? $id) . '.xlsx';
+
+    return response($xlsData, 200)
+        ->header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        ->header('Content-Disposition', 'attachment; filename="'.$fileName.'"')
+        ->header('Content-Length', (string)strlen($xlsData));
+}
 
     // ---- helpers ----
     protected function recalcTotals(int $transactionId): array

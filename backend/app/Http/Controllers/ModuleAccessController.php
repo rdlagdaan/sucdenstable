@@ -1,21 +1,39 @@
 <?php
+
 namespace App\Http\Controllers;
 
-use Illuminate\Support\Facades\DB;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\Auth;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class ModuleAccessController extends Controller
 {
-    public function userModules(): JsonResponse
+    public function userModules(Request $request): JsonResponse
     {
-        $userId = Auth::id();
-        //$userId = 1;
-        $data = DB::table('application_users as au')
+        $user = $request->user(); // auth:sanctum
+        if (!$user) {
+            return response()->json([]);
+        }
+
+        $userId = (int) $user->id;
+
+        // Prefer explicit ?company_id=, fall back to authenticated user's company_id.
+        // NOTE: If neither yields a positive int, return empty to avoid cross-company leakage.
+        $requestedCompanyId = (int) $request->query('company_id', 0);
+        $fallbackCompanyId  = (int) ($user->company_id ?? 0);
+        $companyId = $requestedCompanyId > 0 ? $requestedCompanyId : $fallbackCompanyId;
+
+        if ($companyId <= 0) {
+            // No valid company scope => no modules
+            return response()->json([]);
+        }
+
+        $rows = DB::table('application_users as au')
             ->join('application_sub_modules as asm', 'au.application_sub_module_id', '=', 'asm.id')
             ->join('application_modules as am', 'asm.application_module_id', '=', 'am.id')
             ->join('system_mains as sm', 'am.system_main_id', '=', 'sm.id')
             ->where('au.users_employees_id', $userId)
+            ->where('au.company_id', $companyId)   // <-- hard company filter
             ->orderBy('sm.sort_order')
             ->orderBy('am.sort_order')
             ->orderBy('asm.sort_order')
@@ -26,39 +44,38 @@ class ModuleAccessController extends Controller
                 'am.module_name',
                 'asm.id as sub_module_id',
                 'asm.sub_module_name',
-                'asm.component_path'
+                'asm.component_path',
             ]);
 
         $hierarchy = [];
 
-        foreach ($data as $row) {
-            $systemId = $row->system_id;
-            $moduleId = $row->module_id;
+        foreach ($rows as $r) {
+            $sid = $r->system_id;
+            $mid = $r->module_id;
 
-            if (!isset($hierarchy[$systemId])) {
-                $hierarchy[$systemId] = [
-                    'system_id' => $systemId,
-                    'system_name' => $row->system_name,
-                    'modules' => []
+            if (!isset($hierarchy[$sid])) {
+                $hierarchy[$sid] = [
+                    'system_id'   => $sid,
+                    'system_name' => $r->system_name,
+                    'modules'     => [],
                 ];
             }
 
-            if (!isset($hierarchy[$systemId]['modules'][$moduleId])) {
-                $hierarchy[$systemId]['modules'][$moduleId] = [
-                    'module_id' => $moduleId,
-                    'module_name' => $row->module_name,
-                    'sub_modules' => []
+            if (!isset($hierarchy[$sid]['modules'][$mid])) {
+                $hierarchy[$sid]['modules'][$mid] = [
+                    'module_id'   => $mid,
+                    'module_name' => $r->module_name,
+                    'sub_modules' => [],
                 ];
             }
 
-            $hierarchy[$systemId]['modules'][$moduleId]['sub_modules'][] = [
-                'sub_module_id' => $row->sub_module_id,
-                'sub_module_name' => $row->sub_module_name,
-                'component_path' => $row->component_path
+            $hierarchy[$sid]['modules'][$mid]['sub_modules'][] = [
+                'sub_module_id'   => $r->sub_module_id,
+                'sub_module_name' => $r->sub_module_name,
+                'component_path'  => $r->component_path,
             ];
         }
 
-        // Convert nested associative array to indexed array
         $result = array_values(array_map(function ($system) {
             $system['modules'] = array_values($system['modules']);
             return $system;

@@ -196,10 +196,10 @@ export default function CashReceiptsForm() {
     (async () => {
       try {
         const [custRes, bankRes, pmRes, acctRes] = await Promise.all([
-          napi.get('/api/cr/customers', { params: { company_id: companyId } }),
-          napi.get('/api/cr/banks', { params: { company_id: companyId } }),
-          napi.get('/api/cr/payment-methods'),
-          napi.get('/api/cr/accounts', { params: { company_id: companyId } }),
+          napi.get('/cr/customers', { params: { company_id: companyId } }),
+          napi.get('/cr/banks', { params: { company_id: companyId } }),
+          napi.get('/cr/payment-methods'),
+          napi.get('/cr/accounts', { params: { company_id: companyId } }),
         ]);
 
         setCustomers((custRes.data || []).map((c: any) => ({
@@ -227,7 +227,7 @@ export default function CashReceiptsForm() {
   /* --------- search list --------- */
   const fetchTransactions = useCallback(async () => {
     try {
-      const { data } = await napi.get<ReceiptListRow[]>('/api/cash-receipt/list', {
+      const { data } = await napi.get<ReceiptListRow[]>('/cash-receipt/list', {
         params: { company_id: companyId || '', q: txSearch || '' },
       });
       setTxOptions(Array.isArray(data) ? data : []);
@@ -251,7 +251,7 @@ const ensureAccountInSource = useCallback((code: string, desc?: string) => {
   /* --------- load one receipt --------- */
   const loadReceipt = useCallback(async (rid: string | number) => {
     try {
-      const { data } = await napi.get(`/api/cash-receipt/${rid}`, {
+      const { data } = await napi.get(`/cash-receipt/${rid}`, {
         params: { company_id: companyId },
       });
       const m = data.main ?? data;
@@ -329,7 +329,7 @@ const details = (data.details || []).map((d: any) => {
     if (!ok.isConfirmed) return;
 
     try {
-      const res = await napi.post('/api/cash-receipt/save-main', {
+      const res = await napi.post('/cash-receipt/save-main', {
         cr_no: crNo || undefined,
         cust_id: custId,
         receipt_date: receiptDate,
@@ -373,7 +373,7 @@ const details = (data.details || []).map((d: any) => {
     const ok = await Swal.fire({ title: 'Cancel this receipt?', icon: 'warning', showCancelButton: true, confirmButtonText: 'Cancel' });
     if (!ok.isConfirmed) return;
     try {
-      const { data } = await napi.post('/api/cash-receipt/cancel', { id: mainId, flag: 1 });
+      const { data } = await napi.post('/cash-receipt/cancel', { id: mainId, flag: 1 });
       setIsCancelled((data?.is_cancel || data?.is_cancelled) === 'y');
       setLocked(true);
       setGridLocked(true);
@@ -389,7 +389,7 @@ const details = (data.details || []).map((d: any) => {
     const ok = await Swal.fire({ title: 'Uncancel this receipt?', icon: 'question', showCancelButton: true, confirmButtonText: 'Uncancel' });
     if (!ok.isConfirmed) return;
     try {
-      const { data } = await napi.post('/api/cash-receipt/cancel', { id: mainId, flag: 0 });
+      const { data } = await napi.post('/cash-receipt/cancel', { id: mainId, flag: 0 });
       setIsCancelled((data?.is_cancel || data?.is_cancelled) !== 'y');
       setLocked(true);
       setGridLocked(false);
@@ -405,7 +405,7 @@ const details = (data.details || []).map((d: any) => {
     const ok = await Swal.fire({ title: 'Delete this receipt?', text: 'This action is irreversible.', icon: 'error', showCancelButton: true, confirmButtonText: 'Delete' });
     if (!ok.isConfirmed) return;
     try {
-      await napi.delete(`/api/cash-receipt/${mainId}`);
+      await napi.delete(`/cash-receipt/${mainId}`);
       handleNew(); // reset
       toast.success('Receipt deleted.');
       fetchTransactions();
@@ -520,7 +520,7 @@ const refreshHeaderTotals = (totals?: Totals) => {
 
 
   const deleteDetail = async (payload: any) => {
-    const { data } = await napi.post('/api/cash-receipt/delete-detail', payload);
+    const { data } = await napi.post('/cash-receipt/delete-detail', payload);
     refreshHeaderTotals(data?.totals);
     await loadReceipt(payload.transaction_id);
   };
@@ -536,7 +536,7 @@ const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
   try {
     if (!row.persisted) {
       // ⬇️ CREATE: insert a new detail row
-      const { data } = await napi.post('/api/cash-receipt/save-detail', {
+      const { data } = await napi.post('/cash-receipt/save-detail', {
         transaction_id: mainId,
         acct_code: code,
         debit: row.debit || 0,
@@ -563,7 +563,7 @@ const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
 
     } else {
       // ⬇️ UPDATE: modify an existing detail row
-      const { data } = await napi.post('/api/cash-receipt/update-detail', {
+      const { data } = await napi.post('/cash-receipt/update-detail', {
         id: row.id,
         transaction_id: mainId,
         acct_code: code,
@@ -603,15 +603,16 @@ const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
   const [pdfUrl, setPdfUrl] = useState<string | undefined>(undefined);
   const [showPdf, setShowPdf] = useState(false);
 
-  const handleOpenPdf = () => {
-    if (!mainId) return toast.info('Save or select a receipt first.');
-    const url = `/api/cash-receipt/form-pdf/${mainId}?company_id=${encodeURIComponent(companyId||'')}`;
-    setPdfUrl(url);
-    setShowPdf(true);
-  };
+const handleOpenPdf = () => {
+  if (!mainId) return toast.info('Save or select a receipt first.');
+  const url = `/api/cash-receipt/form-pdf/${mainId}?company_id=${encodeURIComponent(companyId||'')}`;
+  setPdfUrl(url);
+  setShowPdf(true);
+};
+
   const handleDownloadExcel = async () => {
     if (!mainId) return toast.info('Save or select a receipt first.');
-    const res = await napi.get(`/api/cash-receipt/form-excel/${mainId}`, {
+    const res = await napi.get(`/cash-receipt/form-excel/${mainId}`, {
       responseType: 'blob',
       params: { company_id: companyId||'' },
     });

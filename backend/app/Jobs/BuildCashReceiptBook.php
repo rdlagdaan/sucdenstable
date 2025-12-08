@@ -10,117 +10,102 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-use Throwable;
+use Illuminate\Support\Str;
 
 class BuildCashReceiptBook implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public int $timeout = 900; // 15 min
+
     public function __construct(
         public string $ticket,
         public string $startDate,
         public string $endDate,
-        public string $format,    // pdf|excel
+        public string $format,    // 'pdf' | 'xls'
         public ?int $companyId,
-        public ?int $userId
+        public ?int $userId,
     ) {}
 
+    private function key(): string { return "crb:{$this->ticket}"; }
 
-// In app/Jobs/BuildCashReceiptBook.php (inside the class)
-private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
-{
-    // your local disk root is storage/app/private, so 'reports' is correct
-    $disk = \Illuminate\Support\Facades\Storage::disk('local');
-
-    $files = collect($disk->files('reports'))
-        ->filter(fn($p) => str_starts_with(basename($p), 'cash_receipt_book_'))
-        ->when($sameFormatOnly, function ($c) use ($keepFile) {
-            $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
-            return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
-        })
-        // newest first, keep the newest N (default 1), delete the rest
-        ->sortByDesc(fn($p) => $disk->lastModified($p))
-        ->slice($keep); // drop the first N (we keep them), the rest will be deleted
-
-    $files->each(fn($p) => $disk->delete($p));
-}
-
-
-
-
-
-// Add this helper inside the class (e.g., above handle())
-private function patchState(array $patch): void
-{
-    $key = "crb:{$this->ticket}";
-    $current = Cache::get($key);
-    if (!is_array($current)) {
-        $current = [];
+    private function patchState(array $patch): void
+    {
+        $cur = Cache::get($this->key(), []);
+        Cache::put($this->key(), array_merge($cur, $patch), now()->addHours(2));
     }
-    Cache::put($key, array_merge($current, $patch), now()->addHours(2));
-}
 
-// Replace your handle() with this
-public function handle(): void
-{
-    // Initialize or patch the progress state safely
-    $this->patchState([
-        'status'     => 'running',
-        'progress'   => 1,
-        'format'     => $this->format,
-        'file'       => null,
-        'error'      => null,
-        'range'      => [$this->startDate, $this->endDate],
-        'user_id'    => $this->userId,
-        'company_id' => $this->companyId,
-    ]);
-
-    try {
-        $count = DB::table('cash_receipts')
-            ->when($this->companyId, fn($q) => $q->where('company_id', $this->companyId))
-            ->whereBetween('receipt_date', [$this->startDate, $this->endDate])
-            ->count();
-
-        $progress = function (int $done) use ($count) {
-            $pct = $count ? min(99, (int) floor(($done / max(1, $count)) * 98) + 1) : 50;
-            $this->patchState(['progress' => $pct]);
-        };
-
-        $dir = "reports";
-        if (!Storage::disk('local')->exists($dir)) {
-            Storage::disk('local')->makeDirectory($dir);
-        }
-
-        $stamp = now()->format('Ymd_His');
-        $path  = $this->format === 'pdf'
-               ? "$dir/cash_receipt_book_{$stamp}.pdf"
-               : "$dir/cash_receipt_book_{$stamp}.xls";
-
-        if ($this->format === 'pdf') {
-            $this->buildPdf($path, $progress);
-        } else {
-            $this->buildExcel($path, $progress);
-        }
-
-        $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);     
-           
+    public function handle(): void
+    {
         $this->patchState([
-            'status'   => 'done',
-            'progress' => 100,
-            'file'     => $path,
+            'status'   => 'running',
+            'progress' => 1,
+            'format'   => $this->format,
+            'file'     => null,
+            'error'    => null,
         ]);
 
-    } catch (Throwable $e) {
-        $this->patchState([
-            'status' => 'error',
-            'error'  => $e->getMessage(),
-        ]);
-        throw $e;
+        try {
+            // count rows for progress
+            $total = DB::table('cash_receipts as r') // ← singular table name (matches your modules)
+                ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
+                ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
+                ->count();
+
+            $step = function (int $done) use ($total) {
+                $pct = $total ? min(99, 1 + (int)floor(($done / max(1,$total)) * 98)) : 50;
+                $this->patchState(['progress' => $pct]);
+            };
+
+            $dir = 'reports';
+            $disk = Storage::disk('local');
+            if (!$disk->exists($dir)) $disk->makeDirectory($dir);
+
+            $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
+            $path  = $this->format === 'pdf'
+                   ? "$dir/cash_receipt_book_{$stamp}.pdf"
+                   : "$dir/cash_receipt_book_{$stamp}.xls";
+
+            if ($this->format === 'pdf') {
+                $this->buildPdf($path, $step);
+            } else {
+                $this->buildExcel($path, $step);
+            }
+
+            // keep only the newest per format
+            $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);
+
+            $this->patchState([
+                'status'   => 'done',
+                'progress' => 100,
+                'file'     => $path,
+            ]);
+        } catch (\Throwable $e) {
+            $this->patchState([
+                'status' => 'error',
+                'error'  => $e->getMessage(),
+            ]);
+            throw $e;
+        }
     }
-}
 
+    private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
+    {
+        $disk = Storage::disk('local'); // storage/app
+        $files = collect($disk->files('reports'))
+            ->filter(fn($p) => str_starts_with(basename($p), 'cash_receipt_book_'))
+            ->when($sameFormatOnly, function ($c) use ($keepFile) {
+                $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
+                return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
+            })
+            ->sortByDesc(fn($p) => $disk->lastModified($p))
+            ->slice($keep);
 
-    /** PDF via TCPDF; chunked DB reads; writes to disk. */
+        $files->each(fn($p) => $disk->delete($p));
+    }
+
+    /** ---------- Writers ---------- */
+
     private function buildPdf(string $file, callable $progress): void
     {
         $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
@@ -132,7 +117,7 @@ public function handle(): void
         $pdf->SetFont('helvetica', '', 8);
         $pdf->AddPage();
 
-        $headerHtml = <<<HTML
+        $hdr = <<<HTML
           <table width="100%" cellspacing="0" cellpadding="0">
             <tr><td align="right"><b>SUCDEN PHILIPPINES, INC.</b><br/>
               <span style="font-size:9px">TIN- 000-105-267-000</span><br/>
@@ -141,16 +126,15 @@ public function handle(): void
             <tr><td><hr/></td></tr>
           </table>
           <h2>CASH RECEIPTS JOURNAL</h2>
-          <div><b>For the period covering {$this->startDate} -- {$this->endDate}</b></div>
+          <div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
           <br/>
           <table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
         HTML;
-        $pdf->writeHTML($headerHtml, true, false, false, false, '');
+        $pdf->writeHTML($hdr, true, false, false, false, '');
 
         $done = 0;
         $lineCount = 0;
 
-        // CHUNKED query (Postgres), matching your columns and joins
         DB::table('cash_receipts as r')
             ->selectRaw("
                 r.id,
@@ -158,7 +142,7 @@ public function handle(): void
                 r.cr_no,
                 r.collection_receipt,
                 r.details,
-                b.acct_desc as bank_name,
+                bk.bank_name as bank_name,
                 json_agg(json_build_object(
                     'acct_code', d.acct_code,
                     'acct_desc', a.acct_desc,
@@ -166,12 +150,15 @@ public function handle(): void
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
-            ->join('cash_receipt_details as d', DB::raw("d.transaction_id"), '=', DB::raw("r.id::text"))
+            ->leftJoin('bank as bk', 'bk.bank_id', '=', 'r.bank_id')
+            ->join('cash_receipt_details as d', function ($j) {
+                // d.transaction_id is VARCHAR in your schema — cast it to BIGINT to match r.id
+                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+            })
             ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
             ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
             ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
-            ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','b.acct_desc')
+            ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
             ->orderBy('r.id')
             ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
                 foreach ($chunk as $row) {
@@ -233,21 +220,10 @@ public function handle(): void
                 }
             });
 
-        // Footer (simple)
-        $pdf->SetY(-18);
-        $pdf->writeHTML(
-          '<table width="100%"><tr>
-             <td>Print Date: '.now()->format('M d, Y').'</td>
-             <td>Print Time: '.now()->format('h:i:s a').'</td>
-             <td align="right">'.$pdf->getAliasNumPage().'/'.$pdf->getAliasNbPages().'</td>
-           </tr></table>',
-           true,false,false,false,''
-        );
-
+        // write to disk
         Storage::disk('local')->put($file, $pdf->Output('cash-receipts.pdf', 'S'));
     }
 
-    /** Excel via PhpSpreadsheet; chunked DB reads; writes to disk. */
     private function buildExcel(string $file, callable $progress): void
     {
         $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
@@ -259,12 +235,13 @@ public function handle(): void
         $ws->setCellValue("A{$r}", 'SUCDEN PHILIPPINES, INC.'); $r++;
         $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
         $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
-        $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r+=2;
+        $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r += 2;
         $ws->setCellValue("A{$r}", 'CASH RECEIPTS JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} of {$this->endDate}"); $r+=2;
+        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
         $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
 
         $done = 0;
+
         DB::table('cash_receipts as r')
             ->selectRaw("
                 r.id,
@@ -272,7 +249,7 @@ public function handle(): void
                 r.cr_no,
                 r.collection_receipt,
                 r.details,
-                b.acct_desc as bank_name,
+                bk.bank_name as bank_name,
                 json_agg(json_build_object(
                     'acct_code', d.acct_code,
                     'acct_desc', a.acct_desc,
@@ -280,12 +257,14 @@ public function handle(): void
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
-            ->join('cash_receipt_details as d', DB::raw("d.transaction_id"), '=', DB::raw("r.id::text"))
+            ->leftJoin('bank as bk','bk.bank_id','=','r.bank_id')
+            ->join('cash_receipt_details as d', function ($j) {
+                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+            })
             ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
             ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
             ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
-            ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','b.acct_desc')
+            ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
             ->orderBy('r.id')
             ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
                 foreach ($chunk as $row) {
@@ -326,5 +305,7 @@ public function handle(): void
         $writer->save($stream); rewind($stream);
         Storage::disk('local')->put($file, stream_get_contents($stream));
         fclose($stream);
+        $wb->disconnectWorksheets();
+        unset($writer);
     }
 }

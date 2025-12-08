@@ -2,54 +2,71 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\BuildGeneralJournalBook;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use App\Jobs\BuildGeneralJournalBook;
+use Illuminate\Http\JsonResponse;
 
 class GeneralJournalBookController extends Controller
 {
-    public function start(Request $req)
+    /**
+     * Start a General Journal report job.
+     * Accepts format: pdf | excel | xls | xlsx  (excel/xlsx → xls writer)
+     */
+    public function start(Request $req): JsonResponse
     {
         $v = $req->validate([
             'start_date' => 'required|date',
             'end_date'   => 'required|date|after_or_equal:start_date',
-            'format'     => 'required|in:pdf,excel',
+            'format'     => 'required|string|in:pdf,excel,xls,xlsx',
             'query'      => 'nullable|string|max:200',
         ]);
 
-        $ticket = Str::uuid()->toString();
+        // Normalize format
+        $fmt = strtolower($v['format']);
+        if ($fmt === 'excel' || $fmt === 'xlsx') {
+            $fmt = 'xls';
+        }
 
+        $ticket     = Str::uuid()->toString();
+        $companyId  = $req->user()->company_id ?? null;
+        $userId     = $req->user()->id ?? null;
+
+        // Seed cache state (front-end polls this)
         Cache::put("gjb:$ticket", [
             'status'     => 'queued',
             'progress'   => 0,
-            'format'     => $v['format'],
+            'format'     => $fmt,     // pdf | xls
             'file'       => null,
             'error'      => null,
             'range'      => [$v['start_date'], $v['end_date']],
             'query'      => $v['query'] ?? null,
-            'user_id'    => $req->user()->id ?? null,
-            'company_id' => $req->user()->company_id ?? null,
+            'user_id'    => $userId,
+            'company_id' => $companyId,
         ], now()->addHours(2));
 
-        BuildGeneralJournalBook::dispatch(
-            ticket: $ticket,
-            startDate: $v['start_date'],
-            endDate: $v['end_date'],
-            format: $v['format'],
-            companyId: $req->user()->company_id ?? null,
-            userId: $req->user()->id ?? null,
-            query: $v['query'] ?? null
+        // Fire the job after response (snappy UX; still uses your queue worker)
+        BuildGeneralJournalBook::dispatchAfterResponse(
+            ticket:     $ticket,
+            startDate:  $v['start_date'],
+            endDate:    $v['end_date'],
+            format:     $fmt,          // pdf | xls
+            companyId:  $companyId,
+            userId:     $userId,
+            query:      $v['query'] ?? null
         );
 
         return response()->json(['ticket' => $ticket]);
     }
 
-    public function status(string $ticket)
+    public function status(string $ticket): JsonResponse
     {
         $state = Cache::get("gjb:$ticket");
-        if (!$state) return response()->json(['error' => 'not_found'], 404);
+        if (!$state) {
+            return response()->json(['error' => 'not_found'], 404);
+        }
         return response()->json($state);
     }
 
@@ -92,7 +109,7 @@ class GeneralJournalBookController extends Controller
             return response()->json(['error' => 'missing_file'], 410);
         }
 
-        $absolute = Storage::disk('local')->path($state['file']); // storage/app/private/...
+        $absolute = Storage::disk('local')->path($state['file']);
         return response()->file($absolute, [
             'Content-Type'        => 'application/pdf',
             'Content-Disposition' => 'inline; filename="'.basename($state['file']).'"',

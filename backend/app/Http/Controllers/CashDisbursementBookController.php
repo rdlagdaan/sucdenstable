@@ -5,45 +5,55 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 use App\Jobs\BuildCashDisbursementBook;
 
 class CashDisbursementBookController extends Controller
 {
-    public function start(Request $req)
+    public function start(Request $req): JsonResponse
     {
         $v = $req->validate([
             'start_date' => 'required|date',
             'end_date'   => 'required|date|after_or_equal:start_date',
-            'format'     => 'required|in:pdf,excel',
+            'format'     => 'required|string|in:pdf,excel,xls,xlsx',
         ]);
 
-        $ticket = Str::uuid()->toString();
+        // normalize -> 'pdf' | 'xls'
+        $fmt = strtolower($v['format']);
+        if ($fmt === 'excel' || $fmt === 'xlsx') {
+            $fmt = 'xls';
+        }
+
+        $ticket     = Str::uuid()->toString();
+        $companyId  = $req->user()->company_id ?? null;
+        $userId     = $req->user()->id ?? null;
 
         Cache::put("cdb:$ticket", [
             'status'     => 'queued',
             'progress'   => 0,
-            'format'     => $v['format'],
+            'format'     => $fmt, // pdf | xls
             'file'       => null,
             'error'      => null,
             'range'      => [$v['start_date'], $v['end_date']],
-            'user_id'    => $req->user()->id ?? null,
-            'company_id' => $req->user()->company_id ?? null,
+            'user_id'    => $userId,
+            'company_id' => $companyId,
         ], now()->addHours(2));
 
-        BuildCashDisbursementBook::dispatch(
+        // run after the HTTP response (same as CRB/APJ)
+        BuildCashDisbursementBook::dispatchAfterResponse(
             ticket:    $ticket,
             startDate: $v['start_date'],
             endDate:   $v['end_date'],
-            format:    $v['format'],       // pdf|excel
-            companyId: $req->user()->company_id ?? null,
-            userId:    $req->user()->id ?? null
+            format:    $fmt,     // pdf | xls
+            companyId: $companyId,
+            userId:    $userId
         );
 
         return response()->json(['ticket' => $ticket]);
     }
 
-    public function status(string $ticket)
+    public function status(string $ticket): JsonResponse
     {
         $state = Cache::get("cdb:$ticket");
         if (!$state) return response()->json(['error' => 'not_found'], 404);
@@ -89,7 +99,7 @@ class CashDisbursementBookController extends Controller
             return response()->json(['error'=>'missing_file'], 410);
         }
 
-        $absolute = Storage::disk('local')->path($state['file']); // storage/app (root may be /private per your config)
+        $absolute = Storage::disk('local')->path($state['file']);
         return response()->file($absolute, [
             'Content-Type'        => 'application/pdf',
             'Content-Disposition' => 'inline; filename="'.basename($state['file']).'"',

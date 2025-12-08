@@ -83,7 +83,7 @@ public function accounts(Request $request)
         Cache::put($this->cacheKey($ticket), $state, now()->addHours(6));
 
         // Dispatch job
-        BuildGeneralLedger::dispatch(
+        BuildGeneralLedger::dispatchSync(
             ticket: $ticket,
             startAccount: $validated['startAccount'],
             endAccount:   $validated['endAccount'],
@@ -189,4 +189,9 @@ public function view(string $ticket)
     {
         return "gl:{$ticket}";
     }
+
+ 
+
+
+
 }

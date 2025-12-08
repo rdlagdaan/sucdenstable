@@ -1,0 +1,41 @@
+<?php
+
+use Illuminate\Foundation\Application;
+use Illuminate\Foundation\Configuration\Exceptions;
+use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Middleware\HandleCors;
+use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
+
+// ===== [BEGIN REPLACE block in bootstrap/app.php] =====
+return Application::configure(basePath: dirname(__DIR__))
+    ->withRouting(
+        web: __DIR__.'/../routes/web.php',
+        commands: __DIR__.'/../routes/console.php',
+        health: '/up',
+    )
+    ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->alias([auth => \App\Http\Middleware\Authenticate::class,]);
+        // Stateful, session-backed web stack
+        $middleware->web([
+            \Illuminate\Cookie\Middleware\EncryptCookies::class,
+            \Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse::class,
+            \Illuminate\Session\Middleware\StartSession::class,
+            \Illuminate\View\Middleware\ShareErrorsFromSession::class,
+            \App\Http\Middleware\VerifyCsrfToken::class,
+            \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
+            \Illuminate\Http\Middleware\HandleCors::class,
+        ]);
+
+        // Stateless API stack (no session, no CSRF, no stateful Sanctum)
+        $middleware->api([
+            \Illuminate\Http\Middleware\HandleCors::class,
+            \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            // You can optionally add throttling here:
+            // \Illuminate\Routing\Middleware\ThrottleRequests::class.':api',
+        ]);
+    })
+    ->withExceptions(function (Exceptions $exceptions): void {
+        //
+    })->create();
+// ===== [END REPLACE block in bootstrap/app.php] =====
+

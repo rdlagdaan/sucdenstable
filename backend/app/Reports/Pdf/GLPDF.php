@@ -35,6 +35,8 @@ HTML;
         $currentDate = date('M d, Y');
         $currentTime = date('h:i:sa');
 
+        $pageNo = $this->getAliasNumPage().'/'.$this->getAliasNbPages();
+
         $html = <<<HTML
 <table border="0" cellspacing="0" cellpadding="0" width="100%">
   <tr>
@@ -47,7 +49,7 @@ HTML;
     <td><font size="8">Print Time:</font></td>
     <td><font size="8">{$currentTime}</font></td>
     <td></td>
-    <td><font size="8">{$this->getAliasNumPage()}/{$this->getAliasNbPages()}</font></td>
+    <td><font size="8">{$pageNo}</font></td>
   </tr>
 </table>
 HTML;

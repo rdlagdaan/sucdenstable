@@ -66,7 +66,7 @@ const Role = () => {
   useEffect(() => {
     const init = async () => {
       try {
-        const setting = await napi.get('/api/settings/paginaterecs');
+        const setting = await napi.get('/settings/paginaterecs');
         const pageSize = setting.data.value || 5;
         setPerPage(pageSize);
         fetchRoles(1, pageSize, debouncedSearchQuery);
@@ -96,7 +96,7 @@ const Role = () => {
 const fetchRoles = async (page = 1, perPageOverride = perPage, search = '') => {
   setIsLoading(true);
   try {
-    const res = await napi.get(`/api/roles?per_page=${perPageOverride}&page=${page}&search=${search}`);
+    const res = await napi.get(`/roles?per_page=${perPageOverride}&page=${page}&search=${search}`);
     setRoles(res.data.data);
     setTotalPages(res.data.last_page);
     setCurrentPage(res.data.current_page);
@@ -139,7 +139,7 @@ const handleCancelEdit = () => {
 
     try {
       if (editId) {
-        await napi.put(`/api/roles/${editId}`, formData, {
+        await napi.put(`/roles/${editId}`, formData, {
           headers: { 'X-XSRF-TOKEN': Cookies.get('XSRF-TOKEN') || '' },
           withCredentials: true,
         });
@@ -147,7 +147,7 @@ const handleCancelEdit = () => {
         setEditId(null);
         setFormMode('add');
       } else {
-        await napi.post('/api/roles', formData, {
+        await napi.post('/roles', formData, {
           headers: { 'X-XSRF-TOKEN': Cookies.get('XSRF-TOKEN') || '' },
           withCredentials: true,
         });
@@ -174,7 +174,7 @@ const handleCancelEdit = () => {
     await getCsrfToken();
 
     try {
-      await napi.delete(`/api/roles/${id}`, {
+      await napi.delete(`/roles/${id}`, {
         headers: { 'X-XSRF-TOKEN': Cookies.get('XSRF-TOKEN') || '' },
         withCredentials: true,
       });

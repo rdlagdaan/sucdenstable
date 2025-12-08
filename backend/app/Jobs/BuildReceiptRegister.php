@@ -17,11 +17,13 @@ class BuildReceiptRegister implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public int $timeout = 900; // 15 min
+
     public function __construct(
         public string $ticket,
         public int $month,
         public int $year,
-        public string $format,      // pdf|excel
+        public string $format,      // 'pdf' | 'excel' (controller normalizes to 'pdf'|'excel')
         public ?int $companyId,
         public ?int $userId,
         public ?string $query = null
@@ -59,13 +61,16 @@ class BuildReceiptRegister implements ShouldQueue
             'error'    => null,
             'period'   => [$this->month, $this->year],
             'format'   => $this->format,
+            'query'    => $this->query,
+            'user_id'  => $this->userId,
+            'company_id' => $this->companyId,
         ]);
 
         try {
             $start = Carbon::create($this->year, $this->month, 1)->startOfDay()->toDateString();
             $end   = Carbon::create($this->year, $this->month, 1)->endOfMonth()->toDateString();
 
-            // Count rows for progress
+            // Pre-count for deterministic progress
             $count = DB::table('cash_receipts as r')
                 ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
                 ->whereBetween('r.receipt_date', [$start, $end])
@@ -87,7 +92,7 @@ class BuildReceiptRegister implements ShouldQueue
                 $this->patch(['progress' => $pct]);
             };
 
-            // Optional: block if any unbalanced receipt in the period
+            // Optional guard: block if there are unbalanced receipts in the period
             $hasUnbalanced = DB::table('cash_receipts as r')
                 ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
                 ->whereBetween('r.receipt_date', [$start, $end])
@@ -96,17 +101,17 @@ class BuildReceiptRegister implements ShouldQueue
 
             if ($hasUnbalanced) {
                 $this->patch([
-                    'status' => 'error',
-                    'error'  => 'Report blocked: one or more receipts in the selected period are not balanced (sum_debit != sum_credit).',
+                    'status'   => 'error',
+                    'error'    => 'Report blocked: one or more receipts in the selected period are not balanced.',
                     'progress' => 100,
                 ]);
                 return;
             }
 
             $dir = 'reports';
-            if (!Storage::disk('local')->exists($dir)) {
-                Storage::disk('local')->makeDirectory($dir);
-            }
+            $disk = Storage::disk('local');
+            if (!$disk->exists($dir)) $disk->makeDirectory($dir);
+
             $stamp = now()->format('Ymd_His');
             $path  = $this->format === 'pdf'
                 ? "$dir/receipt_register_{$stamp}.pdf"
@@ -131,7 +136,8 @@ class BuildReceiptRegister implements ShouldQueue
         }
     }
 
-    /** Build PDF via TCPDF. */
+    /** ---------- Writers ---------- */
+
     private function buildPdf(string $file, string $start, string $end, callable $progress): void
     {
         $pdf = new \TCPDF('L','mm','LETTER', true, 'UTF-8', false);
@@ -139,11 +145,8 @@ class BuildReceiptRegister implements ShouldQueue
         $pdf->setPrintFooter(false);
         $pdf->SetMargins(10, 10, 10);
         $pdf->SetAutoPageBreak(true, 10);
-
-        // tighten vertical spacing
         $pdf->setCellPadding(0);
         $pdf->setCellHeightRatio(1.0);
-
         $pdf->SetFont('helvetica', '', 8);
 
         $monthDesc = \Illuminate\Support\Carbon::parse($start)->isoFormat('MMMM');
@@ -233,7 +236,6 @@ class BuildReceiptRegister implements ShouldQueue
                     if ($linesOnPage >= 40) {
                         $rowsHtml .= '</tbody></table>';
                         $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-
                         $pdf->writeHTML(
                             '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
                                <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
@@ -254,7 +256,6 @@ class BuildReceiptRegister implements ShouldQueue
         // flush remaining rows + totals
         $rowsHtml .= '</tbody></table>';
         $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-
         $pdf->writeHTML(
             '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
                <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
@@ -279,7 +280,6 @@ class BuildReceiptRegister implements ShouldQueue
         Storage::disk('local')->put($file, $pdf->Output('receipt-register.pdf', 'S'));
     }
 
-    /** Build Excel via PhpSpreadsheet. */
     private function buildExcel(string $file, string $start, string $end, callable $progress): void
     {
         $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
@@ -293,7 +293,6 @@ class BuildReceiptRegister implements ShouldQueue
         $ws->setCellValue("A{$r}", 'RECEIPT REGISTER'); $r++;
         $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
 
-        // Match PDF visual layout (two empty columns to simulate colspan)
         $ws->fromArray(['Date','Receipt Voucher','Bank','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
         $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true); $r++;
 
@@ -346,9 +345,7 @@ class BuildReceiptRegister implements ShouldQueue
                         $row->collection_receipt ?? '',
                         $amt
                     ], null, "A{$r}");
-
                     $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                    // Treat bank/customer as strings to preserve formatting/zeros if any:
                     $ws->getCell("C{$r}")->setValueExplicit((string)($row->bank_display ?? ''), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
 
                     $r++;
@@ -360,7 +357,6 @@ class BuildReceiptRegister implements ShouldQueue
                         $r += 2;
                         $linesOnPage = 0; $pageTotal = 0.0;
 
-                        // repeat header
                         $ws->fromArray(['Date','Receipt Voucher','Bank','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
                         $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
                         $r++;
@@ -370,7 +366,7 @@ class BuildReceiptRegister implements ShouldQueue
                 }
             });
 
-        // Final totals
+        // Totals
         $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
         $ws->setCellValue("I{$r}", $pageTotal);
         $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00'); $r++;

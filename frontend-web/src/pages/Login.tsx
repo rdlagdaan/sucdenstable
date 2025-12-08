@@ -14,7 +14,7 @@ export default function Login() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await api.get<Company[]>('/api/companies');
+        const { data } = await api.get<Company[]>('/companies');
         setCompanies(Array.isArray(data) ? data : []);
       } catch (err) {
         console.error('Failed to fetch companies:', err);
@@ -39,7 +39,7 @@ export default function Login() {
       await ensureCsrf();
 
       // 2) POST with X-XSRF-TOKEN auto-attached
-      const { data } = await api.post('/api/login', {
+      const { data } = await api.post('/login', {
         username: form.username,
         password: form.password,
         company_id: companyId ? Number(companyId) : undefined,
@@ -47,7 +47,7 @@ export default function Login() {
 
       localStorage.setItem('token', data?.token ?? '');
       localStorage.setItem('user', JSON.stringify(data?.user ?? {}));
-
+      localStorage.setItem('company_id', companyId ?? '');
       navigate('/dashboard');
     } catch (error: any) {
       const msg =

@@ -15,8 +15,18 @@ type JobState = {
   message?: string;
   format?: "pdf" | "xls";
   orientation?: "landscape" | "portrait";
+
+  file_rel?: string | null;        // optional, but nice to have
+  file_abs?: string | null;        // optional
+  file_disk?: string | null;       // optional
+  file_url?: string | null;        // optional
+
   file_path?: string | null;
   file_name?: string | null;
+
+
+
+  download_name?: string | null;
 };
 
 type StartPayload = {
@@ -46,6 +56,15 @@ function openBlob(blob: Blob) {
   const url = URL.createObjectURL(blob);
   window.open(url, "_blank", "noopener,noreferrer");
 }
+
+function getDownloadName(job: JobState | null): string {
+  if (!job) return "general-ledger.pdf";
+  const fallback = job.format === "xls" ? "general-ledger.xls" : "general-ledger.pdf";
+  // Prefer the server-provided friendly name, then legacy file_name, then fallback
+  return job.download_name || job.file_name || fallback;
+}
+
+
 
 export default function GeneralLedger() {
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
@@ -205,7 +224,7 @@ export default function GeneralLedger() {
         const res = await napi.get(`general-ledger/report/${ticket}/download`, {
           responseType: "blob",
         });
-        saveBlob(res.data, job.file_name || "general-ledger.xls");
+        saveBlob(res.data, getDownloadName(job));
       }
     } catch (err: any) {
       setActionError(err?.message ?? "Unable to open file.");
@@ -218,10 +237,12 @@ export default function GeneralLedger() {
       const res = await napi.get(`general-ledger/report/${ticket}/download`, {
         responseType: "blob",
       });
-      const name =
+      /*const name =
         job.file_name ||
         (job.format === "xls" ? "general-ledger.xls" : "general-ledger.pdf");
-      saveBlob(res.data, name);
+      saveBlob(res.data, name);*/
+      saveBlob(res.data, getDownloadName(job));
+
     } catch (err: any) {
       setActionError(err?.message ?? "Unable to download file.");
     }

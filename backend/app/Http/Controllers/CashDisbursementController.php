@@ -14,6 +14,14 @@ use Illuminate\Support\Facades\Schema;
  * - Shows DV/CD number, date, check/ref no, payee, amount in words, explanation,
  *   and GL lines (BANK row first).
  */
+
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
+use PhpOffice\PhpSpreadsheet\Writer\Xls  as XlsWriter;
+use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Border;
+
+
 class MyDisbursementVoucherPDF extends \TCPDF {
     public $receiptDate;
     public $receiptTime;
@@ -21,21 +29,21 @@ class MyDisbursementVoucherPDF extends \TCPDF {
     public function setDataReceiptDate($date) { $this->receiptDate = $date; }
     public function setDataReceiptTime($time) { $this->receiptTime = $time; }
 
-    public function Header() {
-        $candidates = [
-            public_path('images/sucdenLogo.jpg'),
-            public_path('sucdenLogo.jpg'),
-        ];
-        foreach ($candidates as $image) {
-            if ($image && is_file($image)) {
-                $this->Image(
-                    $image, 15, 10, 50, '', 'JPG', '', 'T',
-                    false, 300, '', false, false, 0, false, false, false
-                );
-                break;
-            }
+public function Header() {
+    $candidates = [
+        public_path('images/sucdenLogo.jpg'),
+        public_path('images/sucdenLogo.png'),
+        public_path('sucdenLogo.jpg'),
+        public_path('sucdenLogo.png'),
+    ];
+    foreach ($candidates as $image) {
+        if ($image && is_file($image)) {
+            $this->Image($image, 15, 10, 50, '', '', '', 'T', false, 300, '', false, false, 0, false, false, false);
+            break;
         }
     }
+}
+
 
     public function Footer() {
         $this->SetY(-50);
@@ -490,7 +498,7 @@ public function list(Request $req)
                 'd.id','d.cd_no','d.vend_id','d.disburse_amount','d.pay_method',
                 'd.bank_id','d.explanation','d.is_cancel','d.check_ref_no',
                 DB::raw("to_char(d.disburse_date, 'MM/DD/YYYY') as disburse_date"),
-                DB::raw($vendKey ? "COALESCE(v.vend_name,'')" : "'' as vend_name"),
+                DB::raw($vendKey ? "COALESCE(v.vend_name,'') as vend_name" : "'' as vend_name"),
                 'd.amount_in_words','d.workstation_id','d.user_id','d.created_at'
             )
             ->where('d.id', $id)
@@ -636,7 +644,129 @@ EOD;
             ->header('Content-Disposition','inline; filename="disbursementVoucher.pdf"');
     }
 
-    public function formExcel($id) { return response('Excel stub – implement renderer', 200); }
+
+
+public function formExcel(Request $req, $id)
+{
+    $vendKey = Schema::hasColumn('vendor_list', 'vend_id')
+        ? 'vend_id'
+        : (Schema::hasColumn('vendor_list', 'vend_code') ? 'vend_code' : null);
+
+    $headerQ = DB::table('cash_disbursement as d');
+    if ($vendKey) {
+        $headerQ->leftJoin('vendor_list as v', function ($j) use ($vendKey) {
+            $j->on('d.vend_id', '=', 'v.'.$vendKey);
+        });
+    }
+
+    $header = $headerQ
+        ->select(
+            'd.id','d.cd_no','d.vend_id','d.disburse_amount','d.pay_method',
+            'd.bank_id','d.explanation','d.is_cancel','d.check_ref_no',
+            DB::raw("to_char(d.disburse_date, 'MM/DD/YYYY') as disburse_date"),
+            DB::raw($vendKey ? "COALESCE(v.vend_name,'') as vend_name" : "'' as vend_name"),
+            'd.amount_in_words','d.created_at'
+        )
+        ->where('d.id', $id)
+        ->first();
+
+    if (!$header || $header->is_cancel === 'y') {
+        abort(404, 'Cash Disbursement not found or cancelled');
+    }
+
+    $details = DB::table('cash_disbursement_details as x')
+        ->join('account_code as a','x.acct_code','=','a.acct_code')
+        ->where('x.transaction_id',$id)
+        ->orderBy('x.workstation_id','desc')
+        ->orderBy('x.credit','desc')
+        ->select('x.acct_code','a.acct_desc','x.debit','x.credit')
+        ->get();
+
+    $totalDebit  = (float)$details->sum('debit');
+    $totalCredit = (float)$details->sum('credit');
+    $dvAmount = (float)($header->disburse_amount ?? 0);
+    $amountInWords = $this->pesoWords($dvAmount);
+
+    $ss = new Spreadsheet();
+    $sheet = $ss->getActiveSheet();
+    $sheet->setTitle('Disbursement Voucher');
+    $row = 1;
+    $sheet->setCellValue("A{$row}", 'DISBURSEMENT VOUCHER'); $row++;
+    $sheet->setCellValue("A{$row}", 'DV Number:');      $sheet->setCellValue("B{$row}", $header->cd_no); $row++;
+    $sheet->setCellValue("A{$row}", 'Date:');           $sheet->setCellValue("B{$row}", $header->disburse_date); $row++;
+    $sheet->setCellValue("A{$row}", 'Check/Ref #:');    $sheet->setCellValue("B{$row}", $header->check_ref_no); $row++;
+    $sheet->setCellValue("A{$row}", 'Payee:');          $sheet->setCellValue("B{$row}", (string)($header->vend_name ?: $header->vend_id)); $row++;
+    $sheet->setCellValue("A{$row}", 'Amount (in words):'); $sheet->setCellValue("B{$row}", $amountInWords); $row += 2;
+
+    $sheet->setCellValue("A{$row}", 'EXPLANATION');
+    $sheet->setCellValue("B{$row}", 'AMOUNT');
+    $sheet->getStyle("A{$row}:B{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+    $sheet->getStyle("A{$row}:B{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+    $row++;
+
+    $sheet->setCellValue("A{$row}", (string)($header->explanation ?? ''));
+    $sheet->setCellValue("B{$row}", $dvAmount);
+    $sheet->getStyle("A{$row}:B{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+    $sheet->getStyle("B{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+    $row += 2;
+
+    $sheet->setCellValue("A{$row}", 'ACCOUNT');
+    $sheet->setCellValue("B{$row}", 'GL ACCOUNT');
+    $sheet->setCellValue("C{$row}", 'DEBIT');
+    $sheet->setCellValue("D{$row}", 'CREDIT');
+    $sheet->getStyle("A{$row}:D{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+    $sheet->getStyle("A{$row}:D{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+    $row++;
+
+    foreach ($details as $d) {
+        $sheet->setCellValue("A{$row}", $d->acct_code);
+        $sheet->setCellValue("B{$row}", $d->acct_desc);
+        if ($d->debit)  $sheet->setCellValue("C{$row}", (float)$d->debit);
+        if ($d->credit) $sheet->setCellValue("D{$row}", (float)$d->credit);
+        $sheet->getStyle("A{$row}:D{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+        $sheet->getStyle("C{$row}:D{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+        $row++;
+    }
+
+    $sheet->setCellValue("B{$row}", 'TOTAL');
+    $sheet->setCellValue("C{$row}", $totalDebit);
+    $sheet->setCellValue("D{$row}", $totalCredit);
+    $sheet->getStyle("A{$row}:D{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+    $sheet->getStyle("C{$row}:D{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+
+    $sheet->getColumnDimension('A')->setWidth(18);
+    $sheet->getColumnDimension('B')->setWidth(40);
+    $sheet->getColumnDimension('C')->setWidth(14);
+    $sheet->getColumnDimension('D')->setWidth(14);
+    $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
+    foreach (['A2','A3','A4','A5','A6'] as $addr) {
+        $sheet->getStyle($addr)->getFont()->setBold(true);
+    }
+
+    $format = strtolower((string)$req->query('format','xlsx'));
+    $fileBase = 'disbursement-voucher-'.($header->cd_no ?: $id);
+    if ($format === 'xls') {
+        $writer = new XlsWriter($ss);
+        $filename = $fileBase.'.xls';
+        $contentType = 'application/vnd.ms-excel';
+    } else {
+        $writer = new XlsxWriter($ss);
+        $filename = $fileBase.'.xlsx';
+        $contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    }
+
+    if (ob_get_length()) { ob_end_clean(); }
+
+    return response()->stream(function () use ($writer) {
+        $writer->save('php://output');
+    }, 200, [
+        'Content-Type'        => $contentType,
+        'Content-Disposition' => 'inline; filename="'.$filename.'"',
+        'Cache-Control'       => 'max-age=0, no-cache, no-store, must-revalidate',
+        'Pragma'              => 'no-cache',
+        'Expires'             => '0',
+    ]);
+}
 
     // === Unbalanced helpers ===
     public function unbalancedExists(Request $req)

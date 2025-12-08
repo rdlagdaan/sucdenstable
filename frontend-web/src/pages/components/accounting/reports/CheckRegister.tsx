@@ -12,6 +12,8 @@ type Status = {
 type MonthRow = { month_num: string | number; month_desc: string };
 type YearRow  = { year: number } | number;
 
+const POLL_MS = 1200;
+
 export default function CheckRegister() {
   const [months, setMonths] = useState<{ value: number; label: string }[]>([]);
   const [years, setYears]   = useState<{ value: number; label: string }[]>([]);
@@ -24,7 +26,7 @@ export default function CheckRegister() {
   const [status, setStatus] = useState<Status | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [busy, setBusy] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -88,35 +90,69 @@ export default function CheckRegister() {
         const { data } = await napi.get(`/check-register/report/${ticket}/status`);
         setStatus(data);
         if (data.status === 'done' || data.status === 'error') {
-          if (pollRef.current) clearInterval(pollRef.current);
+          if (pollRef.current) window.clearInterval(pollRef.current);
           pollRef.current = null;
         }
-      } catch { /* ignore one-off errors */ }
+      } catch {/* ignore transient */ }
     };
     poll();
-    pollRef.current = setInterval(poll, 1200);
+    pollRef.current = window.setInterval(poll, POLL_MS) as unknown as number;
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      if (pollRef.current) window.clearInterval(pollRef.current);
       pollRef.current = null;
     };
   }, [ticket]);
 
-  const download = async () => {
-    if (!ticket || !status || status.status !== 'done') return;
-    const res = await fetch(`/check-register/report/${ticket}/download`, { credentials: 'include' });
-    if (!res.ok) { alert('Download not ready'); return; }
-    const blob = await res.blob();
-    const href = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = href;
-    a.download = status.format === 'pdf' ? 'check_register.pdf' : 'check_register.xls';
-    a.click();
-    URL.revokeObjectURL(href);
+  const friendly = () => {
+    const m = months.find(x => x.value === month)?.label ?? month;
+    const y = year ?? '';
+    const ext = status?.format === 'pdf' ? 'pdf' : 'xls';
+    return `CheckRegister_${m}_${y}.${ext}`;
   };
 
-  const viewPdf = () => {
-    if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
-    window.open(`/check-register/report/${ticket}/view`, '_blank', 'noopener');
+  // ✅ Use axios (napi) with responseType:'blob' like your working APJ
+  const download = async () => {
+    if (!ticket || !status || status.status !== 'done') return;
+    try {
+      const res = await napi.get(`/check-register/report/${ticket}/download`, {
+        responseType: 'blob',
+      });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = friendly();
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert('Download failed.');
+    }
+  };
+
+  // ✅ Pre-open a blank tab to avoid popup blockers, then stream blob
+const viewPdf = async () => {
+  if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
+
+  // Hit the same controller endpoint but through `napi` so baseURL=/api and cookies are included.
+  const res = await napi.get(`/check-register/report/${ticket}/view`, { responseType: 'blob' });
+
+  // Force type to be safe, then open the blob in a new tab.
+  const ctype = (res.headers?.['content-type'] as string) || 'application/pdf';
+  const blob  = new Blob([res.data], { type: ctype });
+  const url   = URL.createObjectURL(blob);
+
+  window.open(url, '_blank', 'noopener,noreferrer');
+};
+
+
+
+
+  const onCloseModal = () => {
+    if (pollRef.current) window.clearInterval(pollRef.current);
+    pollRef.current = null;
+    setShowModal(false);
   };
 
   const reset = () => { setTicket(null); setStatus(null); setShowModal(false); };
@@ -186,7 +222,7 @@ export default function CheckRegister() {
               <div className="font-semibold">
                 {status?.format === 'pdf' ? 'Generating PDF…' : 'Generating Excel…'}
               </div>
-              <button className="text-gray-500" onClick={() => setShowModal(false)}>✕</button>
+              <button className="text-gray-500" onClick={onCloseModal}>✕</button>
             </div>
 
             <div className="mb-2 text-sm">
@@ -202,7 +238,7 @@ export default function CheckRegister() {
                 {ticket && <div className="text-xs text-gray-500 mt-1">Ticket: {ticket}</div>}
               </div>
               <div className="flex gap-2">
-                <button className="px-3 py-2 border rounded" onClick={() => setShowModal(false)}>Close</button>
+                <button className="px-3 py-2 border rounded" onClick={onCloseModal}>Close</button>
                 <button
                   className={`px-3 py-2 rounded ${status?.status === 'done' ? 'bg-blue-600 text-white' : 'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
                   disabled={status?.status !== 'done'}
@@ -233,12 +269,13 @@ export default function CheckRegister() {
 }
 
 function Progress({ value }: { value: number }) {
+  const pct = Math.min(100, Math.max(3, Math.floor(value || 0)));
   return (
     <div>
       <div className="w-full h-3 bg-gray-200 rounded">
-        <div className="h-3 rounded bg-emerald-600 transition-all" style={{ width: `${Math.max(3, value)}%` }} />
+        <div className="h-3 rounded bg-emerald-600 transition-all" style={{ width: `${pct}%` }} />
       </div>
-      <div className="mt-1 text-right text-xs text-gray-600">{value}%</div>
+      <div className="mt-1 text-right text-xs text-gray-600">{pct}%</div>
     </div>
   );
 }

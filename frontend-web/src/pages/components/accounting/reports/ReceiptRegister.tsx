@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import napi from '../../../../utils/axiosnapi';
 
-// ---- Types ----
-export type Status = {
+type Status = {
   status: 'queued' | 'running' | 'done' | 'error';
   progress: number;
   format: 'pdf' | 'excel';
@@ -17,10 +16,9 @@ type YearRow  = { year?: number; year_val?: number } | number;
 export default function ReceiptRegister() {
   const [months, setMonths] = useState<{ value: number; label: string }[]>([]);
   const [years, setYears]   = useState<{ value: number; label: string }[]>([]);
-
   const [month, setMonth]   = useState<number | ''>('');
   const [year, setYear]     = useState<number | ''>('');
-  const [query, _setQuery]   = useState<string>('');
+  const [query, setQuery]   = useState<string>('');
 
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState<string | null>(null);
@@ -38,20 +36,25 @@ export default function ReceiptRegister() {
       try {
         setLoading(true);
         const [m, y] = await Promise.all([
-          // NOTE: no leading slash -> respects napi baseURL (likely '/api')
+          // no leading slash so baseURL=/api is used
           napi.get('receipt-register/months'),
           napi.get('receipt-register/years'),
         ]);
 
-        if (!Array.isArray(m.data)) throw new Error('Months endpoint did not return an array.');
-        if (!Array.isArray(y.data)) throw new Error('Years endpoint did not return an array.');
+        // be defensive in case a wrapper {data:[]} is returned
+        const monthsRaw = Array.isArray(m.data) ? m.data : (Array.isArray(m.data?.data) ? m.data.data : []);
+        const yearsRaw  = Array.isArray(y.data) ? y.data : (Array.isArray(y.data?.data) ? y.data.data : []);
 
-        const mOpts = m.data.map((r: MonthRow) => ({
+        if (!Array.isArray(monthsRaw) || !Array.isArray(yearsRaw)) {
+          throw new Error('Months/Years endpoint did not return an array.');
+        }
+
+        const mOpts = monthsRaw.map((r: MonthRow) => ({
           value: Number((r.month_num ?? r.monthNum) as any),
           label: String(r.month_desc ?? r.monthDesc ?? ''),
         })).filter(o => Number.isFinite(o.value) && o.label);
 
-        const yOpts = y.data.map((r: YearRow) => {
+        const yOpts = yearsRaw.map((r: YearRow) => {
           const val = typeof r === 'number' ? r : (r.year ?? r.year_val);
           return { value: Number(val), label: String(val) };
         }).filter(o => Number.isFinite(o.value));
@@ -106,9 +109,7 @@ export default function ReceiptRegister() {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
         }
-      } catch {
-        // ignore transient errors
-      }
+      } catch {/* transient */}
     };
     poll();
     pollRef.current = setInterval(poll, 1200);
@@ -118,11 +119,13 @@ export default function ReceiptRegister() {
     };
   }, [ticket]);
 
-  // ---- download / view (use napi for consistent baseURL + creds) ----
+  // ---- download / view (blob pattern used in other working modules) ----
   const download = async () => {
     if (!ticket || !status || status.status !== 'done') return;
     const res = await napi.get(`receipt-register/report/${ticket}/download`, { responseType: 'blob' });
-    const blob = res.data as Blob;
+    const type = (res.headers?.['content-type'] as string) ||
+                 (status.format === 'pdf' ? 'application/pdf' : 'application/vnd.ms-excel');
+    const blob = new Blob([res.data], { type });
     const href = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = href;
@@ -131,12 +134,13 @@ export default function ReceiptRegister() {
     URL.revokeObjectURL(href);
   };
 
-  const viewPdf = () => {
+  const viewPdf = async () => {
     if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
-    // open direct URL built from napi baseURL
-    const base = (napi.defaults?.baseURL ?? '').replace(/\/+$/,'');
-    const url  = `${base}/receipt-register/report/${ticket}/view`;
-    window.open(url, '_blank', 'noopener');
+    const res  = await napi.get(`receipt-register/report/${ticket}/view`, { responseType: 'blob' });
+    const type = (res.headers?.['content-type'] as string) || 'application/pdf';
+    const blob = new Blob([res.data], { type });
+    const url  = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   const reset = () => { setTicket(null); setStatus(null); setShowModal(false); };
@@ -151,48 +155,39 @@ export default function ReceiptRegister() {
         <div className="text-sm text-red-600">{loadErr}</div>
       ) : (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div>
               <label className="block text-sm mb-1">Month</label>
-              <select
-                className="w-full border p-2 rounded"
-                value={month}
-                onChange={(e) => setMonth(Number(e.target.value))}
-              >
+              <select className="w-full border p-2 rounded" value={month} onChange={(e)=>setMonth(Number(e.target.value))}>
                 <option value="">— Select —</option>
                 {months.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-sm mb-1">Year</label>
-              <select
-                className="w-full border p-2 rounded"
-                value={year}
-                onChange={(e) => setYear(Number(e.target.value))}
-              >
+              <select className="w-full border p-2 rounded" value={year} onChange={(e)=>setYear(Number(e.target.value))}>
                 <option value="">— Select —</option>
                 {years.map(y => <option key={y.value} value={y.value}>{y.label}</option>)}
               </select>
             </div>
+            <div>
+              <label className="block text-sm mb-1">Filter (optional)</label>
+              <input className="w-full border p-2 rounded" value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="CR No / Details / Customer / Bank"/>
+            </div>
           </div>
-
-
 
           <div className="flex items-end gap-2">
             <button
               className={`px-4 py-2 rounded text-white ${busy ? 'bg-emerald-400' : 'bg-emerald-600 hover:bg-emerald-700'}`}
               onClick={() => begin('pdf')}
               disabled={busy || !month || !year}
-            >
-              Generate
-            </button>
+            >Generate</button>
+
             <button
               className={`px-4 py-2 rounded border ${busy ? 'opacity-50 cursor-not-allowed' : ''}`}
               onClick={() => begin('excel')}
               disabled={busy || !month || !year}
-            >
-              EXCEL
-            </button>
+            >EXCEL</button>
           </div>
 
           <div className="text-sm text-blue-700">
@@ -203,19 +198,17 @@ export default function ReceiptRegister() {
 
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-5">
+          <div className="bg-white rounded-xl shadow-xl w/full max-w-lg p-5">
             <div className="flex items-center justify-between mb-3">
               <div className="font-semibold">
                 {status?.format === 'pdf' ? 'Generating PDF…' : 'Generating Excel…'}
               </div>
-              <button className="text-gray-500" onClick={() => setShowModal(false)}>✕</button>
+              <button className="text-gray-500" onClick={()=>setShowModal(false)}>✕</button>
             </div>
 
             <div className="mb-2 text-sm">
               Period: <b>{months.find(m=>m.value===month)?.label ?? month}</b> {year}
-              {query?.trim() ? (
-                <span className="ml-2 text-gray-600">• Filter: <b>{query.trim()}</b></span>
-              ) : null}
+              {query?.trim() ? <span className="ml-2 text-gray-600">• Filter: <b>{query.trim()}</b></span> : null}
             </div>
 
             <Progress value={status?.progress ?? 0} />
@@ -228,21 +221,17 @@ export default function ReceiptRegister() {
                 {ticket && <div className="text-xs text-gray-500 mt-1">Ticket: {ticket}</div>}
               </div>
               <div className="flex gap-2">
-                <button className="px-3 py-2 border rounded" onClick={() => setShowModal(false)}>Close</button>
+                <button className="px-3 py-2 border rounded" onClick={()=>setShowModal(false)}>Close</button>
                 <button
                   className={`px-3 py-2 rounded ${status?.status === 'done' ? 'bg-blue-600 text-white' : 'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
                   disabled={status?.status !== 'done'}
                   onClick={download}
-                >
-                  Download
-                </button>
+                >Download</button>
                 <button
                   className={`px-3 py-2 rounded ${status?.status === 'done' && status?.format === 'pdf' ? 'bg-indigo-600 text-white' : 'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
                   disabled={status?.status !== 'done' || status?.format !== 'pdf'}
                   onClick={viewPdf}
-                >
-                  View
-                </button>
+                >View</button>
               </div>
             </div>
 

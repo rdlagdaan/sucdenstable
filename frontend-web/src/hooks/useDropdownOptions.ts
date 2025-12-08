@@ -20,12 +20,14 @@ export function useDropdownOptions(endpoint: string) {
 
         
         // Special mapping for vend-list
-        if (endpoint === '/api/vendors') {
-          mapped = response.data.map((item: any) => ({
-            code: item.vend_code,
-            description: item.vend_name, // 👈 vendor name here
-          }));
-        }
+      // Vendors — handle both /vendors and /api/vendors
+      if (endpoint === '/vendors' || endpoint === '/api/vendors') {
+        mapped = response.data.map((item: any) => ({
+          code: item.vend_code ?? item.code ?? '',
+          description: item.vend_name ?? item.vendor_name ?? '',
+        }));
+      }
+
         // Special mapping for crop-years
         else if (endpoint === '/api/crop-years') {
           mapped = response.data.map((item: any) => ({
