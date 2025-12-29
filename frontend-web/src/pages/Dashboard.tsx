@@ -15,6 +15,9 @@ import type { JSX } from 'react';
 const Profile = lazy(() => import('./components/settings/Profile'));
 const Role = lazy(() => import('./components/settings/Role'));
 const Pbn_entry_form = lazy(() => import('./components/quedan_tracking/Pbn_entry_form'));
+const Pbn_posting = lazy(() => import('./components/quedan_tracking/Pbn_posting'));
+
+
 const Receiving_entry_form = lazy(() => import('./components/quedan_tracking/Receiving_entry_form'));
 const Sales_journal_form = lazy(() => import('./components/accounting/Sales_journal_form'));
 const Cash_receipts_form = lazy(() => import('./components/accounting/Cash_receipts_form'));
@@ -49,10 +52,16 @@ const AccountsWindow = lazy(() => import('./components/references/AccountsWindow
 const MillsWindow = lazy(() => import('./components/references/MillsWindow'));
 
 
+const ApprovalCenter   = lazy(() => import('./components/accounting/approvals/ApprovalCenter'));
+const ApprovalsInbox   = lazy(() => import('./components/accounting/approvals/ApprovalsInbox'));
+const ApprovalsOutbox  = lazy(() => import('./components/accounting/approvals/ApprovalsOutbox'));
+
 const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>> = {
   profile: Profile,
   roles: Role,
   pbn_entry_forms: Pbn_entry_form,
+  pbn_posting: Pbn_posting,
+
   receiving_entry_forms: Receiving_entry_form,
   sales_journal_forms: Sales_journal_form,
   cash_receipts_forms: Cash_receipts_form,
@@ -74,6 +83,10 @@ const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>>
   general_ledger: GeneralLedger,
   receipt_register: ReceiptRegister,
   trial_balance: TrialBalance,
+
+  approvals_center: ApprovalCenter,
+  approvals_inbox: ApprovalsInbox,
+  approvals_outbox: ApprovalsOutbox,
 
 };
 

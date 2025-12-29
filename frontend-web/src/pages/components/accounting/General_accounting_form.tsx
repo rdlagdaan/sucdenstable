@@ -52,6 +52,18 @@ type GaTxOption = {
   is_cancel?: 'y' | 'n';
 };
 
+
+type ApprovalStatus = {
+  id: number | null;
+  status: string | null;
+  approvedActive: boolean;
+  expiresAt: string | null;          // ISO
+  editWindowMinutes: number | null;
+  reason: string | null;
+};
+
+
+
 export default function General_accounting_form() {
   const hotRef = useRef<HotTableClass>(null);
 
@@ -60,7 +72,7 @@ export default function General_accounting_form() {
   const [gaNo, setGaNo] = useState('');
   const [genAcctDate, setGenAcctDate] = useState('');
   const [explanation, setExplanation] = useState('');
-  const [locked, setLocked] = useState(false);      // header lock
+  const [_locked, setLocked] = useState(false);      // header lock
   const [gridLocked, setGridLocked] = useState(true);
   const [isCancelled, setIsCancelled] = useState(false);
 
@@ -79,6 +91,195 @@ export default function General_accounting_form() {
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [pdfUrl, setPdfUrl] = useState<string | undefined>(undefined);
   const [showPdf, setShowPdf] = useState(false);
+
+
+  const [approval, setApproval] = useState<ApprovalStatus>({
+    id: null,
+    status: null,
+    approvedActive: false,
+    expiresAt: null,
+    editWindowMinutes: null,
+    reason: null,
+  });
+
+// approvals for cancel / uncancel / delete (like Sales Journal)
+// approvals for cancel / uncancel / delete (like Sales Journal)
+const [cancelApproval, setCancelApproval] = useState<ApprovalStatus>({
+  id: null,
+  status: null,
+  approvedActive: false,
+  expiresAt: null,
+  editWindowMinutes: null,
+  reason: null,
+});
+
+const [uncancelApproval, setUncancelApproval] = useState<ApprovalStatus>({
+  id: null,
+  status: null,
+  approvedActive: false,
+  expiresAt: null,
+  editWindowMinutes: null,
+  reason: null,
+});
+
+const [deleteApproval, setDeleteApproval] = useState<ApprovalStatus>({
+  id: null,
+  status: null,
+  approvedActive: false,
+  expiresAt: null,
+  editWindowMinutes: null,   // ← this was missing
+  reason: null,
+});
+
+
+// generic helper: fetch approval for cancel / uncancel / delete
+const refreshApprovalForAction = async (
+  recordId: number | null,
+  action: 'cancel' | 'uncancel' | 'delete',
+  setter: (a: ApprovalStatus) => void,
+) => {
+  if (!recordId || !user?.company_id) {
+    setter({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
+    });
+    return;
+  }
+
+  try {
+    const { data } = await napi.get('/approvals/status', {
+      params: {
+        module: MODULE_CODE,
+        record_id: recordId,
+        company_id: user.company_id,
+        action,
+      },
+    });
+
+    if (!data?.exists) {
+      setter({
+        id: null,
+        status: null,
+        approvedActive: false,
+        expiresAt: null,
+        editWindowMinutes: null,
+        reason: null,
+      });
+      return;
+    }
+
+    setter({
+      id: data.id ?? null,
+      status: data.status ?? null,
+      approvedActive: !!data.approved_active,
+      expiresAt: data.expires_at ?? null,
+      editWindowMinutes: data.edit_window_minutes ?? null,
+      reason: data.reason ?? null,
+    });
+  } catch {
+    setter({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
+    });
+  }
+};
+
+
+
+  const isApprovalPending  = approval.status === 'pending';
+  const isApprovalRejected = approval.status === 'rejected';
+
+const approvalLabel = useMemo(() => {
+  if (!approval.approvedActive || !approval.expiresAt) return '';
+  const expires = new Date(approval.expiresAt);
+  const ms = expires.getTime() - Date.now();
+  const mins = Math.max(0, Math.round(ms / 60000));
+  if (mins <= 0) return 'Edit window expiring now';
+  return `Edit window: ${mins} min left`;
+}, [approval.approvedActive, approval.expiresAt]);
+
+
+
+
+const MODULE_CODE = 'general_accounting'; // must match backend
+
+const refreshApprovalStatus = async (recordId: number | null) => {
+  if (!recordId || !user?.company_id) {
+    setApproval({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
+    });
+    // default: lock loaded JEs until approval
+    setLocked(!!recordId);
+    setGridLocked(!!recordId);
+    return;
+  }
+
+  try {
+    const { data } = await napi.get('/approvals/status', {
+      params: {
+        module: MODULE_CODE,
+        record_id: recordId,
+        company_id: user.company_id,
+        action: 'edit',
+      },
+    });
+
+    if (!data?.exists) {
+      setApproval({
+        id: null,
+        status: null,
+        approvedActive: false,
+        expiresAt: null,
+        editWindowMinutes: null,
+        reason: null,
+      });
+      setLocked(true);
+      setGridLocked(true);
+      return;
+    }
+
+    setApproval({
+      id: data.id ?? null,
+      status: data.status ?? null,
+      approvedActive: !!data.approved_active,
+      expiresAt: data.expires_at ?? null,
+      editWindowMinutes: data.edit_window_minutes ?? null,
+      reason: data.reason ?? null,
+    });
+
+    // When approval is active → unlock header + grid
+    const canEdit = !!data.approved_active;
+    setLocked(!canEdit);
+    setGridLocked(!canEdit);
+  } catch {
+    // On error: stay locked
+    setApproval({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
+    });
+    setLocked(true);
+    setGridLocked(true);
+  }
+};
+
+
 
   // layout helpers
   const detailsWrapRef = useRef<HTMLDivElement>(null);
@@ -161,6 +362,42 @@ export default function General_accounting_form() {
     setIsCancelled(false);
     setHotEnabled(false);
     setTableData([emptyRow()]);
+
+    // 🔹 Reset approval state whenever form resets
+setApproval({
+  id: null,
+  status: null,
+  approvedActive: false,
+  expiresAt: null,
+  editWindowMinutes: null,
+  reason: null,
+});
+setCancelApproval({
+  id: null,
+  status: null,
+  approvedActive: false,
+  expiresAt: null,
+  editWindowMinutes: null,
+  reason: null,
+});
+setUncancelApproval({
+  id: null,
+  status: null,
+  approvedActive: false,
+  expiresAt: null,
+  editWindowMinutes: null,
+  reason: null,
+});
+setDeleteApproval({
+  id: null,
+  status: null,
+  approvedActive: false,
+  expiresAt: null,
+  editWindowMinutes: null,
+  reason: null,
+});
+
+
   };
 
   // Save main (create header)
@@ -233,57 +470,225 @@ export default function General_accounting_form() {
     }
   };
 
-  // Update (unlock header + grid)
-  const handleUpdateMain = () => {
-    setLocked(false);
-    setGridLocked(false);
-    toast.success('Editing enabled.');
-  };
+
 
   // Cancel / Uncancel
-  const handleCancelToggle = async (cancel: boolean) => {
-    if (!mainId) return;
+// Cancel / Uncancel with approvals (same logic as Sales Journal)
+const handleCancelTxn = async () => {
+  if (!mainId || !user?.company_id) return;
+
+  // ---------- CANCEL path ----------
+  if (!isCancelled) {
+    // No active cancel approval yet → request one
+    if (!cancelApproval.approvedActive) {
+      const { value: reason } = await Swal.fire({
+        title: 'Request Cancel Approval',
+        input: 'textarea',
+        inputLabel: 'Reason for cancellation',
+        inputPlaceholder: 'Explain why this journal needs to be cancelled...',
+        inputAttributes: { 'aria-label': 'Reason for cancellation' },
+        showCancelButton: true,
+      });
+
+      if (reason === undefined) return;
+
+      try {
+        await napi.post('/approvals/request-edit', {
+          module: MODULE_CODE,
+          record_id: mainId,
+          company_id: user.company_id,
+          action: 'cancel',
+          reason: reason || '',
+        });
+
+        toast.success('Cancel approval request sent to supervisor.');
+        await refreshApprovalForAction(mainId, 'cancel', setCancelApproval);
+      } catch (e: any) {
+        toast.error(e?.response?.data?.message || 'Failed to send cancel approval request.');
+      }
+
+      return;
+    }
+
+    // We have an active cancel approval → perform the cancel
     const confirmed = await Swal.fire({
-      title: cancel ? 'Cancel this entry?' : 'Uncancel this entry?',
-      icon: cancel ? 'warning' : 'question',
+      title: 'Cancel this journal?',
+      text: 'This will mark the journal as CANCELLED.',
+      icon: 'warning',
       showCancelButton: true,
-      confirmButtonText: cancel ? 'Yes, Cancel' : 'Yes, Uncancel',
+      confirmButtonText: 'Yes, cancel it',
     });
     if (!confirmed.isConfirmed) return;
 
     try {
-      await napi.post('/ga/cancel', { id: mainId, flag: cancel ? '1' : '0' });
-      setIsCancelled(cancel);
-      setGridLocked(true);
+      await napi.post('/ga/cancel', {
+        id: mainId,
+        flag: '1',                // backend maps to is_cancel = 'c'
+        company_id: user.company_id,
+      });
+
+      await napi.post('/approvals/release', {
+        module: MODULE_CODE,
+        record_id: mainId,
+        company_id: user.company_id,
+        action: 'cancel',
+      });
+
+      setIsCancelled(true);
       setLocked(true);
-      toast.success(cancel ? 'Entry cancelled.' : 'Entry reactivated.');
+      setGridLocked(true);
+
+      toast.success('Journal has been cancelled.');
       fetchTransactions();
-    } catch {
-      toast.error('Failed to update cancel status.');
+
+      await Promise.all([
+        refreshApprovalStatus(mainId),
+        refreshApprovalForAction(mainId, 'cancel', setCancelApproval),
+        refreshApprovalForAction(mainId, 'uncancel', setUncancelApproval),
+        refreshApprovalForAction(mainId, 'delete', setDeleteApproval),
+      ]);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Failed to cancel journal.');
     }
-  };
+
+    return;
+  }
+
+  // ---------- UNCANCEL path ----------
+  if (!uncancelApproval.approvedActive) {
+    const { value: reason } = await Swal.fire({
+      title: 'Request Uncancel Approval',
+      input: 'textarea',
+      inputLabel: 'Reason for uncancelling',
+      inputPlaceholder: 'Explain why this journal needs to be uncancelled...',
+      inputAttributes: { 'aria-label': 'Reason for uncancelling' },
+      showCancelButton: true,
+    });
+
+    if (reason === undefined) return;
+
+    try {
+      await napi.post('/approvals/request-edit', {
+        module: MODULE_CODE,
+        record_id: mainId,
+        company_id: user.company_id,
+        action: 'uncancel',
+        reason: reason || '',
+      });
+
+      toast.success('Uncancel approval request sent to supervisor.');
+      await refreshApprovalForAction(mainId, 'uncancel', setUncancelApproval);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Failed to send uncancel approval request.');
+    }
+
+    return;
+  }
+
+  const confirmed = await Swal.fire({
+    title: 'Uncancel this journal?',
+    text: 'This will re-open the journal (subject to edit approvals).',
+    icon: 'warning',
+    showCancelButton: true,
+    confirmButtonText: 'Yes, uncancel it',
+  });
+  if (!confirmed.isConfirmed) return;
+
+  try {
+    await napi.post('/ga/cancel', {
+      id: mainId,
+      flag: '0',                 // backend maps to is_cancel = 'n'
+      company_id: user.company_id,
+    });
+
+    await napi.post('/approvals/release', {
+      module: MODULE_CODE,
+      record_id: mainId,
+      company_id: user.company_id,
+      action: 'uncancel',
+    });
+
+    setIsCancelled(false);
+
+    toast.success('Journal has been uncancelled.');
+    fetchTransactions();
+
+    await Promise.all([
+      refreshApprovalStatus(mainId),
+      refreshApprovalForAction(mainId, 'cancel', setCancelApproval),
+      refreshApprovalForAction(mainId, 'uncancel', setUncancelApproval),
+      refreshApprovalForAction(mainId, 'delete', setDeleteApproval),
+    ]);
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to uncancel journal.');
+  }
+};
+
 
   // Delete transaction
-  const handleDeleteTxn = async () => {
-    if (!mainId) return;
-    const confirmed = await Swal.fire({
-      title: 'Delete this journal?',
-      text: 'This action cannot be undone.',
-      icon: 'error',
+// Delete with approval (like Sales Journal)
+const handleDeleteTxn = async () => {
+  if (!mainId || !user?.company_id) return;
+
+  // No active delete approval yet → request one
+  if (!deleteApproval.approvedActive) {
+    const { value: reason } = await Swal.fire({
+      title: 'Request Delete Approval',
+      input: 'textarea',
+      inputLabel: 'Reason for delete',
+      inputPlaceholder: 'Explain why this journal should be deleted...',
+      inputAttributes: { 'aria-label': 'Reason for delete' },
       showCancelButton: true,
-      confirmButtonText: 'Delete',
     });
-    if (!confirmed.isConfirmed) return;
+
+    if (reason === undefined) return;
 
     try {
-      await napi.delete(`/ga/${mainId}`);
-      resetForm();
-      toast.success('Journal deleted.');
-      fetchTransactions();
-    } catch {
-      toast.error('Failed to delete journal.');
+      await napi.post('/approvals/request-edit', {
+        module: MODULE_CODE,
+        record_id: mainId,
+        company_id: user.company_id,
+        action: 'delete',
+        reason: reason || '',
+      });
+
+      toast.success('Delete approval request sent to supervisor.');
+      await refreshApprovalForAction(mainId, 'delete', setDeleteApproval);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Failed to send delete approval request.');
     }
-  };
+
+    return;
+  }
+
+  // We have an active delete approval → actually delete (soft-delete on backend)
+  const confirmed = await Swal.fire({
+    title: 'Delete this journal?',
+    text: 'This action is irreversible.',
+    icon: 'error',
+    showCancelButton: true,
+    confirmButtonText: 'Delete',
+  });
+  if (!confirmed.isConfirmed) return;
+
+  try {
+    await napi.delete(`/ga/${mainId}`);
+
+    await napi.post('/approvals/release', {
+      module: MODULE_CODE,
+      record_id: mainId,
+      company_id: user.company_id,
+      action: 'delete',
+    });
+
+    resetForm();
+    toast.success('Journal deleted.');
+    fetchTransactions();
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to delete journal.');
+  }
+};
+
 
   // row validator: exactly one of debit/credit > 0 and acct_code present
   const isRowValid = (r: GaDetailRow) =>
@@ -336,7 +741,8 @@ export default function General_accounting_form() {
       setGaNo(m.ga_no);
       setGenAcctDate(formatDateToYYYYMMDD(m.gen_acct_date));
       setExplanation(m.explanation ?? '');
-      setIsCancelled(m.is_cancel === 'y');
+      setIsCancelled(m.is_cancel === 'y' || m.is_cancel === 'c');
+
 
       const details = (data.details || []).map((d: any) => ({
         id: d.id,
@@ -350,11 +756,104 @@ export default function General_accounting_form() {
       setHotEnabled(true);
       setLocked(true);
       setGridLocked(true);
+
+      // 🔹 approval-aware locking (instead of always locking)
+      await refreshApprovalStatus(m.id);
+
+      await Promise.all([
+        refreshApprovalForAction(m.id, 'cancel', setCancelApproval),
+        refreshApprovalForAction(m.id, 'uncancel', setUncancelApproval),
+        refreshApprovalForAction(m.id, 'delete', setDeleteApproval),
+      ]);
+
+
       toast.success('Journal loaded.');
     } catch {
       toast.error('Unable to load the selected journal.');
     }
   };
+
+
+const handleRequestEdit = async () => {
+  if (!mainId || !user?.company_id) return;
+
+  const { value: reason } = await Swal.fire({
+    title: 'Request Edit Approval',
+    input: 'textarea',
+    inputLabel: 'Reason for edit',
+    inputPlaceholder: 'Explain why you need to edit this entry...',
+    inputAttributes: { 'aria-label': 'Reason for edit' },
+    showCancelButton: true,
+  });
+
+  if (reason === undefined) return; // cancelled
+
+  try {
+    await napi.post('/approvals/request-edit', {
+      module: MODULE_CODE,
+      record_id: mainId,
+      company_id: user.company_id,
+      action: 'edit',
+      reason: reason || '',
+    });
+
+    toast.success('Edit approval request sent to supervisor.');
+    // Optional: refresh status so Outbox sees it; JE stays locked until approved
+    await refreshApprovalStatus(mainId);
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to send approval request.');
+  }
+};
+
+
+const handleSaveHeader = async () => {
+  if (!mainId) return;
+  try {
+    await napi.post('/ga/update-main', {
+      id: mainId,
+      gen_acct_date: genAcctDate,
+      explanation,
+    });
+
+    // consume the approval (so it can't be reused forever)
+    if (approval.id && user?.company_id) {
+      await napi.post('/approvals/release', {
+        module: MODULE_CODE,
+        record_id: mainId,
+        company_id: user.company_id,
+        action: 'edit',
+      });
+    }
+
+    toast.success('Journal header saved and edit session closed.');
+
+    // Re-check status → this will relock header + grid
+    await refreshApprovalStatus(mainId);
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to save header.');
+  }
+};
+
+const handleSaveMainNoApproval = async () => {
+  if (!mainId || isCancelled) return;
+
+  try {
+    await napi.post('/ga/update-main-no-approval', {
+      id: mainId,
+      gen_acct_date: genAcctDate,
+      explanation,
+    });
+
+    toast.success('Journal header updated.');
+
+    // DO NOT touch approval state
+    // DO NOT unlock grid
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to save header.');
+  }
+};
+
+
 
   // account source for autocomplete (code;desc)
   const acctSource = useMemo(() => accounts.map(a => `${a.acct_code};${a.acct_desc}`), [accounts]);
@@ -405,6 +904,17 @@ export default function General_accounting_form() {
     setIsCancelled(false);
     setTableData([emptyRow(), emptyRow(), emptyRow()]);
     setHotEnabled(false);
+
+    // 🔹 Clear approval state for the new JE
+    setApproval({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
+    });
+
     toast.success('Form is ready for a new entry.');
   };
 
@@ -425,15 +935,21 @@ export default function General_accounting_form() {
   // Print / Download
 const handleOpenPdf = () => {
   if (!mainId) return toast.info('Select or save a journal first.');
+  if (isCancelled) return toast.info('Cancelled journals cannot be printed.');
+
   const url = `/api/ga/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}&_=${Date.now()}`;
   setPdfUrl(url);
   setShowPdf(true);
 };
 
 
+
   
 const handleDownloadExcel = async () => {
   if (!mainId) return toast.info('Select or save a journal first.');
+  if (isCancelled) return toast.info('Cancelled journals cannot be exported.');
+
+
 
   try {
     const res = await napi.get(`/ga/form-excel/${mainId}`, {
@@ -492,8 +1008,8 @@ const handleDownloadExcel = async () => {
 };
 
 
-  return (
-    <div className="space-y-4 p-6">
+return (
+  <div className="min-h-screen pb-40 space-y-4 p-6">
       <ToastContainer position="top-right" autoClose={3000} />
 
       <div className="bg-yellow-50 shadow-md rounded-lg p-6 space-y-4 border border-yellow-400">
@@ -523,7 +1039,7 @@ const handleDownloadExcel = async () => {
             <input
               type="date"
               value={genAcctDate}
-              disabled={locked || isCancelled}
+              disabled={isCancelled}
               onChange={(e) => setGenAcctDate(e.target.value)}
               className="w-full border p-2 bg-green-100 text-green-900"
             />
@@ -534,7 +1050,7 @@ const handleDownloadExcel = async () => {
             <label className="block mb-1">Explanation</label>
             <input
               value={explanation}
-              disabled={locked || isCancelled}
+              disabled={isCancelled}
               onChange={(e) => setExplanation(e.target.value)}
               className="w-full border p-2 bg-green-100 text-green-900"
             />
@@ -558,53 +1074,118 @@ const handleDownloadExcel = async () => {
           </div>
         </div>
 
-        {/* Actions */}
-        <div className="flex gap-2 mt-3">
-          {!mainId ? (
-            <button
-              onClick={handleSaveMain}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded bg-green-600 text-white hover:bg-green-700"
-            >
-              <CheckCircleIcon className="h-5 w-5" />
-              Save
-            </button>
-          ) : (
-            <>
-              {!isCancelled && (
-                <button
-                  onClick={handleUpdateMain}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
-                >
-                  <CheckCircleIcon className="h-5 w-5" />
-                  Update
-                </button>
-              )}
-
-              {isCancelled ? (
-                <button
-                  onClick={() => handleCancelToggle(false)}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700"
-                >
-                  Uncancel
-                </button>
-              ) : (
-                <button
-                  onClick={() => handleCancelToggle(true)}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded bg-amber-500 text-white hover:bg-amber-600"
-                >
-                  Cancel
-                </button>
-              )}
-
+{/* Actions */}
+<div className="mt-3 space-y-1">
+  <div className="flex gap-2 items-center">
+    {!mainId ? (
+      // ✅ New JE: original Save (creating a brand-new JE)
+      <button
+        onClick={handleSaveMain}
+        className="inline-flex items-center gap-2 px-4 py-2 rounded bg-green-600 text-white hover:bg-green-700"
+      >
+        <CheckCircleIcon className="h-5 w-5" />
+        Save
+      </button>
+    ) : (
+      <>
+        {!isCancelled && (
+          <>
+            {/* 🔹 When approval is ACTIVE → plain “Save changes” button */}
+            {approval.approvedActive ? (
               <button
-                onClick={handleDeleteTxn}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded bg-red-600 text-white hover:bg-red-700"
+                type="button"
+                onClick={handleSaveHeader}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700"
               >
-                Delete
+                <CheckCircleIcon className="h-5 w-5" />
+                Save changes
               </button>
-            </>
-          )}
+            ) : (
+              // 🔹 When there is no active approval → Request to Edit
+              <button
+                type="button"
+                onClick={handleRequestEdit}
+                disabled={isApprovalPending}
+                className={
+                  'inline-flex items-center gap-2 px-4 py-2 rounded text-white ' +
+                  (isApprovalPending
+                    ? 'bg-purple-400 cursor-not-allowed opacity-70'
+                    : 'bg-purple-600 hover:bg-purple-700')
+                }
+              >
+                <CheckCircleIcon className="h-5 w-5" />
+                {isApprovalPending ? 'Edit Request Pending' : 'Request to Edit'}
+              </button>
+            )}
+          </>
+        )}
+
+        {/* Existing Cancel / Uncancel / Delete */}
+<button
+  onClick={handleCancelTxn}
+  className={
+    'inline-flex items-center gap-2 px-4 py-2 rounded text-white ' +
+    (isCancelled ? 'bg-gray-600 hover:bg-gray-700' : 'bg-amber-500 hover:bg-amber-600')
+  }
+>
+  {isCancelled ? 'Uncancel' : 'Cancel'}
+</button>
+
+<button
+  onClick={handleDeleteTxn}
+  className="inline-flex items-center gap-2 px-4 py-2 rounded bg-red-600 text-white hover:bg-red-700"
+>
+  Delete
+</button>
+
+{mainId && !isCancelled && (
+  <button
+    type="button"
+    onClick={handleSaveMainNoApproval}
+    className="inline-flex items-center gap-2 px-4 py-2 rounded bg-gray-600 text-white hover:bg-gray-700"
+  >
+    <CheckCircleIcon className="h-5 w-5" />
+    Save Main
+  </button>
+)}
+
+
+
+      </>
+    )}
+  </div>
+
+  {/* Small status text for approvals */}
+  {mainId && !isCancelled && (
+    <>
+      {/* Active edit window info */}
+      {approval.approvedActive && approvalLabel && (
+        <div className="text-xs text-emerald-700">
+          Edit approved — <span className="font-semibold">{approvalLabel}</span>
         </div>
+      )}
+
+      {/* Pending request info */}
+      {isApprovalPending && !approval.approvedActive && (
+        <div className="text-xs text-amber-700">
+          Edit approval is <span className="font-semibold">pending</span>
+          {approval.reason ? ` — Reason: ${approval.reason}` : ''}
+        </div>
+      )}
+
+      {/* Rejected info */}
+      {isApprovalRejected && !approval.approvedActive && (
+        <div className="text-xs text-red-700">
+          Last edit request was <span className="font-semibold">rejected</span>
+          {approval.reason ? ` — Reason: ${approval.reason}` : ''}
+        </div>
+      )}
+    </>
+  )}
+</div>
+
+
+
       </div>
 
       {/* DETAILS */}
@@ -722,13 +1303,16 @@ const handleDownloadExcel = async () => {
           onMouseEnter={() => setDownloadOpen(true)}
           onMouseLeave={() => setDownloadOpen(false)}
         >
-          <button
-            type="button"
-            disabled={!mainId}
-            className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
-              mainId ? 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50' : 'bg-gray-100 text-gray-400 border-gray-200'
-            }`}
-          >
+<button
+  type="button"
+  disabled={!mainId || isCancelled}
+  className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
+    mainId && !isCancelled
+      ? 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
+      : 'bg-gray-100 text-gray-400 border-gray-200'
+  }`}
+>
+
             <ArrowDownTrayIcon className={`h-5 w-5 ${mainId ? 'text-emerald-600' : 'text-gray-400'}`} />
             <span>Download</span>
             <ChevronDownIcon className="h-4 w-4 opacity-70" />

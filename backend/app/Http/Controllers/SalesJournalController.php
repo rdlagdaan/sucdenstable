@@ -35,7 +35,6 @@ class MySalesVoucherPDF extends \TCPDF {
         }
     }
 
-
     public function Footer() {
         $this->SetY(-50);
         $this->SetFont('helvetica','I',8);
@@ -82,10 +81,6 @@ class MySalesVoucherPDF extends \TCPDF {
     }
 }
 
-
-
-
-
 class SalesJournalController extends Controller
 {
     // 1) Generate next CS number (incremental)
@@ -129,6 +124,72 @@ class SalesJournalController extends Controller
         return response()->json([
             'id'    => $main->id,
             'cs_no' => $main->cs_no,
+        ]);
+    }
+
+
+// 🔓 Save Main (NO approval) — header only
+public function updateMainNoApproval(Request $req)
+{
+    $data = $req->validate([
+        'id'          => ['required','integer','exists:cash_sales,id'],
+        'cust_id'     => ['required','string','max:50'],
+        'sales_date'  => ['required','date'],
+        'explanation' => ['nullable','string','max:1000'],
+        'si_no'       => ['nullable','string','max:25'],
+        'company_id'  => ['required','integer'],
+    ]);
+
+    $tx = CashSales::findOrFail($data['id']);
+
+    // ✅ SAFETY: cannot update cancelled / deleted
+    if (in_array($tx->is_cancel, ['c','d','y'], true)) {
+        abort(403, 'Cancelled transaction cannot be modified.');
+    }
+
+    // ✅ UPDATE HEADER ONLY
+    $tx->update([
+        'cust_id'     => $data['cust_id'],
+        'sales_date'  => $data['sales_date'],
+        'explanation' => $data['explanation'] ?? '',
+        'si_no'       => $data['si_no'] ?? '',
+    ]);
+
+    return response()->json([
+        'ok'   => true,
+        'main' => $tx->fresh(),
+    ]);
+}
+
+
+    // 2b) *** NEW: Update main header (requires approval) ***
+    public function updateMain(Request $req)
+    {
+        $data = $req->validate([
+            'id'          => ['required','integer','exists:cash_sales,id'],
+            'cust_id'     => ['required','string','max:50'],
+            'sales_date'  => ['required','date'],
+            'explanation' => ['required','string','max:1000'],
+            'si_no'       => ['required','string','max:25'],
+        ]);
+
+        // 🔐 Require supervisor approval, like General Accounting
+        $this->requireEditApproval((int) $data['id']);
+
+        $main = CashSales::findOrFail($data['id']);
+        $main->cust_id     = $data['cust_id'];
+        $main->sales_date  = $data['sales_date'];
+        $main->explanation = $data['explanation'];
+        $main->si_no       = $data['si_no'];
+        $main->save();
+
+        return response()->json([
+            'ok'          => true,
+            'id'          => $main->id,
+            'cust_id'     => $main->cust_id,
+            'sales_date'  => $main->sales_date,
+            'explanation' => $main->explanation,
+            'si_no'       => $main->si_no,
         ]);
     }
 
@@ -187,6 +248,9 @@ class SalesJournalController extends Controller
             'credit'         => ['nullable','numeric'],
         ]);
 
+        // *** NEW: require supervisor approval for editing details ***
+        $this->requireEditApproval((int) $payload['transaction_id']);
+
         $detail = CashSalesDetail::find($payload['id']);
         if (!$detail) return response()->json(['message' => 'Detail not found.'], 404);
 
@@ -214,6 +278,10 @@ class SalesJournalController extends Controller
             'id'             => ['required','integer','exists:cash_sales_details,id'],
             'transaction_id' => ['required','integer','exists:cash_sales,id'],
         ]);
+
+        // *** NEW: require supervisor approval for deleting a detail ***
+        $this->requireEditApproval((int) $payload['transaction_id']);
+
         CashSalesDetail::where('id',$payload['id'])->delete();
         $totals = $this->recalcTotals($payload['transaction_id']);
         return response()->json(['ok'=>true,'totals'=>$totals]);
@@ -251,6 +319,12 @@ public function list(Request $req)
 
     $rows = CashSales::from('cash_sales as s')
         ->when($companyId, fn ($qr) => $qr->where('s.company_id', $companyId))
+        // hide soft-deleted rows (is_cancel = 'd'), keep others
+        ->where(function ($qr) {
+            $qr->whereNull('s.is_cancel')
+               ->orWhere('s.is_cancel', '!=', 'd');
+        })
+        // optional: join ...
         // optional: join to allow searching/displaying customer name
         ->leftJoin('customer_list as c', function ($j) use ($companyId) {
             $j->on('c.cust_id', '=', 's.cust_id');
@@ -307,95 +381,136 @@ public function list(Request $req)
                 $k->where('acct_code','like',"%$q%")->orWhere('acct_desc','like',"%$q%");
             }))
             ->orderBy('acct_desc')
-            ->limit(200)
+            //->limit(200)
             ->get(['acct_code','acct_desc']);
 
         return response()->json($rows);
     }
 
     // 9) Cancel / Uncancel
-    public function updateCancel(Request $req)
-    {
-        $data = $req->validate([
-            'id' => ['required','integer','exists:cash_sales,id'],
-            'flag' => ['required','in:0,1'],
-        ]);
-        $val = $data['flag'] == '1' ? 'y' : 'n';
-        CashSales::where('id',$data['id'])->update(['is_cancel'=>$val]);
-        return response()->json(['ok'=>true,'is_cancel'=>$val]);
+public function updateCancel(Request $req)
+{
+    $data = $req->validate([
+        'id'   => ['required','integer','exists:cash_sales,id'],
+        'flag' => ['required','in:0,1'], // 1 = cancel, 0 = uncancel
+    ]);
+
+    // '1' → cancelled ('c'), '0' → normal ('n')
+    $val = $data['flag'] === '1' ? 'c' : 'n';
+
+    CashSales::where('id', $data['id'])->update([
+        'is_cancel' => $val,
+    ]);
+
+    return response()->json([
+        'ok'        => true,
+        'is_cancel' => $val,
+    ]);
+}
+
+
+public function softDeleteMain(Request $req)
+{
+    $data = $req->validate([
+        'id' => ['required','integer','exists:cash_sales,id'],
+    ]);
+
+    $row = CashSales::find($data['id']);
+    if (!$row) {
+        return response()->json(['message' => 'Sales voucher not found.'], 404);
     }
+
+    // If already hard-cancelled/deleted, just return
+    if ($row->is_cancel === 'd') {
+        return response()->json(['ok' => true, 'is_cancel' => 'd']);
+    }
+
+    // Mark as deleted (soft delete); will be hidden from dropdowns
+    $row->is_cancel = 'd';
+    $row->save();
+
+    return response()->json([
+        'ok'        => true,
+        'is_cancel' => 'd',
+    ]);
+}
+
+
 
     // 10) Print/Download placeholders
-public function formPdf(Request $request, $id)
-{
-    $companyId = $request->query('company_id');
+    public function formPdf(Request $request, $id)
+    {
+        $companyId = $request->query('company_id');
 
-    // --- Header info (scoped by company)
-    $header = DB::table('cash_sales as cs')
-        ->join('customer_list as c', function ($j) use ($companyId) {
-            $j->on('cs.cust_id', '=', 'c.cust_id');
-            if ($companyId) {
-                $j->where('c.company_id', '=', $companyId);
+        // --- Header info (scoped by company)
+        $header = DB::table('cash_sales as cs')
+            ->join('customer_list as c', function ($j) use ($companyId) {
+                $j->on('cs.cust_id', '=', 'c.cust_id');
+                if ($companyId) {
+                    $j->where('c.company_id', '=', $companyId);
+                }
+            })
+            ->select(
+                'cs.id','cs.cs_no','cs.cust_id','cs.sales_amount','cs.pay_method',
+                'cs.bank_id','cs.explanation','cs.is_cancel','cs.si_no',
+                DB::raw("to_char(cs.sales_date, 'MM/DD/YYYY') as sales_date"),
+                'c.cust_name','cs.check_ref_no','cs.amount_in_words',
+                'cs.workstation_id','cs.user_id','cs.created_at'
+            )
+            ->where('cs.id', $id)
+            ->when($companyId, fn($q) => $q->where('cs.company_id', $companyId))
+            ->first();
+
+            if (
+                !$header ||
+                in_array($header->is_cancel, ['y', 'c', 'd'], true)
+            ) {
+                abort(404, 'Sales Voucher not found or cancelled');
             }
-        })
-        ->select(
-            'cs.id','cs.cs_no','cs.cust_id','cs.sales_amount','cs.pay_method',
-            'cs.bank_id','cs.explanation','cs.is_cancel','cs.si_no',
-            DB::raw("to_char(cs.sales_date, 'MM/DD/YYYY') as sales_date"),
-            'c.cust_name','cs.check_ref_no','cs.amount_in_words',
-            'cs.workstation_id','cs.user_id','cs.created_at'
-        )
-        ->where('cs.id', $id)
-        ->when($companyId, fn($q) => $q->where('cs.company_id', $companyId))
-        ->first();
 
-    if (!$header || $header->is_cancel === 'y') {
-        abort(404, 'Sales Voucher not found or cancelled');
-    }
+        // --- Details (scoped by company)
+        $details = DB::table('cash_sales_details as d')
+            ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
+            ->where('d.transaction_id', $id)
+            ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+            ->orderBy('d.workstation_id','desc')
+            ->orderBy('d.credit','desc')
+            ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
+            ->get();
 
-    // --- Details (scoped by company)
-    $details = DB::table('cash_sales_details as d')
-        ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
-        ->where('d.transaction_id', $id)
-        ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
-        ->orderBy('d.workstation_id','desc')
-        ->orderBy('d.credit','desc')
-        ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
-        ->get();
+        $totalDebit  = $details->sum('debit');
+        $totalCredit = $details->sum('credit');
 
-    $totalDebit  = $details->sum('debit');
-    $totalCredit = $details->sum('credit');
+        // --- Early guard: if not balanced, return the existing HTML notice
+        if (abs($totalDebit - $totalCredit) > 0.005) {
+            $html = sprintf(
+                '<!doctype html><meta charset="utf-8">
+                <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+                <h2>Cannot print Sales Voucher</h2>
+                <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
+                <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+                number_format($totalDebit, 2),
+                number_format($totalCredit, 2)
+            );
+            return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+        }
 
-    // --- Early guard: if not balanced, return the existing HTML notice
-    if (abs($totalDebit - $totalCredit) > 0.005) {
-        $html = sprintf(
-            '<!doctype html><meta charset="utf-8">
-            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
-            <h2>Cannot print Sales Voucher</h2>
-            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
-            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
-            number_format($totalDebit, 2),
-            number_format($totalCredit, 2)
-        );
-        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
-    }
+        // --- TCPDF with custom header/footer
+        $pdf = new MySalesVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
+        $pdf->setPrintHeader(true);
+        $pdf->SetHeaderMargin(8);
+        $pdf->SetMargins(15,30,15);
+        $pdf->AddPage();
+        $pdf->SetFont('helvetica','',7);
 
-    // --- TCPDF with custom header/footer
-    $pdf = new MySalesVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-    $pdf->setPrintHeader(true);
-    $pdf->SetHeaderMargin(8);
-    $pdf->SetMargins(15,30,15);
-    $pdf->AddPage();
-    $pdf->SetFont('helvetica','',7);
+        $pdf->setDataSalesDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
+        $pdf->setDataSalesTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
 
-    $pdf->setDataSalesDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
-    $pdf->setDataSalesTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
+        $formattedDebit  = number_format($totalDebit, 2);
+        $formattedCredit = number_format($totalCredit, 2);
 
-    $formattedDebit  = number_format($totalDebit, 2);
-    $formattedCredit = number_format($totalCredit, 2);
-
-    // --- Build body (existing layout)
-    $tbl = <<<EOD
+        // --- Build body (existing layout)
+        $tbl = <<<EOD
 <br><br>
 <table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
 <tr>
@@ -446,10 +561,10 @@ public function formPdf(Request $request, $id)
  </tr>
 EOD;
 
-    foreach ($details as $d) {
-        $debit  = $d->debit  ? number_format($d->debit, 2) : '';
-        $credit = $d->credit ? number_format($d->credit, 2) : '';
-        $tbl .= <<<EOD
+        foreach ($details as $d) {
+            $debit  = $d->debit  ? number_format($d->debit, 2) : '';
+            $credit = $d->credit ? number_format($d->credit, 2) : '';
+            $tbl .= <<<EOD
   <tr>
     <td align="left"><font size="10">{$d->acct_code}</font></td>
     <td align="left"><font size="10">{$d->acct_desc}</font></td>
@@ -457,9 +572,9 @@ EOD;
     <td align="right"><font size="10">{$credit}</font></td>
   </tr>
 EOD;
-    }
+        }
 
-    $tbl .= <<<EOD
+        $tbl .= <<<EOD
   <tr>
     <td align="left"></td>
     <td align="left"><font size="10">TOTAL</font></td>
@@ -469,116 +584,242 @@ EOD;
 </table>
 EOD;
 
-    $pdf->writeHTML($tbl, true, false, false, false, '');
+        $pdf->writeHTML($tbl, true, false, false, false, '');
 
-    // --- Stream PDF to browser
-    $pdfContent = $pdf->Output('salesVoucher.pdf', 'S');
+        // --- Stream PDF to browser
+        $pdfContent = $pdf->Output('salesVoucher.pdf', 'S');
 
-    return response($pdfContent, 200)
-        ->header('Content-Type', 'application/pdf')
-        ->header('Content-Disposition', 'inline; filename="salesVoucher.pdf"');
-}
-
-
-  
-   
-   
-    public function checkPdf($id)       { return response('Check PDF stub – implement renderer', 200); }
-public function formExcel(Request $request, $id)
+        return response($pdfContent, 200)
+            ->header('Content-Type', 'application/pdf')
+            ->header('Content-Disposition', 'inline; filename="salesVoucher.pdf"');
+    }
+public function checkPdf(Request $request, $id)
 {
     $companyId = $request->query('company_id');
 
-    // Header (scoped)
+    // --- Header info (reuse pattern from formPdf) ---
     $header = DB::table('cash_sales as cs')
         ->join('customer_list as c', function ($j) use ($companyId) {
             $j->on('cs.cust_id', '=', 'c.cust_id');
-            if ($companyId) $j->where('c.company_id', '=', $companyId);
+            if ($companyId) {
+                $j->where('c.company_id', '=', $companyId);
+            }
         })
         ->select(
-            'cs.id','cs.cs_no','cs.cust_id','cs.sales_amount',
-            DB::raw("to_char(cs.sales_date, 'YYYY-MM-DD') as sales_date"),
-            'cs.si_no','cs.explanation','cs.is_cancel','c.cust_name'
+            'cs.id',
+            'cs.cs_no',
+            'cs.cust_id',
+            'cs.sales_amount',
+            'cs.is_cancel',
+            DB::raw("cs.sales_date as raw_sales_date"),
+            DB::raw("to_char(cs.sales_date, 'MM/DD/YYYY') as sales_date"),
+            'cs.amount_in_words',
+            'cs.check_ref_no',
+            'c.cust_name'
         )
         ->where('cs.id', $id)
-        ->when($companyId, fn($q) => $q->where('cs.company_id', $companyId))
+        ->when($companyId, fn ($q) => $q->where('cs.company_id', $companyId))
         ->first();
 
-    if (!$header || $header->is_cancel === 'y') {
+    // Not found or cancelled/deleted
+    if (
+        !$header ||
+        in_array($header->is_cancel, ['y', 'c', 'd'], true)
+    ) {
         abort(404, 'Sales Voucher not found or cancelled');
     }
 
-    // Details (scoped)
+    // --- Details (to make sure it is balanced) ---
     $details = DB::table('cash_sales_details as d')
-        ->leftJoin('account_code as a','d.acct_code','=','a.acct_code')
         ->where('d.transaction_id', $id)
-        ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
-        ->orderBy('d.id')
-        ->get([
-            'd.acct_code',
-            DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
-            'd.debit','d.credit'
-        ]);
+        ->when($companyId, fn ($q) => $q->where('d.company_id', $companyId))
+        ->get(['d.debit', 'd.credit']);
 
     $totalDebit  = $details->sum('debit');
     $totalCredit = $details->sum('credit');
 
-    // Build XLSX
-    $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-    $sheet = $spreadsheet->getActiveSheet();
-    $sheet->setTitle('Sales Voucher');
-
-    // Header block
-    $r = 1;
-    $sheet->setCellValue("A{$r}", 'SALES VOUCHER'); $r += 2;
-
-    $sheet->setCellValue("A{$r}", 'SV Number:');  $sheet->setCellValue("B{$r}", $header->cs_no);       $r++;
-    $sheet->setCellValue("A{$r}", 'Invoice Date:');$sheet->setCellValue("B{$r}", $header->sales_date);  $r++;
-    $sheet->setCellValue("A{$r}", 'Sales Invoice #:'); $sheet->setCellValue("B{$r}", $header->si_no);   $r++;
-    $sheet->setCellValue("A{$r}", 'Customer:');   $sheet->setCellValue("B{$r}", $header->cust_name);    $r++;
-    $sheet->setCellValue("A{$r}", 'Explanation:');$sheet->setCellValue("B{$r}", $header->explanation);  $r += 2;
-
-    // Table headers
-    $sheet->setCellValue("A{$r}", 'ACCOUNT');
-    $sheet->setCellValue("B{$r}", 'GL ACCOUNT');
-    $sheet->setCellValue("C{$r}", 'DEBIT');
-    $sheet->setCellValue("D{$r}", 'CREDIT');
-    $sheet->getStyle("A{$r}:D{$r}")->getFont()->setBold(true);
-    $r++;
-
-    // Rows
-    foreach ($details as $d) {
-        $sheet->setCellValue("A{$r}", $d->acct_code);
-        $sheet->setCellValue("B{$r}", $d->acct_desc);
-        $sheet->setCellValueExplicit("C{$r}", (float)($d->debit ?? 0), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
-        $sheet->setCellValueExplicit("D{$r}", (float)($d->credit ?? 0), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
-        $r++;
+    // Guard: only balanced transactions can print a check
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        $html = sprintf(
+            '<!doctype html><meta charset="utf-8">
+            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+            <h2>Cannot print Check</h2>
+            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing the check.</p>
+            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+            number_format($totalDebit, 2),
+            number_format($totalCredit, 2)
+        );
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
     }
 
-    // Totals
-    $sheet->setCellValue("B{$r}", 'TOTAL');
-    $sheet->setCellValue("C{$r}", (float)$totalDebit);
-    $sheet->setCellValue("D{$r}", (float)$totalCredit);
-    $sheet->getStyle("B{$r}:D{$r}")->getFont()->setBold(true);
+    // --- Map values for the check layout ---
+    $amountNumeric    = round((float) $totalDebit, 2);
+    $amountNumericStr = number_format($amountNumeric, 2);
 
-    // Formats & widths
-    $sheet->getStyle("C1:D{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-    foreach (['A'=>18,'B'=>45,'C'=>16,'D'=>16] as $col => $w) {
-        $sheet->getColumnDimension($col)->setWidth($w);
+    $amountWords = trim((string) ($header->amount_in_words ?? ''));
+    if ($amountWords === '') {
+        $amountWords = $this->numberToPesoWords($amountNumeric);
     }
 
-    // Stream to memory
-    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
-    ob_start();
-    $writer->save('php://output');
-    $xlsData = ob_get_clean();
+    $payeeName = (string) $header->cust_name;
 
-    $fileName = 'SalesVoucher_' . ($header->cs_no ?? $id) . '.xlsx';
+    // Use sales_date as check date (you can change this to a dedicated field later)
+    $date = $header->raw_sales_date
+        ? \Carbon\Carbon::parse($header->raw_sales_date)
+        : \Carbon\Carbon::now();
 
-    return response($xlsData, 200)
-        ->header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        ->header('Content-Disposition', 'attachment; filename="'.$fileName.'"')
-        ->header('Content-Length', (string)strlen($xlsData));
+    $mm   = $date->format('m');
+    $dd   = $date->format('d');
+    $yyyy = $date->format('Y');
+
+    // --- TCPDF: custom page size matching a physical check (LANDSCAPE) ---
+    // Approx. Philippine commercial check size: 8.0" x 3.0"
+    // 1 inch = 25.4 mm
+    $checkWidthMm  = 8.0 * 25.4;   // 203.2 mm (width)
+    $checkHeightMm = 3.0 * 25.4;   // 76.2 mm (height)
+
+    // IMPORTANT: use 'L' orientation and [width, height] to avoid vertical page
+    $pdf = new \TCPDF('L', 'mm', [$checkWidthMm, $checkHeightMm], true, 'UTF-8', false);
+
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+
+    // Small margins; we want to use almost the full check area
+    $pdf->SetMargins(5, 5, 5);
+    $pdf->SetAutoPageBreak(false, 0);
+
+    $pdf->AddPage();
+    $pdf->SetFont('helvetica', '', 9);
+
+    /*
+     * Coordinates below assume an ~8x3 inch check in landscape.
+     * You will likely tweak these SetXY positions a bit
+     * after test prints on your actual bank stock.
+     */
+
+    // 1) Date (MM  DD  YYYY) – upper-right
+    $pdf->SetXY(140, 10);
+    $pdf->Cell(0, 5, $mm . '   ' . $dd . '   ' . $yyyy, 0, 1, 'L');
+
+    // 2) Payee: "PAY TO THE ORDER OF" line
+    $pdf->SetXY(20, 25);
+    $pdf->Cell(120, 6, $payeeName, 0, 1, 'L');
+
+    // 3) Amount in figures (P ###,###.##) near right-hand "P" box
+    $pdf->SetXY(145, 25);
+    $pdf->Cell(50, 6, $amountNumericStr, 0, 1, 'R');
+
+    // 4) Amount in words – PESOS line
+    $pdf->SetXY(20, 35);
+    $pdf->MultiCell(160, 6, $amountWords, 0, 'L', false, 1);
+
+    $fileName   = 'check_' . ($header->cs_no ?? $id) . '.pdf';
+    $pdfContent = $pdf->Output($fileName, 'S');
+
+    return response($pdfContent, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="'.$fileName.'"');
 }
+
+
+    public function formExcel(Request $request, $id)
+    {
+        $companyId = $request->query('company_id');
+
+        // Header (scoped)
+        $header = DB::table('cash_sales as cs')
+            ->join('customer_list as c', function ($j) use ($companyId) {
+                $j->on('cs.cust_id', '=', 'c.cust_id');
+                if ($companyId) $j->where('c.company_id', '=', $companyId);
+            })
+            ->select(
+                'cs.id','cs.cs_no','cs.cust_id','cs.sales_amount',
+                DB::raw("to_char(cs.sales_date, 'YYYY-MM-DD') as sales_date"),
+                'cs.si_no','cs.explanation','cs.is_cancel','c.cust_name'
+            )
+            ->where('cs.id', $id)
+            ->when($companyId, fn($q) => $q->where('cs.company_id', $companyId))
+            ->first();
+
+            if (
+                !$header ||
+                in_array($header->is_cancel, ['y', 'c', 'd'], true)
+            ) {
+                abort(404, 'Sales Voucher not found or cancelled');
+            }
+
+        // Details (scoped)
+        $details = DB::table('cash_sales_details as d')
+            ->leftJoin('account_code as a','d.acct_code','=','a.acct_code')
+            ->where('d.transaction_id', $id)
+            ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+            ->orderBy('d.id')
+            ->get([
+                'd.acct_code',
+                DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
+                'd.debit','d.credit'
+            ]);
+
+        $totalDebit  = $details->sum('debit');
+        $totalCredit = $details->sum('credit');
+
+        // Build XLSX
+        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Sales Voucher');
+
+        // Header block
+        $r = 1;
+        $sheet->setCellValue("A{$r}", 'SALES VOUCHER'); $r += 2;
+
+        $sheet->setCellValue("A{$r}", 'SV Number:');  $sheet->setCellValue("B{$r}", $header->cs_no);       $r++;
+        $sheet->setCellValue("A{$r}", 'Invoice Date:');$sheet->setCellValue("B{$r}", $header->sales_date);  $r++;
+        $sheet->setCellValue("A{$r}", 'Sales Invoice #:'); $sheet->setCellValue("B{$r}", $header->si_no);   $r++;
+        $sheet->setCellValue("A{$r}", 'Customer:');   $sheet->setCellValue("B{$r}", $header->cust_name);    $r++;
+        $sheet->setCellValue("A{$r}", 'Explanation:');$sheet->setCellValue("B{$r}", $header->explanation);  $r += 2;
+
+        // Table headers
+        $sheet->setCellValue("A{$r}", 'ACCOUNT');
+        $sheet->setCellValue("B{$r}", 'GL ACCOUNT');
+        $sheet->setCellValue("C{$r}", 'DEBIT');
+        $sheet->setCellValue("D{$r}", 'CREDIT');
+        $sheet->getStyle("A{$r}:D{$r}")->getFont()->setBold(true);
+        $r++;
+
+        // Rows
+        foreach ($details as $d) {
+            $sheet->setCellValue("A{$r}", $d->acct_code);
+            $sheet->setCellValue("B{$r}", $d->acct_desc);
+            $sheet->setCellValueExplicit("C{$r}", (float)($d->debit ?? 0), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+            $sheet->setCellValueExplicit("D{$r}", (float)($d->credit ?? 0), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+            $r++;
+        }
+
+        // Totals
+        $sheet->setCellValue("B{$r}", 'TOTAL');
+        $sheet->setCellValue("C{$r}", (float)$totalDebit);
+        $sheet->setCellValue("D{$r}", (float)$totalCredit);
+        $sheet->getStyle("B{$r}:D{$r}")->getFont()->setBold(true);
+
+        // Formats & widths
+        $sheet->getStyle("C1:D{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+        foreach (['A'=>18,'B'=>45,'C'=>16,'D'=>16] as $col => $w) {
+            $sheet->getColumnDimension($col)->setWidth($w);
+        }
+
+        // Stream to memory
+        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        ob_start();
+        $writer->save('php://output');
+        $xlsData = ob_get_clean();
+
+        $fileName = 'SalesVoucher_' . ($header->cs_no ?? $id) . '.xlsx';
+
+        return response($xlsData, 200)
+            ->header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            ->header('Content-Disposition', 'attachment; filename="'.$fileName.'"')
+            ->header('Content-Length', (string)strlen($xlsData));
+    }
 
     // ---- helpers ----
     protected function recalcTotals(int $transactionId): array
@@ -601,6 +842,47 @@ public function formExcel(Request $request, $id)
         return ['debit'=>$sumDebit,'credit'=>$sumCredit,'balanced'=>$balanced];
     }
 
+    // *** NEW: central approval gate for Sales Journal edits ***
+    protected function requireEditApproval(int $transactionId): \stdClass
+    {
+        $main = CashSales::findOrFail($transactionId);
+
+        $module    = 'sales_journal';          // <-- module code for this screen
+        $companyId = (int) $main->company_id;
+
+        $row = DB::table('approvals')
+            ->where('module', $module)
+            ->where('record_id', $transactionId)
+            ->where('company_id', $companyId)
+            ->where('action', 'edit')
+            ->where('status', 'approved')
+            ->whereNull('consumed_at')
+            ->orderByDesc('id')
+            ->first();
+
+        if (!$row) {
+            abort(403, 'Supervisor approval required for editing this sales journal entry.');
+        }
+
+        $now = now();
+        if ($row->expires_at) {
+            $expires = \Carbon\Carbon::parse($row->expires_at);
+            if ($now->gte($expires)) {
+                abort(403, 'Edit approval has expired. Please request a new approval.');
+            }
+        }
+
+        // First time used? mark first_edit_at
+        if (empty($row->first_edit_at)) {
+            DB::table('approvals')->where('id', $row->id)->update([
+                'first_edit_at' => $now,
+                'updated_at'    => $now,
+            ]);
+            $row->first_edit_at = $now;
+        }
+
+        return $row;
+    }
 
     public function unbalancedExists(Request $req)
     {
@@ -632,9 +914,90 @@ public function formExcel(Request $request, $id)
         return response()->json(['items' => $rows]);
     }
 
+/**
+ * Simple converter: 1234.56 → "One thousand two hundred thirty-four pesos and 56/100"
+ */
+protected function numberToPesoWords(float $amount): string
+{
+    $amount = round($amount, 2);
+    $integerPart = (int) floor($amount);
+    $cents = (int) round(($amount - $integerPart) * 100);
+
+    if ($integerPart === 0) {
+        $words = 'zero';
+    } else {
+        $words = $this->numberToWords($integerPart);
+    }
+
+    $words = ucfirst($words) . ' pesos';
+
+    if ($cents > 0) {
+        $words .= ' and ' . str_pad((string) $cents, 2, '0', STR_PAD_LEFT) . '/100';
+    } else {
+        $words .= ' only';
+    }
+
+    return $words;
+}
+
+/**
+ * Basic English number words up to the billions (enough for checks).
+ */
+protected function numberToWords(int $num): string
+{
+    $ones = [
+        '', 'one', 'two', 'three', 'four', 'five', 'six', 'seven',
+        'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen',
+        'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'
+    ];
+    $tens = [
+        '', '', 'twenty', 'thirty', 'forty', 'fifty',
+        'sixty', 'seventy', 'eighty', 'ninety'
+    ];
+    $scales = ['', 'thousand', 'million', 'billion'];
+
+    if ($num === 0) {
+        return 'zero';
+    }
+
+    $words = [];
+    $scaleIndex = 0;
+
+    while ($num > 0) {
+        $chunk = $num % 1000;
+        if ($chunk > 0) {
+            $chunkWords = [];
+
+            $hundreds = intdiv($chunk, 100);
+            $remainder = $chunk % 100;
+
+            if ($hundreds > 0) {
+                $chunkWords[] = $ones[$hundreds] . ' hundred';
+            }
+
+            if ($remainder > 0) {
+                if ($remainder < 20) {
+                    $chunkWords[] = $ones[$remainder];
+                } else {
+                    $t = intdiv($remainder, 10);
+                    $u = $remainder % 10;
+                    $chunkWords[] = $tens[$t] . ($u ? '-' . $ones[$u] : '');
+                }
+            }
+
+            if ($scales[$scaleIndex] !== '') {
+                $chunkWords[] = $scales[$scaleIndex];
+            }
+
+            array_unshift($words, implode(' ', $chunkWords));
+        }
+
+        $num = intdiv($num, 1000);
+        $scaleIndex++;
+    }
+
+    return implode(' ', $words);
 }
 
 
-
-
-
+}

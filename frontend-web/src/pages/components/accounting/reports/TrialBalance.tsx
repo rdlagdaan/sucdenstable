@@ -57,6 +57,107 @@ function openBlob(blob: Blob) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+type Option = { value: string; label: string };
+
+function SearchableSelect({
+  label,
+  value,
+  options,
+  disabled,
+  placeholder = "Type to search…",
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: Option[];
+  disabled?: boolean;
+  placeholder?: string;
+  onChange: (newValue: string) => void;
+}) {
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const selectedLabel = useMemo(() => {
+    return options.find((o) => o.value === value)?.label ?? "";
+  }, [options, value]);
+
+  useEffect(() => {
+    setQuery(selectedLabel);
+  }, [selectedLabel]);
+
+  useEffect(() => {
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (!wrapRef.current) return;
+      if (!wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!open) return options;
+    if (!q) return options;
+    return options.filter((o) => o.label.toLowerCase().includes(q));
+  }, [options, query, open]);
+
+  const pick = (opt: Option) => {
+    onChange(opt.value);
+    setQuery(opt.label);
+    setOpen(false);
+  };
+
+  return (
+    <div className="flex flex-col" ref={wrapRef}>
+      <label className="text-sm text-gray-600 mb-1">{label}</label>
+
+      <div className="relative">
+        <input
+          type="text"
+          className="border rounded px-2 py-2 w-full"
+          disabled={disabled}
+          value={query}
+          placeholder={disabled ? "Loading…" : placeholder}
+          onFocus={() => !disabled && setOpen(true)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            if (!open) setOpen(true);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setOpen(false);
+          }}
+        />
+
+        {open && !disabled && (
+          <div className="absolute z-50 mt-1 w-full bg-white border rounded shadow-lg max-h-72 overflow-auto">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-2 text-sm text-gray-500">No matches</div>
+            ) : (
+              filtered.map((o) => (
+                <button
+                  type="button"
+                  key={o.value}
+                  className={[
+                    "w-full text-left px-3 py-2 text-sm hover:bg-gray-100",
+                    o.value === value ? "bg-gray-50 font-semibold" : "",
+                  ].join(" ")}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => pick(o)}
+                >
+                  {o.label}
+                </button>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+
 export default function TrialBalance() {
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
@@ -292,37 +393,22 @@ const companyId = useMemo<number>(() => {
 
 {/* Row 2: Account range */}
 <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
-  <div className="flex flex-col">
-    <label className="text-sm text-gray-600 mb-1">Account (Start)</label>
-    <select
-      className="border rounded px-2 py-2"
-      disabled={loadingAccounts}
-      value={startAccount}
-      onChange={(e) => setStartAccount(e.target.value)}
-    >
-      {accountOptions.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </select>
-  </div>
+  <SearchableSelect
+  label="Account (Start)"
+  disabled={loadingAccounts || !accountOptions.length}
+  value={startAccount}
+  options={accountOptions}
+  onChange={(v) => setStartAccount(v)}
+/>
 
-  <div className="flex flex-col">
-    <label className="text-sm text-gray-600 mb-1">Account (End)</label>
-    <select
-      className="border rounded px-2 py-2"
-      disabled={loadingAccounts}
-      value={endAccount}
-      onChange={(e) => setEndAccount(e.target.value)}
-    >
-      {accountOptions.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </select>
-  </div>
+<SearchableSelect
+  label="Account (End)"
+  disabled={loadingAccounts || !accountOptions.length}
+  value={endAccount}
+  options={accountOptions}
+  onChange={(v) => setEndAccount(v)}
+/>
+
 </div>
 
 

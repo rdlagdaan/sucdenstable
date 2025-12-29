@@ -24,16 +24,8 @@ import {
 Handsontable.cellTypes.registerCellType('numeric', NumericCellType);
 
 const onlyCode = (v?: string) => (v || '').split(';')[0];
-const fmtDate = (d?: string) => (!d ? '' : (new Date(d).toString() === 'Invalid Date' ? (d || '').split('T')[0] : new Date(d).toISOString().slice(0,10)));
-
-type SalesDetailRow = {
-  id?: number;
-  acct_code: string;      // stores "code;desc"
-  acct_desc?: string;
-  debit?: number;
-  credit?: number;
-  persisted?: boolean;
-};
+const fmtDate = (d?: string) =>
+  (!d ? '' : (new Date(d).toString() === 'Invalid Date' ? (d || '').split('T')[0] : new Date(d).toISOString().slice(0, 10)));
 
 type PurchaseDetailRow = {
   id?: number;
@@ -48,9 +40,10 @@ type TxOption = {
   id: number | string;
   cp_no: string;
   vend_id: string;
+  vend_name?: string;
   purchase_date: string;
   purchase_amount: number;
-  invoice_no: string;
+  rr_no?: string;
   explanation?: string;
 };
 
@@ -70,21 +63,47 @@ export default function Purchase_journal_form() {
   const [_invoiceNo, setInvoiceNo] = useState('');
   const [mainId, setMainId] = useState<number | null>(null);
 
-  const [locked, setLocked] = useState(false);
+  // ---- status flags (from backend) ----
+  const [isCancelled, setIsCancelled] = useState(false);
+  const [isBalanced, setIsBalanced] = useState(true);
+
+  // ---- approvals (edit window) ----
+  const MODULE = 'purchase_journal'; // must match backend approvals module name
+  const APPROVAL_STATUS_URL = '/approvals/status'; // ✅ same endpoint used by working modules
+
+  const [editApproval, setEditApproval] = useState<{
+    exists: boolean;
+    id?: number;
+    status?: string;
+    approved_active?: boolean;
+    expires_at?: string | null;
+    reason?: string | null;
+  }>({ exists: false });
+
+
+  // ---- approvals (one-shot actions: cancel/delete/uncancel) ----
+  const [actionApproval, setActionApproval] = useState<Record<'cancel' | 'delete' | 'uncancel', ApprovalStatus>>({
+    cancel: { exists: false },
+    delete: { exists: false },
+    uncancel: { exists: false },
+  });
+
+
+  const [_locked, setLocked] = useState(false);
   const [gridLocked, setGridLocked] = useState(true);
 
   // dropdown data
-  const [vendors, setVendors]   = useState<DropdownItem[]>([]);
+  const [vendors, setVendors] = useState<DropdownItem[]>([]);
   const [accounts, setAccounts] = useState<{ acct_code: string; acct_desc: string }[]>([]);
   const [sugarTypes, setSugarTypes] = useState<DropdownItem[]>([]);
-  const [cropYears, setCropYears]   = useState<DropdownItem[]>([]);
-  const [mills, setMills]           = useState<DropdownItem[]>([]);
+  const [cropYears, setCropYears] = useState<DropdownItem[]>([]);
+  const [mills, setMills] = useState<DropdownItem[]>([]);
 
   // dropdown search bindings
   const [vendorSearch, setVendorSearch] = useState('');
-  const [sugarSearch, setSugarSearch]   = useState('');
-  const [cropSearch, setCropSearch]     = useState('');
-  const [millSearch, setMillSearch]     = useState('');
+  const [sugarSearch, setSugarSearch] = useState('');
+  const [cropSearch, setCropSearch] = useState('');
+  const [millSearch, setMillSearch] = useState('');
 
   // search transaction dropdown
   const [searchId, setSearchId] = useState<string>('');
@@ -101,11 +120,9 @@ export default function Purchase_journal_form() {
   const [pdfUrl, setPdfUrl] = useState<string | undefined>(undefined);
   const [showPdf, setShowPdf] = useState(false);
 
-    // state for PBN dropdown
-    const [pbns, setPbns] = useState<DropdownItem[]>([]);
-    const [pbnSearch, setPbnSearch] = useState('');
-
-
+  // state for PBN dropdown
+  const [pbns, setPbns] = useState<DropdownItem[]>([]);
+  const [pbnSearch, setPbnSearch] = useState('');
 
   // layout helpers
   const detailsWrapRef = useRef<HTMLDivElement>(null);
@@ -133,30 +150,36 @@ export default function Purchase_journal_form() {
     return s ? JSON.parse(s) : null;
   }, []);
 
+const companyIdParam: number | null = user?.company_id ? Number(user.company_id) : null;
+
+
   // -------------------------------
   // Dropdown data loads + mapping
   // -------------------------------
   useEffect(() => {
     (async () => {
       try {
-        // Vendors: controller already shapes { code, label, description }
-        const { data } = await napi.get('/pj/vendors', { params: { company_id: user?.company_id }});
+        const { data } = await napi.get('/pj/vendors', { params: { company_id: user?.company_id } });
         const items: DropdownItem[] = (data || []).map((v: any) => ({
           code: String(v.code ?? v.vend_code ?? v.vend_id ?? ''),
           description: v.description ?? v.vend_name ?? v.vendor_name ?? '',
           label: v.label ?? v.code ?? '',
         }));
         setVendors(items);
-      } catch { setVendors([]); }
+      } catch {
+        setVendors([]);
+      }
     })();
   }, [user?.company_id]);
 
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await napi.get('/pj/accounts', { params: { company_id: user?.company_id }});
+        const { data } = await napi.get('/pj/accounts', { params: { company_id: user?.company_id } });
         setAccounts(Array.isArray(data) ? data : []);
-      } catch { setAccounts([]); }
+      } catch {
+        setAccounts([]);
+      }
     })();
   }, [user?.company_id]);
 
@@ -170,7 +193,9 @@ export default function Purchase_journal_form() {
           label: String(r.code ?? r.sugar_code ?? r.sugar_type ?? ''),
         }));
         setSugarTypes(items);
-      } catch { setSugarTypes([]); }
+      } catch {
+        setSugarTypes([]);
+      }
     })();
   }, []);
 
@@ -184,63 +209,59 @@ export default function Purchase_journal_form() {
           label: String(r.code ?? r.crop_year ?? r.year ?? ''),
         }));
         setCropYears(items);
-      } catch { setCropYears([]); }
+      } catch {
+        setCropYears([]);
+      }
     })();
   }, []);
 
-  /*const loadMills = async (asOf?: string) => {
+  const loadMills = async () => {
     try {
-      const url = asOf ? '/api/mills/effective' : '/api/mills';
-      const { data } = await napi.get(url, { params: asOf ? { as_of: asOf } : {} });
-      const items: DropdownItem[] = (Array.isArray(data) ? data : []).map((r: any) => ({
-        code: String(r.code ?? r.mill_id ?? r.code_id ?? ''),
-        description: String(r.description ?? r.mill_name ?? r.name ?? ''),
-        label: String(r.code ?? r.mill_id ?? ''),
-      }));
-      setMills(items);
-    } catch { setMills([]); }
+      const { data } = await napi.get('/pj/mills', {
+        params: { company_id: user?.company_id },
+      });
+      setMills(Array.isArray(data) ? data : []);
+    } catch {
+      setMills([]);
+    }
   };
+  useEffect(() => { loadMills(); }, [user?.company_id]);
 
-  // load mills initially and whenever purchase date changes (for "effective" list)
-  useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);*/
+  useEffect(() => {
+    if (mainId) refreshEditApproval();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mainId]);
 
-// REMOVE normalizeMillCode and any previous loadMills definitions
+useEffect(() => {
+  if (!mainId) return;
 
-const loadMills = async (asOf?: string) => {
-  try {
-    const params: any = { company_id: user?.company_id };
-    if (asOf) params.as_of = asOf;
+  // refresh when user comes back to the tab/window
+  const onFocus = () => refreshEditApproval();
+  window.addEventListener('focus', onFocus);
 
-    const url = asOf ? '/mills/effective' : '/mills';
-    const { data } = await napi.get(url, { params });
+  // refresh when switching tabs (visibility change)
+  const onVis = () => {
+    if (!document.hidden) refreshEditApproval();
+  };
+  document.addEventListener('visibilitychange', onVis);
 
-    // Map to exactly two fields in a fixed order: code, description
-    const items = (Array.isArray(data) ? data : [])
-      .map((r: any) => {
-        const id = String(r.mill_id ?? '').trim();
-        const code =
-          id && id !== '0' && id.toLowerCase() !== 'null'
-            ? id
-            : String(r.prefix ?? '').trim(); // fallback only if id is unusable
+  // polling safety net (approval can happen anytime)
+const t = window.setInterval(() => {
+  refreshEditApproval();
 
-        return {
-          code,                                        // what you save/return
-          description: String(r.mill_name ?? '').trim() // what you display
-        };
-      })
-      .filter(it => it.code); // drop empties just in case
-
-    setMills(items);
-  } catch {
-    setMills([]);
+  // ✅ if cancelled, also poll uncancel approval status
+  if (isCancelled) {
+    refreshActionApproval('uncancel', mainId);
   }
-};
-
-// keep this
-useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
+}, 3000);
 
 
-
+  return () => {
+    window.removeEventListener('focus', onFocus);
+    document.removeEventListener('visibilitychange', onVis);
+    window.clearInterval(t);
+  };
+}, [mainId, isCancelled]);
 
 
   // -------------------------------
@@ -252,20 +273,24 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
         params: { company_id: user?.company_id || '', q: txSearch || '' },
       });
       setTxOptions(Array.isArray(data) ? data : []);
-    } catch { setTxOptions([]); }
+    } catch {
+      setTxOptions([]);
+    }
   };
   useEffect(() => { fetchTransactions(); /* eslint-disable-next-line */ }, [txSearch]);
 
   const txDropdownItems = useMemo<DropdownItem[]>(() => {
     return (txOptions || []).map((o) => ({
       code: String(o.id),
-      cp_no: o.cp_no,
-      vend_id: o.vend_id,
+      id: String(o.id),
+      cp_no: String(o.cp_no || ''),
+      vend_id: String(o.vend_id || ''),
+      vend_name: String(o.vend_name || ''),
       purchase_date: fmtDate(o.purchase_date),
-      purchase_amount: o.purchase_amount,
-      invoice_no: o.invoice_no,
-      label: o.cp_no,
-      description: o.vend_id,
+      purchase_amount: Number(o.purchase_amount || 0),
+      rr_no: String(o.rr_no || ''),
+      label: String(o.cp_no || ''),
+      description: String(o.vend_name || o.vend_id || ''),
     }));
   }, [txOptions]);
 
@@ -279,8 +304,18 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     setCpNo(''); setVendorId(''); setVendorName('');
     setPurchaseDate(''); setCropYear(''); setSugarType(''); setMillCode('');
     setExplanation(''); setBookingNo(''); setInvoiceNo('');
-    setMainId(null); setLocked(false); setGridLocked(false); setHotEnabled(false);
+    setMainId(null);
+
+    setIsCancelled(false);
+    setIsBalanced(true);
+    setEditApproval({ exists: false });
+
+    setLocked(false);
+    setGridLocked(false);
+    setHotEnabled(false);
     setTableData([emptyRow()]);
+    setPrintOpen(false);
+    setDownloadOpen(false);
   };
 
   // -------------------------------
@@ -321,7 +356,7 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
         await Swal.fire({ icon: 'warning', title: 'Unbalanced transactions found', html, confirmButtonText: 'OK' });
         return;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     try {
       const gen = await napi.get('/purchase/generate-cp-number', { params: { company_id: user?.company_id } });
@@ -336,7 +371,6 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
         company_id: user?.company_id,
         user_id: user?.id,
 
-        // 🔹 extra header fields
         crop_year: cropYear,
         sugar_type: sugarType,
         mill_id: millCode,
@@ -356,24 +390,317 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
     }
   };
 
-  const handleUpdateMain = () => { setLocked(false); setGridLocked(false); toast.success('Editing enabled.'); };
+const handleUpdateMain = async () => {
+  if (!mainId) return;
+  if (isCancelled) return toast.error('Cancelled transaction cannot be modified.');
 
-  const handleCancelTxn = async () => {
-    if (!mainId) return;
-    const confirmed = await Swal.fire({ title: 'Cancel this transaction?', text: 'This will mark the transaction as CANCELLED.', icon: 'warning', showCancelButton: true, confirmButtonText: 'Yes, cancel it' });
-    if (!confirmed.isConfirmed) return;
+  try {
+    // 1) Require ACTIVE edit approval window (same as Cash Receipt)
+    const st = await getApprovalStatus('edit', mainId);
+    if (!st?.approved_active) {
+      toast.error('No active edit approval window. Please request edit again.');
+      setLocked(true);
+      setGridLocked(true);
+      return;
+    }
+
+    // 2) Save header changes
+    await napi.post('/purchase/update-main', {
+      id: mainId,
+      cp_no: cpNo,
+      vend_id: vendorId,
+      purchase_date: purchaseDate,
+      explanation,
+      crop_year: cropYear,
+      sugar_type: sugarType,
+      mill_id: millCode,
+      booking_no: bookingNo,
+      company_id: companyIdParam,
+
+      user_id: user?.id,
+    });
+
+    // 3) Consume/release the approval window (important)
+    await releaseEditApproval(mainId);
+
+    // 4) Reload from server so you immediately see updated values
+    await loadPurchase(String(mainId));
+
+    // 5) Force back to view mode
+    setLocked(true);
+    setGridLocked(true);
+
+    toast.success('Changes saved.');
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to save changes.');
+  }
+};
+
+
+const handleSaveMainNoApproval = async () => {
+  if (!mainId) return;
+  if (isCancelled) return toast.error('Cancelled transaction cannot be modified.');
+
+  try {
+await napi.post('/purchase/update-main-no-approval', {
+  id: mainId,
+  company_id: companyIdParam,
+  purchase_date: purchaseDate,
+  explanation,
+
+  // optional (only if you allowed them backend-side):
+  vend_id: vendorId,
+  crop_year: cropYear,
+  sugar_type: sugarType,
+  mill_id: millCode,
+  booking_no: bookingNo,
+});
+
+
+    // reload so values are consistent
+    await loadPurchase(String(mainId));
+
+    // keep in view mode
+    setLocked(true);
+    setGridLocked(true);
+
+    toast.success('Main saved.');
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to save main.');
+  }
+};
+
+
+
+
+// -------------------------------
+// Approval helpers (same idea as Cash Receipt)
+// -------------------------------
+// -------------------------------
+// Approval helpers (Purchase Journal) - FIXED (no stale mainId)
+// -------------------------------
+type ApprovalStatus = {
+  exists?: boolean;
+  status?: string;
+  approved_active?: boolean;
+  expires_at?: string | null;
+  id?: number;
+  reason?: string | null;
+  consumed_at?: string | null; // ✅ add this line
+};
+
+
+const getApprovalStatus = async (action: string, recordId?: number): Promise<ApprovalStatus> => {
+  const rid = recordId ?? mainId ?? undefined;
+  if (!rid) return {};
+  const { data } = await napi.get(APPROVAL_STATUS_URL, {
+
+    params: {
+      module: MODULE,
+      record_id: rid,
+      company_id: companyIdParam, // number|null
+      action,
+    },
+  });
+  return data || {};
+};
+
+const releaseEditApproval = async (recordId?: number) => {
+  const rid = recordId ?? mainId ?? undefined;
+  if (!rid) return;
+  await napi.post('/approvals/release-by-subject', {
+    module: MODULE,
+    record_id: rid,
+    company_id: companyIdParam, // number|null
+    action: 'edit',
+  });
+};
+
+const refreshEditApproval = async (recordId?: number) => {
+  const rid = recordId ?? mainId ?? undefined;
+  if (!rid) return;
+
+  try {
+    const { data } = await napi.get(APPROVAL_STATUS_URL, {
+
+      params: {
+        module: MODULE,
+        record_id: rid,
+        company_id: companyIdParam, // number|null
+        action: 'edit',
+      },
+    });
+
+    // if API says none exists, hard lock (view mode)
+    if (!data?.exists) {
+      setEditApproval({ exists: false });
+      setLocked(true);
+      setGridLocked(true);
+      return;
+    }
+
+    const active = !!data?.approved_active;
+
+    setEditApproval({
+      exists: true,
+      id: data?.id ? Number(data.id) : undefined,
+      status: data?.status,
+      approved_active: active,
+      expires_at: data?.expires_at ?? null,
+      reason: data?.reason ?? null,
+    });
+
+    // single source of truth
+    setLocked(!active);
+    setGridLocked(!active);
+  } catch {
+    setEditApproval({ exists: false });
+    setLocked(true);
+    setGridLocked(true);
+  }
+};
+
+
+const statusLower = (s?: string) => String(s || '').toLowerCase();
+
+const refreshActionApproval = async (action: 'cancel' | 'delete' | 'uncancel', recordId?: number) => {
+  const rid = recordId ?? mainId ?? undefined;
+  if (!rid) return;
+
+  try {
+    const data = await getApprovalStatus(action, rid);
+    setActionApproval(prev => ({
+      ...prev,
+      [action]: {
+        exists: !!data?.exists,
+        status: data?.status,
+        reason: data?.reason ?? null,
+        consumed_at: (data as any)?.consumed_at ?? null,
+      },
+    }));
+  } catch {
+    setActionApproval(prev => ({ ...prev, [action]: { exists: false } }));
+  }
+};
+
+
+
+
+
+
+  const approvalLabel = useMemo(() => {
+    if (!mainId) return '';
+    if (!editApproval?.exists) return 'Approval: none';
+    const s = String(editApproval.status || '').toLowerCase();
+    return `Approval: ${s || 'unknown'}`;
+  }, [mainId, editApproval]);
+
+
+
+  // -------------------------------
+  // Approval Request Modals
+  // -------------------------------
+
+
+
+const requestApprovalModal = async (action: 'edit' | 'cancel' | 'delete' | 'uncancel') => {
+    if (!mainId) return toast.info('Select a transaction first.');
+
+// cancelled rules:
+// - edit/cancel blocked
+// - delete allowed
+// - uncancel allowed (approval-based)
+if (isCancelled && (action === 'edit' || action === 'cancel')) {
+  return toast.error('Cancelled transaction cannot be edited or cancelled again.');
+}
+
+
+    // EDIT pending should not open modal (matches other modules)
+    if (action === 'edit' && isEditPending) {
+      return;
+    }
+
+const title =
+  action === 'edit'
+    ? 'Request Edit Approval'
+    : action === 'cancel'
+      ? 'Request approval to CANCEL this purchase?'
+      : action === 'uncancel'
+        ? 'Request approval to UNCANCEL this purchase?'
+        : 'Request approval to DELETE this purchase?';
+
+
+    const placeholder =
+      action === 'edit'
+        ? 'Explain why you need to edit this entry...'
+        : 'Enter reason...';
+
+    const required = true; // ✅ always required (matches Cash Receipt / Sales Journal)
+
+    const res = await Swal.fire({
+      title,
+      input: 'textarea',
+      inputPlaceholder: placeholder,
+      inputAttributes: { 'aria-label': placeholder },
+      showCancelButton: true,
+      confirmButtonText: action === 'edit' ? 'OK' : 'Request',
+      cancelButtonText: 'Cancel',
+      preConfirm: (val) => {
+        const reason = String(val || '').trim();
+        if (required && !reason) {
+          Swal.showValidationMessage('Reason is required.');
+          return;
+        }
+        return reason;
+      },
+    });
+
+    if (!res.isConfirmed) return;
+
+    const reason = String(res.value || '').trim();
+
     try {
-      await napi.post('/purchase/cancel', { id: mainId, flag: '1', company_id: user?.company_id || '' });
-      setLocked(true); setGridLocked(true); toast.success('Transaction has been cancelled.'); fetchTransactions();
-    } catch { toast.error('Failed to cancel transaction.'); }
-  };
+await napi.post('/approvals/request-edit', {
+  module: MODULE,
+  record_id: mainId,
+  company_id: companyIdParam,
+  action,
+  reason,
+});
 
-  const handleDeleteTxn = async () => {
-    if (!mainId) return;
-    const confirmed = await Swal.fire({ title: 'Delete this transaction?', text: 'This action is irreversible.', icon: 'error', showCancelButton: true, confirmButtonText: 'Delete' });
-    if (!confirmed.isConfirmed) return;
-    try { await napi.delete(`/purchase/${mainId}`); resetForm(); toast.success('Transaction deleted.'); fetchTransactions(); }
-    catch { toast.error('Failed to delete transaction.'); }
+
+      setEditApproval(prev => ({
+        ...prev,
+        exists: true,
+        status: 'pending',
+        approved_active: false,
+        reason,
+      }));
+
+      setLocked(true);
+      setGridLocked(true);
+
+
+toast.success(
+  action === 'edit'
+    ? 'Edit approval request submitted.'
+    : action === 'cancel'
+      ? 'Cancel approval request submitted.'
+      : action === 'uncancel'
+        ? 'Uncancel approval request submitted.'
+        : 'Delete approval request submitted.'
+);
+
+
+if (action === 'edit') {
+  await refreshEditApproval(mainId);
+} else {
+  await refreshActionApproval(action as any, mainId);
+}
+
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Failed to submit approval request.');
+    }
   };
 
   // -------------------------------
@@ -413,96 +740,137 @@ useEffect(() => { loadMills(purchaseDate || undefined); }, [purchaseDate]);
   // -------------------------------
   // Load existing transaction
   // -------------------------------
-  const handleSelectTransaction = async (selectedId: string) => {
-    if (!selectedId) return;
-    try {
-      setSearchId(selectedId);
-      const { data } = await napi.get(`/purchase/${selectedId}`, { params: { company_id: user?.company_id } });
-
-      const m = data.main ?? data;
-      setMainId(m.id);
-      setCpNo(m.cp_no);
-      setVendorId(String(m.vend_id || ''));
-      const selV = vendors.find((v) => String(v.code) === String(m.vend_id));
-      setVendorName(selV?.description || selV?.label || '');
-      setPurchaseDate(fmtDate(m.purchase_date));
-      setExplanation(m.explanation ?? '');
-      setInvoiceNo(m.invoice_no ?? '');
-      setCropYear(String(m.crop_year ?? ''));
-      setSugarType(String(m.sugar_type ?? ''));
-      setMillCode(String(m.mill_id ?? ''));
-      setBookingNo(String(m.booking_no ?? ''));
-
-      const details = (data.details || []).map((d: any) => ({
-        id: d.id,
-        acct_code: `${d.acct_code};${d.acct_desc || findDesc(d.acct_code)}`,
-        acct_desc: d.acct_desc,
-        debit: Number(d.debit ?? 0),
-        credit: Number(d.credit ?? 0),
-        persisted: true,
-      }));
-      setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
-      setHotEnabled(true);
-      setLocked(true);
-      setGridLocked(true);
-      toast.success('Transaction loaded.');
-    } catch {
-      toast.error('Unable to load the selected transaction.');
-    }
+  const normalizeCancel = (flag: any) => {
+    const v = String(flag ?? '').toLowerCase();
+    return v === 'y' || v === 'c' || v === 'd';
   };
 
-  const apiBase = (napi.defaults.baseURL || '/api').replace(/\/+$/,'');
+  const normalizeBalanced = (v: any) => {
+    if (typeof v === 'boolean') return v;
+    const s = String(v ?? '').toLowerCase();
+    return s === '1' || s === 'true' || s === 'y';
+  };
+
+const loadPurchase = async (selectedId: string) => {
+  const { data } = await napi.get(`/purchase/${selectedId}`, { params: { company_id: user?.company_id } });
+
+  const m = data.main ?? data;
+  const cancelled = normalizeCancel(m.is_cancel);
+  const balanced = normalizeBalanced(m.is_balanced);
+
+  setIsCancelled(cancelled);
+  setIsBalanced(balanced);
+
+  setMainId(m.id);
+  setCpNo(m.cp_no);
+  setVendorId(String(m.vend_id || ''));
+  const selV = vendors.find((v) => String(v.code) === String(m.vend_id));
+  setVendorName(selV?.description || selV?.label || '');
+  setPurchaseDate(fmtDate(m.purchase_date));
+  setExplanation(m.explanation ?? '');
+  setInvoiceNo(m.invoice_no ?? '');
+  setCropYear(String(m.crop_year ?? ''));
+  setSugarType(String(m.sugar_type ?? ''));
+  setMillCode(String(m.mill_id ?? ''));
+  setBookingNo(String(m.booking_no ?? ''));
+
+  const details = (data.details || []).map((d: any) => ({
+    id: d.id,
+    acct_code: `${d.acct_code};${d.acct_desc || findDesc(d.acct_code)}`,
+    acct_desc: d.acct_desc,
+    debit: Number(d.debit ?? 0),
+    credit: Number(d.credit ?? 0),
+    persisted: true,
+  }));
+  setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
+  setHotEnabled(true);
+
+  setLocked(true);
+  setGridLocked(true);
+
+  await refreshActionApproval('uncancel', m.id);
+await refreshActionApproval('delete', m.id);
+await refreshActionApproval('cancel', m.id);
+
+};
+
+
+
+
+const handleSelectTransaction = async (selectedId: string) => {
+  if (!selectedId) return;
+  try {
+    setSearchId(selectedId);
+    await loadPurchase(selectedId);
+    toast.success('Transaction loaded.');
+  } catch {
+    toast.error('Unable to load the selected transaction.');
+  }
+};
+
+
+  const apiBase = (napi.defaults.baseURL || '/api').replace(/\/+$/, '');
+
+const canExport = !!mainId && !isCancelled && !!isBalanced;
+
+// ✅ single source of truth
+const editStatus = String(editApproval?.status || '').toLowerCase();
+const isEditPending = !!mainId && !!editApproval?.exists && editStatus === 'pending';
+const isEditApprovedActive = !!mainId && !!editApproval?.approved_active; // edit window open
+
+const uncancelStatus = statusLower(actionApproval.uncancel?.status);
+const isUncancelPending = !!mainId && !!actionApproval.uncancel?.exists && uncancelStatus === 'pending';
+
+const deleteStatus = statusLower(actionApproval.delete?.status);
+const isDeletePending = !!mainId && !!actionApproval.delete?.exists && deleteStatus === 'pending';
 
 
   // -------------------------------
   // Print / Download helpers
   // -------------------------------
-const handleOpenPdf = () => {
-  if (!mainId) return toast.info('Select or save a transaction first.');
-  const url = `${apiBase}/purchase/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`;
-  setPdfUrl(url);
-  setShowPdf(true);
-};
+  const handleOpenPdf = () => {
+    if (!mainId) return toast.info('Select or save a transaction first.');
+    const url = `${apiBase}/purchase/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id || '')}`;
+    setPdfUrl(url);
+    setShowPdf(true);
+  };
 
-const handleDownloadExcel = async () => {
-  if (!mainId) return toast.info('Select or save a transaction first.');
-  try {
-    const res = await napi.get(`/purchase/form-excel/${mainId}`, {
-      responseType: 'blob',
-      params: { company_id: user?.company_id || '' },
-      withCredentials: true,
-    });
+  const handleDownloadExcel = async () => {
+    if (!mainId) return toast.info('Select or save a transaction first.');
+    try {
+      const res = await napi.get(`/purchase/form-excel/${mainId}`, {
+        responseType: 'blob',
+        params: { company_id: user?.company_id || '' },
+        withCredentials: true,
+      });
 
-    // If server returned HTML (e.g., unbalanced warning), show it
-    const ct = String(res.headers['content-type'] || '');
-    if (!ct.includes('sheet') && !ct.includes('excel') && !ct.includes('octet-stream')) {
-      // Try to read error text (best-effort)
-      const text = await (res.data?.text?.().catch(()=>null));
-      toast.error(text ? `Download failed: ${text.slice(0,200)}…` : 'Download failed.');
-      return;
+      const ct = String(res.headers['content-type'] || '');
+      if (!ct.includes('sheet') && !ct.includes('excel') && !ct.includes('octet-stream')) {
+        const text = await (res.data?.text?.().catch(() => null));
+        toast.error(text ? `Download failed: ${text.slice(0, 200)}…` : 'Download failed.');
+        return;
+      }
+
+      const name =
+        res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1]
+        || `PurchaseVoucher_${cpNo || mainId}.xlsx`;
+
+      const blob = new Blob([res.data], {
+        type: ct || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Excel downloaded.');
+    } catch (e: any) {
+      const msg = e?.response?.status
+        ? `HTTP ${e.response.status}: ${e.response.statusText || 'Error'}`
+        : (e?.message || 'Download failed.');
+      toast.error(msg);
     }
-
-    const name =
-      res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1]
-      || `PurchaseVoucher_${cpNo || mainId}.xlsx`;
-
-    const blob = new Blob([res.data], {
-      type: ct || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-    toast.success('Excel downloaded.');
-  } catch (e: any) {
-    const msg = e?.response?.status
-      ? `HTTP ${e.response.status}: ${e.response.statusText || 'Error'}`
-      : (e?.message || 'Download failed.');
-    toast.error(msg);
-  }
-};
-
+  };
 
   // -------------------------------
   // UI callbacks
@@ -520,270 +888,375 @@ const handleDownloadExcel = async () => {
     }
   };
 
-
-const getTotals = (rows: SalesDetailRow[]) => {
-  const sumD = rows.reduce((t, r) => t + (Number(r.debit)  || 0), 0);
-  const sumC = rows.reduce((t, r) => t + (Number(r.credit) || 0), 0);
-  const balanced = Math.abs(sumD - sumC) < 0.005; // 0.5 cent tolerance
-  return { sumD, sumC, balanced };
-};
-
-const fmtMoney = (n: number) =>
-  (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-
-// Start a brand-new transaction
-const handleNew = async () => {
-  // any meaningful content in the grid?
-  const hasAnyDetail = tableData.some(
-    r =>
+  const getTotals = (rows: PurchaseDetailRow[]) => {
+    const valid = (rows || []).filter(r =>
       (r.acct_code && r.acct_code.trim() !== '') ||
       (Number(r.debit) || 0) > 0 ||
       (Number(r.credit) || 0) > 0
-  );
+    );
+    const sumD = valid.reduce((t, r) => t + (Number(r.debit) || 0), 0);
+    const sumC = valid.reduce((t, r) => t + (Number(r.credit) || 0), 0);
+    const balanced = Math.abs(sumD - sumC) < 0.005;
+    return { sumD, sumC, balanced };
+  };
 
-  if (hasAnyDetail) {
-    const { sumD, sumC, balanced } = getTotals(tableData);
+  const fmtMoney = (n: number) =>
+    (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-    if (!balanced) {
-      await Swal.fire({
-        title: 'Transaction not balanced',
-        html: `Debit <b>${fmtMoney(sumD)}</b> must equal Credit <b>${fmtMoney(sumC)}</b> before starting a new one.`,
-        icon: 'error',
-        confirmButtonText: 'OK',
+  const totals = useMemo(() => getTotals(tableData), [tableData]);
+
+  // keep isBalanced in sync with current grid totals (best UX match to other modules)
+  useEffect(() => {
+    if (!mainId) return;
+    if (isCancelled) return;
+    setIsBalanced(totals.balanced);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totals.balanced, mainId, isCancelled]);
+
+  // Start a brand-new transaction
+  const handleNew = async () => {
+    const hasAnyDetail = tableData.some(
+      r =>
+        (r.acct_code && r.acct_code.trim() !== '') ||
+        (Number(r.debit) || 0) > 0 ||
+        (Number(r.credit) || 0) > 0
+    );
+
+    if (hasAnyDetail) {
+      const { sumD, sumC, balanced } = getTotals(tableData);
+      if (!balanced) {
+        await Swal.fire({
+          title: 'Transaction not balanced',
+          html: `Debit <b>${fmtMoney(sumD)}</b> must equal Credit <b>${fmtMoney(sumC)}</b> before starting a new one.`,
+          icon: 'error',
+          confirmButtonText: 'OK',
+        });
+        return;
+      }
+
+      const ok = await Swal.fire({
+        title: 'Start a new transaction?',
+        text: 'This will clear the current form.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Yes, New',
       });
-      return; // stop — user must balance first
+      if (!ok.isConfirmed) return;
+    } else {
+      const ok = await Swal.fire({
+        title: 'Start a new transaction?',
+        text: 'This will clear the current form.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Yes, New',
+      });
+      if (!ok.isConfirmed) return;
     }
 
-    const ok = await Swal.fire({
-      title: 'Start a new transaction?',
-      text: 'This will clear the current form.',
-      icon: 'question',
-      showCancelButton: true,
-      confirmButtonText: 'Yes, New',
-    });
-    if (!ok.isConfirmed) return;
-  } else {
-    // No details — still confirm to avoid accidental clearing
-    const ok = await Swal.fire({
-      title: 'Start a new transaction?',
-      text: 'This will clear the current form.',
-      icon: 'question',
-      showCancelButton: true,
-      confirmButtonText: 'Yes, New',
-    });
-    if (!ok.isConfirmed) return;
-  }
+    resetForm();
+    toast.success('Form is ready for a new entry.');
+  };
 
-  // Clear the form (use your existing helper)
-  resetForm();
-  toast.success('Form is ready for a new entry.');
-};
+  const fmtMDY = (d?: string) => d ? new Date(d).toLocaleDateString() : '';
 
+  const loadPbns = async () => {
+    try {
+      const params: any = {
+        company_id: user?.company_id || '',
+        q: pbnSearch || '',
+      };
+      if (vendorId) params.vend_code = vendorId;
+      if (sugarType) params.sugar_type = sugarType;
+      if (cropYear) params.crop_year = cropYear;
 
+      const { data } = await napi.get('/pbn/list', { params });
 
-const fmtMDY = (d?: string) => d ? new Date(d).toLocaleDateString() : '';
+      const items: DropdownItem[] = (Array.isArray(data) ? data : []).map((r: any) => ({
+        code: String(r.pbn_number),
+        label: String(r.pbn_number),
+        description: fmtMDY(r.pbn_date),
+        vendor_name: r.vendor_name,
+        vend_code: r.vend_code,
+        sugar_type: r.sugar_type,
+        crop_year: r.crop_year,
+      }));
+      setPbns(items);
+    } catch {
+      setPbns([]);
+    }
+  };
 
-const loadPbns = async () => {
-  try {
-    const params: any = {
-      company_id: user?.company_id || '',
-      q: pbnSearch || '',
-    };
-    if (vendorId)  params.vend_code  = vendorId;   // your vendor dropdown stores vend_code
-    if (sugarType) params.sugar_type = sugarType;
-    if (cropYear)  params.crop_year  = cropYear;
-
-    const { data } = await napi.get('/pbn/list', { params });
-
-    const items: DropdownItem[] = (Array.isArray(data) ? data : []).map((r: any) => ({
-      code: String(r.pbn_number),              // what you’ll save into booking_no
-      label: String(r.pbn_number),
-      description: fmtMDY(r.pbn_date),         // 2nd column
-      // (keep extras if you ever want to show more columns)
-      vendor_name: r.vendor_name,
-      vend_code:   r.vend_code,
-      sugar_type:  r.sugar_type,
-      crop_year:   r.crop_year,
-    }));
-    setPbns(items);
-  } catch {
-    setPbns([]);
-  }
-};
-
-// Load when key filters or search change
-useEffect(() => { loadPbns(); },
-  [user?.company_id, vendorId, sugarType, cropYear, pbnSearch]);
-
-
-
+  useEffect(() => { loadPbns(); },
+    [user?.company_id, vendorId, sugarType, cropYear, pbnSearch]);
 
   // -------------------------------
   // Render
   // -------------------------------
   return (
-    <div className="space-y-4 p-6">
+    <div className="min-h-screen pb-40 space-y-4 p-6">
       <ToastContainer position="top-right" autoClose={3000} />
 
       <div className="bg-blue-50 shadow-md rounded-lg p-6 space-y-4 border border-blue-300">
         <h2 className="text-xl font-bold text-blue-800 mb-2">PURCHASE JOURNAL</h2>
 
+        {/* Header form (thin, 2-column layout) */}
+        <div className="grid grid-cols-2 gap-4">
+          {/* Row 1 — Search Transaction (full width) */}
+          <div className="col-span-2">
+            <DropdownWithHeaders
+              label="Search Transaction"
+              value={searchId}
+              onChange={(v) => handleSelectTransaction(v)}
+              items={txDropdownItems}
+              search={txSearch}
+              onSearchChange={setTxSearch}
+              headers={["Id", "Purchase No", "Vendor", "Date", "Amount", "Receiving #"]}
+              columnKeys={["id", "cp_no", "vend_name", "purchase_date", "purchase_amount", "rr_no"]}
+              columnWidths={["60px", "120px", "160px", "110px", "120px", "120px"]}
+              dropdownPositionStyle={{ width: '820px' }}
+              inputClassName="p-2 text-sm bg-white"
+            />
+          </div>
 
-       {/* Header form (thin, 2-column layout) */}
-<div className="grid grid-cols-2 gap-4">
-  {/* Row 1 — Search Transaction (full width) */}
-  <div className="col-span-2">
-    <DropdownWithHeaders
-      label="Search Transaction"
-      value={searchId}
-      onChange={(v) => handleSelectTransaction(v)}
-      items={txDropdownItems}
-      search={txSearch}
-      onSearchChange={setTxSearch}
-      headers={["Id","Purchase No","Vendor","Date","Amount","Vendor Inv #"]}
-      columnWidths={["60px","120px","160px","110px","120px","120px"]}
-      dropdownPositionStyle={{ width: '820px' }}
-      inputClassName="p-2 text-sm bg-white"
-    />
+          {/* Row 2 — Vendor | Date */}
+          <div>
+            <DropdownWithHeaders
+              label="Vendor"
+              value={vendorId}
+              onChange={(v) => {
+                setVendorId(v);
+                const sel = vendors.find((vv) => String(vv.code) === String(v));
+                setVendorName(sel?.description || '');
+              }}
+              items={vendors}
+              search={vendorSearch}
+              onSearchChange={setVendorSearch}
+              headers={["Code", "Description"]}
+              columnWidths={["140px", "520px"]}
+              dropdownPositionStyle={{ width: '700px' }}
+              inputClassName="p-2 text-sm bg-white"
+            />
+            {vendorName && (
+              <div className="mt-1 text-xs font-semibold text-gray-700">Vendor: {vendorName}</div>
+            )}
+          </div>
+
+          <div>
+            <label className="block mb-1">Date</label>
+<input
+  type="date"
+  value={purchaseDate}
+  disabled={isCancelled}
+  onChange={(e) => setPurchaseDate(e.target.value)}
+  className={`w-full border p-2 ${isCancelled ? 'bg-gray-100 text-gray-400' : 'bg-blue-100 text-blue-900'}`}
+/>
+
+          </div>
+
+          {/* Row 3 — Crop Year | Sugar Type */}
+          <div>
+            <DropdownWithHeaders
+              label="Crop Year"
+              value={cropYear}
+              onChange={setCropYear}
+              items={cropYears}
+              search={cropSearch}
+              onSearchChange={setCropSearch}
+              headers={["Code", "Description"]}
+              columnWidths={["120px", "260px"]}
+              dropdownPositionStyle={{ width: '420px' }}
+              inputClassName="p-2 text-sm bg-white"
+            />
+          </div>
+
+          <div>
+            <DropdownWithHeaders
+              label="Sugar Type"
+              value={sugarType}
+              onChange={setSugarType}
+              items={sugarTypes}
+              search={sugarSearch}
+              onSearchChange={setSugarSearch}
+              headers={["Code", "Description"]}
+              columnWidths={["120px", "260px"]}
+              dropdownPositionStyle={{ width: '420px' }}
+              inputClassName="p-2 text-sm bg-white"
+            />
+          </div>
+
+          {/* Row 4 — Mill Code | Explanation */}
+          <div>
+            <DropdownWithHeaders
+              label="Mill Code"
+              value={millCode}
+              onChange={setMillCode}
+              items={mills}
+              search={millSearch}
+              onSearchChange={setMillSearch}
+              headers={["Code", "Description"]}
+              columnWidths={["120px", "260px"]}
+              dropdownPositionStyle={{ width: '420px' }}
+              inputClassName="p-2 text-sm bg-white"
+            />
+          </div>
+
+          <div>
+            <label className="block mb-1">Explanation</label>
+<input
+  value={explanation}
+  disabled={isCancelled}
+  onChange={(e) => setExplanation(e.target.value)}
+  className={`w-full border p-2 ${isCancelled ? 'bg-gray-100 text-gray-400' : 'bg-blue-100 text-blue-900'}`}
+/>
+
+          </div>
+
+          {/* Row 5 — Booking # */}
+          <div>
+            <DropdownWithHeaders
+              label="Booking #"
+              value={bookingNo}
+              onChange={setBookingNo}
+              items={pbns}
+              search={pbnSearch}
+              onSearchChange={setPbnSearch}
+              headers={["PBN No", "PBN Date"]}
+              columnKeys={["label", "description"]}
+              columnWidths={["140px", "140px"]}
+              dropdownPositionStyle={{ width: '360px' }}
+              inputClassName="p-2 text-sm bg-white"
+            />
+          </div>
+          <div></div>
+        </div>
+
+        {/* ✅ Header summary row (Balanced pill + totals + approval) — matches other modules */}
+        {mainId && (
+          <div className="mt-2">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-800">
+              <div className="font-semibold">
+                Vendor: <span className="font-normal">{vendorName || vendorId || ''}</span>
+              </div>
+
+              <div>CP No: <span className="font-semibold">{cpNo || ''}</span></div>
+
+              <div>Total Debit: <span className="font-semibold">{fmtMoney(totals.sumD)}</span></div>
+              <div>Total Credit: <span className="font-semibold">{fmtMoney(totals.sumC)}</span></div>
+
+              {/* pill in the same row */}
+              <div className="ml-2">
+                {isCancelled ? (
+                  <span className="px-2 py-1 rounded bg-red-100 text-red-700 border border-red-200 text-xs font-semibold">CANCELLED</span>
+                ) : isBalanced ? (
+                  <span className="px-2 py-1 rounded bg-green-100 text-green-700 border border-green-200 text-xs font-semibold">Balanced</span>
+                ) : (
+                  <span className="px-2 py-1 rounded bg-amber-100 text-amber-700 border border-amber-200 text-xs font-semibold">Unbalanced</span>
+                )}
+              </div>
+
+              <div className="ml-2 text-sm text-gray-700">{approvalLabel}</div>
+            </div>
+
+{isEditPending && (
+  <div className="text-sm text-amber-700 mt-1">
+    Edit approval is pending — Reason: {editApproval?.reason || '—'}
   </div>
+)}
 
-  {/* Row 2 — Vendor | Date */}
-  <div>
-    <DropdownWithHeaders
-      label="Vendor"
-      value={vendorId}
-      onChange={(v) => {
-        setVendorId(v);
-        const sel = vendors.find((vv) => String(vv.code) === String(v));
-        setVendorName(sel?.description || '');
-      }}
-      items={vendors}
-      search={vendorSearch}
-      onSearchChange={setVendorSearch}
-      headers={["Code", "Description"]}
-      columnWidths={["140px", "520px"]}
-      dropdownPositionStyle={{ width: '700px' }}
-      inputClassName="p-2 text-sm bg-white"
-    />
-    {vendorName && (
-      <div className="mt-1 text-xs font-semibold text-gray-700">Vendor: {vendorName}</div>
-    )}
-  </div>
-
-  <div>
-    <label className="block mb-1">Date</label>
-    <input
-      type="date"
-      value={purchaseDate}
-      disabled={locked}
-      onChange={(e) => setPurchaseDate(e.target.value)}
-      className="w-full border p-2 bg-blue-100 text-blue-900"
-    />
-  </div>
-
-  {/* Row 3 — Crop Year | Sugar Type */}
-  <div>
-    <DropdownWithHeaders
-      label="Crop Year"
-      value={cropYear}
-      onChange={setCropYear}
-      items={cropYears}
-      search={cropSearch}
-      onSearchChange={setCropSearch}
-      headers={["Code","Description"]}
-      columnWidths={["120px","260px"]}
-      dropdownPositionStyle={{ width: '420px' }}
-      inputClassName="p-2 text-sm bg-white"
-    />
-  </div>
-
-  <div>
-    <DropdownWithHeaders
-      label="Sugar Type"
-      value={sugarType}
-      onChange={setSugarType}
-      items={sugarTypes}
-      search={sugarSearch}
-      onSearchChange={setSugarSearch}
-      headers={["Code","Description"]}
-      columnWidths={["120px","260px"]}
-      dropdownPositionStyle={{ width: '420px' }}
-      inputClassName="p-2 text-sm bg-white"
-    />
-  </div>
-
-  {/* Row 4 — Mill Code | Explanation */}
-  <div>
-    <DropdownWithHeaders
-      label="Mill Code"
-      value={millCode}
-      onChange={setMillCode}
-      items={mills}
-      search={millSearch}
-      onSearchChange={setMillSearch}
-      headers={["Code","Description"]}
-      columnWidths={["120px","260px"]}
-      dropdownPositionStyle={{ width: '420px' }}
-      inputClassName="p-2 text-sm bg-white"
-    />
-  </div>
-
-  <div>
-    <label className="block mb-1">Explanation</label>
-    <input
-      value={explanation}
-      disabled={locked}
-      onChange={(e) => setExplanation(e.target.value)}
-      className="w-full border p-2 bg-blue-100 text-blue-900"
-    />
-  </div>
-
-  {/* Row 5 — Booking # (single field) */}
-  <div>
-{/* Row 5 — Booking # */}
-    <DropdownWithHeaders
-    label="Booking #"
-    value={bookingNo}
-    onChange={setBookingNo}
-    items={pbns}
-    search={pbnSearch}
-    onSearchChange={setPbnSearch}
-    headers={["PBN No","PBN Date"]}          // 2 columns like your old app
-    columnWidths={["140px","140px"]}
-    dropdownPositionStyle={{ width: '360px' }}
-    inputClassName="p-2 text-sm bg-white"
-    />
-  </div>
-  {/* spacer to keep grid alignment */}
-  <div></div>
-</div>
-
+          </div>
+        )}
 
         {/* Actions */}
-        <div className="flex gap-2 mt-3">
-          {!mainId ? (
-            <button onClick={handleSaveMain} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">
-              <CheckCircleIcon className="h-5 w-5" />
-              Save
-            </button>
-          ) : (
-            <>
-              <button onClick={handleUpdateMain} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">
-                <CheckCircleIcon className="h-5 w-5" />
-                Update
-              </button>
+{/* Actions */}
+<div className="flex gap-2 mt-3 items-center">
+  {!mainId ? (
+    <button
+      onClick={handleSaveMain}
+      className="inline-flex items-center gap-2 px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
+    >
+      <CheckCircleIcon className="h-5 w-5" />
+      Save
+    </button>
+  ) : isCancelled ? (
+    <>
+      {/* ✅ CANCELLED: show only Uncancel + Delete (Sales Journal behavior) */}
+      <button
+        type="button"
+        onClick={() => requestApprovalModal('uncancel')}
+        disabled={isUncancelPending}
+        className={`inline-flex items-center gap-2 px-4 py-2 rounded text-white ${
+          isUncancelPending ? 'bg-gray-400 cursor-not-allowed' : 'bg-gray-700 hover:bg-gray-800'
+        }`}
+      >
+        {isUncancelPending ? 'Uncancel Request Pending' : 'Uncancel'}
+      </button>
 
-              <button onClick={handleCancelTxn} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-amber-500 text-white hover:bg-amber-600">
-                Cancel
-              </button>
+      <button
+        type="button"
+        onClick={() => requestApprovalModal('delete')}
+        disabled={isDeletePending}
+        className={`inline-flex items-center gap-2 px-4 py-2 rounded text-white ${
+          isDeletePending ? 'bg-red-300 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'
+        }`}
+      >
+        {isDeletePending ? 'Delete Request Pending' : 'Delete'}
+      </button>
+    </>
+  ) : (
+    <>
+      {/* ✅ NORMAL (not cancelled): keep your existing buttons */}
+      {isEditApprovedActive ? (
+        <button
+          type="button"
+          onClick={handleUpdateMain}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded text-white bg-green-600 hover:bg-green-700"
+        >
+          Save Changes
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => requestApprovalModal('edit')}
+          disabled={isEditPending}
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded text-white ${
+            isEditPending ? 'bg-purple-300 cursor-not-allowed opacity-60' : 'bg-purple-700 hover:bg-purple-800'
+          }`}
+        >
+          {isEditPending ? 'Edit Request Pending' : 'Request to Edit'}
+        </button>
+      )}
 
-              <button onClick={handleDeleteTxn} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-red-600 text-white hover:bg-red-700">
-                Delete
-              </button>
-            </>
-          )}
-        </div>
+      <button
+        type="button"
+        onClick={() => requestApprovalModal('cancel')}
+        className="inline-flex items-center gap-2 px-4 py-2 rounded text-white bg-amber-500 hover:bg-amber-600"
+      >
+        Cancel
+      </button>
+
+      <button
+        type="button"
+        onClick={() => requestApprovalModal('delete')}
+        className="inline-flex items-center gap-2 px-4 py-2 rounded text-white bg-red-600 hover:bg-red-700"
+      >
+        Delete
+      </button>
+{/* ✅ Save Main (same handler as Save Changes) — only shown when NOT cancelled */}
+<button
+  type="button"
+  onClick={handleSaveMainNoApproval}
+  className="inline-flex items-center gap-2 px-4 py-2 rounded text-white bg-slate-600 hover:bg-slate-700"
+>
+  Save Main
+</button>
+
+
+
+
+    </>
+  )}
+</div>
+
       </div>
 
       {/* DETAILS */}
@@ -794,7 +1267,7 @@ useEffect(() => { loadPbns(); },
             className="hot-enhanced"
             ref={hotRef}
             data={tableData}
-            colHeaders={["Account Code","Account Description","Debit","Credit"]}
+            colHeaders={["Account Code", "Account Description", "Debit", "Credit"]}
             columns={[
               {
                 data: 'acct_code',
@@ -816,8 +1289,8 @@ useEffect(() => { loadPbns(); },
                 },
               },
               { data: 'acct_desc', readOnly: true },
-              { data: 'debit',  type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked },
-              { data: 'credit', type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked },
+              { data: 'debit', type: 'numeric', numericFormat: { pattern: '0,0.00' }, readOnly: gridLocked },
+              { data: 'credit', type: 'numeric', numericFormat: { pattern: '0,0.00' }, readOnly: gridLocked },
             ]}
             afterBeginEditing={afterBeginEditingOpenAll}
             afterChange={(changes, source) => {
@@ -871,11 +1344,11 @@ useEffect(() => { loadPbns(); },
                     const rowIndex = selection[0].start.row;
                     const src = (hot?.getSourceData() as PurchaseDetailRow[]) || [];
                     const row = src[rowIndex];
-                    if (!row?.id) { src.splice(rowIndex,1); setTableData([...src]); return; }
-                    const ok = await Swal.fire({ title:'Delete this line?', icon:'warning', showCancelButton:true });
+                    if (!row?.id) { src.splice(rowIndex, 1); setTableData([...src]); return; }
+                    const ok = await Swal.fire({ title: 'Delete this line?', icon: 'warning', showCancelButton: true });
                     if (!ok.isConfirmed) return;
-                    await napi.post('/purchase/delete-detail',{ id: row.id, transaction_id: mainId });
-                    src.splice(rowIndex,1);
+                    await napi.post('/purchase/delete-detail', { id: row.id, transaction_id: mainId });
+                    src.splice(rowIndex, 1);
                     setTableData([...src]);
                     toast.success('Row deleted');
                   }
@@ -894,52 +1367,91 @@ useEffect(() => { loadPbns(); },
       {/* Download / Print / New */}
       <div className="flex gap-3 mt-4 items-center">
         {/* DOWNLOAD */}
-        <div className="relative inline-block" onMouseEnter={() => setDownloadOpen(true)} onMouseLeave={() => setDownloadOpen(false)}>
-          <button type="button" disabled={!mainId} className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${mainId ? 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50' : 'bg-gray-100 text-gray-400 border-gray-200'}`}>
-            <ArrowDownTrayIcon className={`h-5 w-5 ${mainId ? 'text-blue-600' : 'text-gray-400'}`} />
+        <div className="relative inline-block">
+          <button
+            type="button"
+            disabled={!canExport}
+            onClick={() => {
+              if (!canExport) return;
+              setPrintOpen(false);
+              setDownloadOpen(v => !v);
+            }}
+            className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${canExport
+              ? 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50'
+              : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+              }`}
+          >
+            <ArrowDownTrayIcon className={`h-5 w-5 ${canExport ? 'text-blue-600' : 'text-gray-400'}`} />
             <span>Download</span>
             <ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
 
-          {downloadOpen && (
-            <div className="absolute left-0 top-full z-50" onClick={(e)=>e.stopPropagation()}>
+          {canExport && downloadOpen && (
+            <div className="absolute left-0 top-full z-50" onClick={(e) => e.stopPropagation()}>
               <div className="mt-1 w-60 rounded-md border bg-white shadow-lg py-1">
-                <button type="button" onClick={handleDownloadExcel} disabled={!mainId} className={`flex w-full items-center gap-3 px-3 py-2 text-sm ${mainId ? 'text-gray-800 hover:bg-blue-50' : 'text-gray-400 cursor-not-allowed'}`}>
-                  <DocumentArrowDownIcon className={`h-5 w-5 ${mainId ? 'text-blue-600' : 'text-gray-400'}`} />
+                <button
+                  type="button"
+                  onClick={() => { setDownloadOpen(false); handleDownloadExcel(); }}
+                  className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-blue-50"
+                >
+                  <DocumentArrowDownIcon className="h-5 w-5 text-blue-600" />
                   <span className="truncate">Purchase Voucher – Excel</span>
                   <span className="ml-auto text-[10px] font-semibold">XLSX</span>
                 </button>
               </div>
             </div>
           )}
-
         </div>
 
-        {/* PRINT */}
-        <div className="relative inline-block" onMouseEnter={() => setPrintOpen(true)} onMouseLeave={() => setPrintOpen(false)}>
-          <button type="button" className="inline-flex items-center gap-2 rounded border px-3 py-2 bg-white text-gray-700 hover:bg-gray-50">
-            <PrinterIcon className="h-5 w-5" /><span>Print</span><ChevronDownIcon className="h-4 w-4 opacity-70" />
+        {/* PRINT (toggle on click; dropdown only if canExport) */}
+        <div className="relative inline-block">
+          <button
+            type="button"
+            disabled={!canExport}
+            onClick={() => {
+              if (!canExport) return;
+              setDownloadOpen(false);
+              setPrintOpen(v => !v);
+            }}
+            className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${canExport
+              ? 'bg-white text-gray-700 hover:bg-gray-50'
+              : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+              }`}
+            title={
+              !mainId ? 'Select or save a transaction first.'
+                : isCancelled ? 'Cancelled transactions cannot be printed.'
+                  : !isBalanced ? 'Unbalanced transactions cannot be printed.'
+                    : ''
+            }
+          >
+            <PrinterIcon className={`h-5 w-5 ${canExport ? '' : 'text-gray-400'}`} />
+            <span>Print</span>
+            <ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
-          {printOpen && (
-            <div className="absolute left-0 top-full z-50">
+
+          {canExport && printOpen && (
+            <div className="absolute left-0 top-full z-50" onClick={(e) => e.stopPropagation()}>
               <div className="mt-1 w-64 rounded-md border bg-white shadow-lg py-1">
-                <button type="button" onClick={handleOpenPdf} className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100">
+                <button
+                  type="button"
+                  onClick={() => { setPrintOpen(false); handleOpenPdf(); }}
+                  className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
+                >
                   <DocumentTextIcon className="h-5 w-5 text-red-600" />
                   <span className="truncate">Purchase Voucher – PDF</span>
                   <span className="ml-auto text-[10px] font-semibold text-red-600">PDF</span>
                 </button>
+
                 <button
                   type="button"
-                  onClick={()=>{
+                  onClick={() => {
+                    setPrintOpen(false);
                     if (!mainId) return toast.info('Select or save a transaction.');
-                    
                     window.open(
-                      `${apiBase}/purchase/check-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}`,
+                      `${apiBase}/purchase/check-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id || '')}`,
                       '_blank',
                       'noopener'
                     );
-                  
-                  
                   }}
                   className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
                 >
@@ -968,9 +1480,15 @@ useEffect(() => { loadPbns(); },
       {showPdf && (
         <div className="fixed inset-0 z-[10000] bg-black/50 flex items-center justify-center">
           <div className="bg-white rounded-lg shadow-xl w-[90vw] h-[85vh] relative">
-            <button onClick={()=>setShowPdf(false)} className="absolute top-2 right-2 rounded-full px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200" aria-label="Close">✕</button>
+            <button
+              onClick={() => setShowPdf(false)}
+              className="absolute top-2 right-2 rounded-full px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200"
+              aria-label="Close"
+            >
+              ✕
+            </button>
             <div className="h-full w-full pt-8">
-              <iframe title="Purchase Voucher PDF" src={pdfUrl} className="w-full h-full" style={{border:'none'}}/>
+              <iframe title="Purchase Voucher PDF" src={pdfUrl} className="w-full h-full" style={{ border: 'none' }} />
             </div>
           </div>
         </div>

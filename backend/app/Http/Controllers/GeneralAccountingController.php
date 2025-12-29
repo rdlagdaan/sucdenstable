@@ -119,39 +119,53 @@ class GeneralAccountingController extends Controller
     }
 
     /** 3) Insert detail line (enforce validations) */
-    public function saveDetail(Request $req)
-    {
-        $payload = $req->validate([
-            'transaction_id' => ['required','integer','exists:general_accounting,id'],
-            'acct_code'      => ['required','string','max:75'],
-            'debit'          => ['nullable','numeric'],
-            'credit'         => ['nullable','numeric'],
-            'company_id'     => ['required','integer'],
-            'user_id'        => ['nullable','integer'],
-            'workstation_id' => ['nullable','string','max:25'],
-        ]);
+public function saveDetail(Request $req)
+{
+    $payload = $req->validate([
+        'transaction_id' => ['required','integer','exists:general_accounting,id'],
+        'acct_code'      => ['required','string','max:75'],
+        'debit'          => ['nullable','numeric'],
+        'credit'         => ['nullable','numeric'],
+        'company_id'     => ['required','integer'],
+        'user_id'        => ['nullable','integer'],
+        'workstation_id' => ['nullable','string','max:25'],
+    ]);
 
-        $d = (float)($payload['debit'] ?? 0);
-        $c = (float)($payload['credit'] ?? 0);
-        if (($d > 0 && $c > 0) || ($d <= 0 && $c <= 0)) {
-            return response()->json(['message' => 'Provide either debit OR credit (not both/zero).'], 422);
+    // 🔹 Make sure workstation_id is populated (DB requires NOT NULL)
+    if (empty($payload['workstation_id'])) {
+        $main = GeneralAccounting::find($payload['transaction_id']);
+
+        if ($main && !empty($main->workstation_id)) {
+            $payload['workstation_id'] = $main->workstation_id;
+        } else {
+            return response()->json([
+                'message' => 'Workstation is required for journal details.',
+            ], 422);
         }
-
-        $acctOk = AccountCode::where('acct_code', $payload['acct_code'])
-            ->where('active_flag', 1)->exists();
-        if (!$acctOk) return response()->json(['message' => 'Invalid or inactive account.'], 422);
-
-        $dup = GeneralAccountingDetail::where('transaction_id',$payload['transaction_id'])
-            ->where('acct_code',$payload['acct_code'])->exists();
-        if ($dup) return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
-
-        $payload['general_accounting_id'] = $payload['transaction_id'];
-
-        $detail = GeneralAccountingDetail::create($payload);
-        $totals = $this->recalcTotals($payload['transaction_id']);
-
-        return response()->json(['detail_id' => $detail->id, 'totals' => $totals]);
     }
+
+    $d = (float)($payload['debit'] ?? 0);
+    $c = (float)($payload['credit'] ?? 0);
+    if (($d > 0 && $c > 0) || ($d <= 0 && $c <= 0)) {
+        return response()->json(['message' => 'Provide either debit OR credit (not both/zero).'], 422);
+    }
+
+    $acctOk = AccountCode::where('acct_code', $payload['acct_code'])
+        ->where('active_flag', 1)->exists();
+    if (!$acctOk) return response()->json(['message' => 'Invalid or inactive account.'], 422);
+
+    $dup = GeneralAccountingDetail::where('transaction_id',$payload['transaction_id'])
+        ->where('acct_code',$payload['acct_code'])->exists();
+    if ($dup) return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
+
+    $payload['general_accounting_id'] = $payload['transaction_id'];
+
+    $detail = GeneralAccountingDetail::create($payload);
+    $totals = $this->recalcTotals($payload['transaction_id']);
+
+    return response()->json(['detail_id' => $detail->id, 'totals' => $totals]);
+}
+
 
     /** 4) Update detail */
     public function updateDetail(Request $req)
@@ -163,6 +177,9 @@ class GeneralAccountingController extends Controller
             'debit'          => ['nullable','numeric'],
             'credit'         => ['nullable','numeric'],
         ]);
+
+        // Enforce supervisor edit approval for this transaction
+        $this->requireEditApproval((int) $payload['transaction_id']);
 
         $row = GeneralAccountingDetail::find($payload['id']);
         if (!$row) return response()->json(['message'=>'Detail not found.'], 404);
@@ -200,6 +217,10 @@ class GeneralAccountingController extends Controller
             'id'             => ['required','integer','exists:general_accounting_details,id'],
             'transaction_id' => ['required','integer','exists:general_accounting,id'],
         ]);
+
+        // 🔐 require supervisor approval for deleting a detail line
+        $this->requireEditApproval((int) $payload['transaction_id']);
+
         GeneralAccountingDetail::where('id',$payload['id'])->delete();
         $totals = $this->recalcTotals($payload['transaction_id']);
         return response()->json(['ok'=>true,'totals'=>$totals]);
@@ -227,27 +248,34 @@ class GeneralAccountingController extends Controller
     }
 
     /** 7) List for JE dropdown */
-    public function list(Request $req)
-    {
-        $companyId = $req->query('company_id');
-        $q = trim((string)$req->query('q',''));
-        $qq = strtolower($q);
+public function list(Request $req)
+{
+    $companyId = $req->query('company_id');
+    $q  = trim((string)$req->query('q',''));
+    $qq = strtolower($q);
 
-        $rows = GeneralAccounting::when($companyId, fn($qr)=>$qr->where('company_id',$companyId))
-            ->when($q !== '', function($qr) use ($qq) {
-                $qr->where(function($w) use ($qq) {
-                    $w->whereRaw('LOWER(ga_no) LIKE ?', ["%{$qq}%"])
-                      ->orWhereRaw('LOWER(explanation) LIKE ?', ["%{$qq}%"]);
-                });
-            })
-            ->orderByDesc('ga_no')
-            ->limit(50)
-            ->get([
-                'id','ga_no','gen_acct_date','explanation','sum_debit','sum_credit','is_cancel'
-            ]);
+    $rows = GeneralAccounting::when($companyId, fn($qr)=>$qr->where('company_id',$companyId))
+        // 🔹 hide soft-deleted rows (is_cancel = 'd'), keep others
+        ->where(function ($qr) {
+            $qr->whereNull('is_cancel')
+               ->orWhere('is_cancel', '!=', 'd');
+        })
+        ->when($q !== '', function($qr) use ($qq) {
+            $qr->where(function($w) use ($qq) {
+                $w->whereRaw('LOWER(ga_no) LIKE ?', ["%{$qq}%"])
+                  ->orWhereRaw('LOWER(explanation) LIKE ?', ["%{$qq}%"]);
+            });
+        })
+        ->orderByDesc('ga_no')
+        ->limit(50)
+        ->get([
+            'id','ga_no','gen_acct_date','explanation',
+            'sum_debit','sum_credit','is_cancel',
+        ]);
 
-        return response()->json($rows);
-    }
+    return response()->json($rows);
+}
+
 
     /** 8) Accounts (active) for autocomplete */
     public function accounts(Request $req)
@@ -268,27 +296,53 @@ class GeneralAccountingController extends Controller
     }
 
     /** 9) Cancel / Uncancel */
-    public function updateCancel(Request $req)
-    {
-        $data = $req->validate([
-            'id'   => ['required','integer','exists:general_accounting,id'],
-            'flag' => ['required','in:0,1'], // 1 = cancel (y), 0 = uncancel (n)
-        ]);
-        $val = $data['flag'] === '1' ? 'y' : 'n';
-        GeneralAccounting::where('id',$data['id'])->update(['is_cancel'=>$val]);
-        return response()->json(['ok'=>true,'is_cancel'=>$val]);
-    }
+/** 9) Cancel / Uncancel (matches Sales Journal behavior) */
+public function updateCancel(Request $req)
+{
+    $data = $req->validate([
+        'id'   => ['required','integer','exists:general_accounting,id'],
+        'flag' => ['required','in:0,1'], // 1 = cancel, 0 = uncancel
+        // company_id may be sent by frontend but we don't need it here
+    ]);
+
+    // 🔹 1 → cancelled ('c'), 0 → normal ('n')
+    $val = $data['flag'] === '1' ? 'c' : 'n';
+
+    GeneralAccounting::where('id', $data['id'])->update([
+        'is_cancel' => $val,
+    ]);
+
+    return response()->json([
+        'ok'        => true,
+        'is_cancel' => $val,
+    ]);
+}
+
 
     /** 10) Delete main (cascade details) */
-    public function destroy($id)
-    {
-        $main = GeneralAccounting::findOrFail($id);
-        DB::transaction(function() use ($main){
-            GeneralAccountingDetail::where('transaction_id',$main->id)->delete();
-            $main->delete();
-        });
-        return response()->json(['ok'=>true]);
+/** 10) Soft-delete main JE (like Sales Journal) */
+public function destroy($id)
+{
+    $row = GeneralAccounting::find($id);
+    if (!$row) {
+        return response()->json(['message' => 'Journal Voucher not found.'], 404);
     }
+
+    // If already deleted, just return OK
+    if ($row->is_cancel === 'd') {
+        return response()->json(['ok' => true, 'is_cancel' => 'd']);
+    }
+
+    // 🔹 Soft delete → mark as deleted; details kept for audit
+    $row->is_cancel = 'd';
+    $row->save();
+
+    return response()->json([
+        'ok'        => true,
+        'is_cancel' => 'd',
+    ]);
+}
+
 
     /** 11) Print Journal Voucher PDF */
 public function formPdf(Request $request, $id)
@@ -309,9 +363,13 @@ public function formPdf(Request $request, $id)
         ->where('g.id', $id)
         ->first();
 
-    if (!$header || strtoupper((string)$header->is_cancel) === 'Y') {
-        abort(404, 'Journal Voucher not found or cancelled');
-    }
+        if (
+            !$header ||
+            in_array($header->is_cancel, ['y', 'c', 'd'], true) // 'y' (legacy), 'c' (cancelled), 'd' (deleted)
+        ) {
+            abort(404, 'Journal Voucher not found or cancelled');
+        }
+
 
     // 2) Details + live totals (don’t trust stored flags)
     $details = DB::table('general_accounting_details as d')
@@ -437,9 +495,13 @@ public function formExcel($id, Request $req)
         ->where('g.id',$id)
         ->first();
 
-    if (!$header || $header->is_cancel === 'y') {
-        return response()->json(['message' => 'Journal Voucher not found or cancelled'], 404);
-    }
+        if (
+            !$header ||
+            in_array($header->is_cancel, ['y', 'c', 'd'], true)
+        ) {
+            return response()->json(['message' => 'Journal Voucher not found or cancelled'], 404);
+        }
+
 
     // 🔴 Live totals
     $totals = DB::table('general_accounting_details')
@@ -529,6 +591,122 @@ public function formExcel($id, Request $req)
         'X-Accel-Buffering'   => 'no',
     ]);
 }
+
+
+/**
+ * Update JE header (date + explanation).
+ * Requires a valid "edit" approval.
+ */
+public function updateMain(Request $req)
+{
+    $data = $req->validate([
+        'id'           => ['required','integer','exists:general_accounting,id'],
+        'gen_acct_date'=> ['required','date'],
+        'explanation'  => ['required','string','max:1000'],
+    ]);
+
+    // 🔐 Enforce supervisor approval
+    $this->requireEditApproval((int) $data['id']);
+
+    $main = GeneralAccounting::findOrFail($data['id']);
+
+    $main->gen_acct_date = $data['gen_acct_date'];
+    $main->explanation   = $data['explanation'];
+    $main->save();
+
+    return response()->json([
+        'ok'            => true,
+        'id'            => $main->id,
+        'gen_acct_date' => $main->gen_acct_date,
+        'explanation'   => $main->explanation,
+    ]);
+}
+
+
+/**
+ * Update JE header (date + explanation) WITHOUT approval.
+ * Used by "Save Main" button.
+ */
+public function updateMainNoApproval(Request $req)
+{
+    $data = $req->validate([
+        'id'           => ['required','integer','exists:general_accounting,id'],
+        'gen_acct_date'=> ['required','date'],
+        'explanation'  => ['required','string','max:1000'],
+    ]);
+
+    $main = GeneralAccounting::findOrFail($data['id']);
+
+    // ❗ safety rule (same intent as Cash Disbursement):
+    // cannot update cancelled or deleted
+    if (in_array($main->is_cancel, ['c','d','y'], true)) {
+        abort(403, 'Cancelled or deleted journal cannot be updated.');
+    }
+
+    $main->update([
+        'gen_acct_date' => $data['gen_acct_date'],
+        'explanation'   => $data['explanation'],
+    ]);
+
+    return response()->json([
+        'ok'            => true,
+        'id'            => $main->id,
+        'gen_acct_date' => $main->gen_acct_date,
+        'explanation'   => $main->explanation,
+    ]);
+}
+
+
+
+/**
+ * Require a valid "edit" approval for this General Accounting transaction.
+ *
+ * Returns the approval row (stdClass) if OK, otherwise aborts 403.
+ */
+protected function requireEditApproval(int $transactionId): \stdClass
+{
+    $main = GeneralAccounting::findOrFail($transactionId);
+
+    $module    = 'general_accounting';
+    $companyId = (int) $main->company_id;
+
+    $row = DB::table('approvals')
+        ->where('module', $module)
+        ->where('record_id', $transactionId)
+        ->where('company_id', $companyId)
+        ->where('action', 'edit')
+        ->where('status', 'approved')
+        ->whereNull('consumed_at')
+        ->orderByDesc('id')
+        ->first();
+
+    if (!$row) {
+        abort(403, 'Supervisor approval required for editing this journal entry.');
+    }
+
+    // Check expiry
+    $now = now();
+    if ($row->expires_at) {
+        $expires = \Carbon\Carbon::parse($row->expires_at);
+        if ($now->gte($expires)) {
+            abort(403, 'Edit approval has expired. Please request a new approval.');
+        }
+    }
+
+    // First time used? mark first_edit_at
+    if (empty($row->first_edit_at)) {
+        DB::table('approvals')->where('id', $row->id)->update([
+            'first_edit_at' => $now,
+            'updated_at'    => $now,
+        ]);
+        $row->first_edit_at = $now;
+    }
+
+    return $row;
+}
+
+
+
 
 
     /** ---- helper ---- */

@@ -22,6 +22,8 @@ interface Props {
   columnWidths?: string[];
   customKey?: string;
   inputClassName?: string;
+  columnKeys?: string[]; // NEW: explicit keys for each column
+
 }
 
 const scalingFactors: Record<string, number> = {
@@ -66,6 +68,7 @@ export default function DropdownWithHeaders({
   search = '',
   onSearchChange,
   headers = ['Code', 'Label', 'Description'],
+  columnKeys,
   dropdownPositionStyle,
   columnWidths: inputColumnWidths,
   customKey = '',
@@ -231,18 +234,24 @@ export default function DropdownWithHeaders({
                                     : `repeat(${headers.length}, minmax(0, 1fr))`,
                                 }}
                               >
-                                {headers.map((_, colIndex) => {
-                                  const keys = Object.keys(item);
-                                  const dataKey = keys[colIndex] ?? '';
-                                  return (
-                                    <div
-                                      key={colIndex}
-                                      className="truncate pr-2 whitespace-normal"
-                                    >
-                                      {item[dataKey]}
-                                    </div>
-                                  );
-                                })}
+{headers.map((_, colIndex) => {
+  // Prefer explicit binding if provided; fallback to old behavior
+  const dataKey =
+    columnKeys?.[colIndex] ??
+    Object.keys(item)[colIndex] ??
+    '';
+
+  return (
+    <div
+      key={colIndex}
+      className="truncate pr-2 whitespace-normal"
+      title={item?.[dataKey] != null ? String(item[dataKey]) : ''}
+    >
+      {item?.[dataKey]}
+    </div>
+  );
+})}
+
                               </li>
                             )}
                           </Listbox.Option>

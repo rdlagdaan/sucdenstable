@@ -21,6 +21,15 @@ class BuildTrialBalance implements ShouldQueue
 
     public int $timeout = 900; // 15 mins
 
+     // --- Retained Earnings rules ---
+    private const RE_CODE        = '4031';
+    private const RE_THRESHOLD   = 4031;   // compare numeric prefix
+    private const BASELINE_ASOF  = '2024-12-31'; // beginning_balance snapshot date
+    private const FIRST_FLOW_YEAR = 2025;  // RE flows starting Jan 2025
+   
+
+
+
     public function __construct(
         public string $ticket,
         public string $startAccount,
@@ -62,7 +71,9 @@ class BuildTrialBalance implements ShouldQueue
     ac.exclude,
     ac.active_flag,
     -- P&L: FS starts with IS OR numeric prefix of acct_code > 4031
+    -- P&L: FS starts with IS OR numeric prefix of acct_code > 4031 (but 4031 itself is NOT P&L)
     CASE
+      WHEN ac.acct_code = '4031' THEN 0
       WHEN ac.fs ILIKE 'IS%' OR (
         CASE
           WHEN ac.acct_code ~ '^[0-9]+' THEN (substring(ac.acct_code from '^[0-9]+'))::int
@@ -71,6 +82,7 @@ class BuildTrialBalance implements ShouldQueue
       ) > 4031
       THEN 1 ELSE 0
     END as is_pnl
+
 ")
 
 
@@ -108,7 +120,45 @@ $openings = DB::table('beginning_balance as bb')
     ->keyBy('account_code')
     ->map(fn($r) => (float) $r->amount);
 
+// 2b) Retained Earnings constants
+$reConstStartYear = null; // used when the report start is in 2025+
+$reConstEndYear   = null; // used when the report end is in 2025+ (cross-year reports)
 
+$startYear = (int) Carbon::parse($sdate)->year;
+$endYear   = (int) Carbon::parse($edate)->year;
+
+// helper closure to compute RE constant for a given year
+$computeReConst = function (int $year): float {
+    // Base RE from baseline snapshot: SUM(beginning_balance) for acct >= 4031
+    $re = (float) $this->sumBeginningBalanceTotalGreaterOrEqual(self::RE_THRESHOLD);
+
+    // Roll-forward: add full-year net income for prior years (2025..year-1), acct > 4031
+    for ($y = self::FIRST_FLOW_YEAR; $y <= ($year - 1); $y++) {
+        $re += (float) $this->sumNetIncomeForYear($y);
+    }
+
+    return (float) $re;
+};
+
+// start-year const (only if start year is 2025+)
+if ($startYear >= self::FIRST_FLOW_YEAR) {
+    $this->setStatus('running', 14, 'Calculating retained earnings (start year)…');
+    $reConstStartYear = $computeReConst($startYear);
+    Log::info('RE_CONST_START', ['year' => $startYear, 'reConst' => $reConstStartYear]);
+}
+
+// end-year const (only if end year is 2025+)
+if ($endYear >= self::FIRST_FLOW_YEAR) {
+    $this->setStatus('running', 15, 'Calculating retained earnings (end year)…');
+    $reConstEndYear = $computeReConst($endYear);
+    Log::info('RE_CONST_END', ['year' => $endYear, 'reConst' => $reConstEndYear]);
+}
+
+
+
+
+
+    
             // 3) Pre-movements from FY start up to day before startDate (B/S only)
             $preEnd  = Carbon::parse($sdate)->subDay()->toDateString();
             $needPre = (strtotime($preEnd) >= strtotime($fyStart));
@@ -130,6 +180,20 @@ if ($needPnlPre) {
     $pnlPreMovNet = $this->sumMovementsNet($jan1OfYear, $preEnd);
 }
 
+// 3c) Baseline backout for P&L accounts when report starts in baseline year (2024)
+// We only have the baseline snapshot as-of 2024-12-31 (beginning_balance).
+// For a Dec 2024 start, we want YTD as-of startDate-1.
+// So: opening = beginning_balance(asOf 2024-12-31) - netMovements(startDate..2024-12-31)
+$baselineAsOfObj = Carbon::parse($openingAsOf)->startOfDay();
+$useBaselineBackout = Carbon::parse($sdate)->year === $baselineAsOfObj->year
+    && Carbon::parse($sdate)->lte($baselineAsOfObj)
+    && Carbon::parse($sdate)->month !== 1; // January still forces 0
+
+$baselineBackoutNet = collect();
+if ($useBaselineBackout) {
+    $this->setStatus('running', 24, 'Calculating baseline backout (P&L)…');
+    $baselineBackoutNet = $this->sumMovementsNet($sdate, $baselineAsOfObj->toDateString());
+}
 
 
             // 4) Period movements (sum debit/credit) for [S..E]
@@ -159,30 +223,88 @@ usort($codes, function (string $a, string $b) {
 $i = 0;
 $n = max(1, count($codes));
 
+$startDateObj = \Carbon\Carbon::parse($sdate)->startOfDay();
+$jan1Obj      = $startDateObj->copy()->startOfYear();
+$fyStartObj   = \Carbon\Carbon::parse($fyStart)->startOfDay();
+
 foreach ($codes as $code) {
     $acct = $accounts[$code];
 
-    // Normalize using Carbon to avoid string/time mismatches
-    $startDateObj = \Carbon\Carbon::parse($sdate)->startOfDay();
-    $jan1Obj      = \Carbon\Carbon::parse($sdate)->startOfYear();
+// --- Retained Earnings (4031) override (special rules) ---
+if (trim((string)$code) === self::RE_CODE) {
 
-    if ($acct->is_pnl) {
-        // P&L:
-        // - If report starts on Jan 1 → Beginning = 0.00
-        // - Else → Beginning = YTD net from Jan 1..(start-1)
-        $opening = $startDateObj->isSameDay($jan1Obj)
-            ? 0.0
-            : (float)($pnlPreMovNet[$code] ?? 0.0);
+    $deb = 0.0;
+    $cre = 0.0;
+
+    // baseline RE from beginning_balance table (Dec 2024 snapshot)
+    $baselineRe = (float)($openings[self::RE_CODE] ?? 0.0);
+
+    // Opening:
+    // - If report starts in 2025+ => use computed const for start year
+    // - Else (Dec 2024 or earlier baseline period) => show baseline beginning_balance
+    if ($reConstStartYear !== null) {
+        $opening = (float) $reConstStartYear;
     } else {
-        // Balance Sheet unchanged: opening baseline + FY pre-movements
-        $opening = (float)($openings[$code] ?? 0.0)
-                 + (float)($preMovNet[$code] ?? 0.0);
+        $opening = (float) $baselineRe;
     }
+
+    // Ending:
+    // - If report ends in 2025+ => use computed const for end year
+    // - Else (still within 2024 baseline period) => baseline
+    if ($reConstEndYear !== null) {
+        $ending = (float) $reConstEndYear;
+    } else {
+        $ending = (float) $baselineRe;
+    }
+
+    $rows[] = [
+        'acct_code'      => $code,
+        'acct_desc'      => (string)$acct->acct_desc,
+        'main_acct'      => (string)$acct->main_acct,
+        'main_acct_code' => (string)$acct->main_acct_code,
+        'beginning'      => $opening,
+        'debit'          => $deb,
+        'credit'         => $cre,
+        'ending'         => $ending,
+    ];
+
+    $totBeg += $opening; $totD += $deb; $totC += $cre; $totEnd += $ending;
+
+    $i++;
+    $pct = 45 + (int)floor(($i / $n) * 30);
+    $this->setStatus('running', $pct, "Assembling {$code}…");
+
+    continue;
+}
+
+
+
+if ($acct->is_pnl) {
+
+    // P&L rule:
+    // - January start => beginning is 0.00
+    // - Baseline-year (2024) non-January => derive YTD by backing out from 2024-12-31 snapshot
+    // - Otherwise => beginning is YTD net from Jan 1..(start-1)
+    if ($startDateObj->month === 1) {
+        $opening = 0.0;
+    } elseif ($useBaselineBackout) {
+        $opening = (float)($openings[$code] ?? 0.0) - (float)($baselineBackoutNet[$code] ?? 0.0);
+    } else {
+        $opening = (float)($pnlPreMovNet[$code] ?? 0.0);
+    }
+
+} else {
+    // Balance Sheet unchanged: opening baseline + FY pre-movements
+    $opening = (float)($openings[$code] ?? 0.0)
+             + (float)($preMovNet[$code] ?? 0.0);
+}
+
 
     $deb    = (float)($periodMov[$code]['debit']  ?? 0.0);
 
     $cre    = (float)($periodMov[$code]['credit'] ?? 0.0);
     $ending = $opening + ($deb - $cre);
+
 
     $rows[] = [
         'acct_code'      => $code,
@@ -245,8 +367,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
             from general_accounting h
             join general_accounting_details d on (d.transaction_id)::bigint = h.id
-            where h.gen_acct_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.gen_acct_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
 
@@ -254,8 +378,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit), sum(d.credit)
             from cash_disbursement h
             join cash_disbursement_details d on d.transaction_id = h.id
-            where h.disburse_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.disburse_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
 
@@ -263,8 +389,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit), sum(d.credit)
             from cash_receipts h
             join cash_receipt_details d on (d.transaction_id)::bigint = h.id
-            where h.receipt_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.receipt_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
 
@@ -272,8 +400,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit), sum(d.credit)
             from cash_purchase h
             join cash_purchase_details d on d.transaction_id = h.id
-            where h.purchase_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.purchase_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
 
@@ -281,8 +411,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit), sum(d.credit)
             from cash_sales h
             join cash_sales_details d on (d.transaction_id)::bigint = h.id
-            where h.sales_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.sales_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
         )
@@ -308,8 +440,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
             from general_accounting h
             join general_accounting_details d on (d.transaction_id)::bigint = h.id
-            where h.gen_acct_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.gen_acct_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
 
@@ -317,8 +451,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit), sum(d.credit)
             from cash_disbursement h
             join cash_disbursement_details d on d.transaction_id = h.id
-            where h.disburse_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.disburse_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
 
@@ -326,8 +462,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit), sum(d.credit)
             from cash_receipts h
             join cash_receipt_details d on (d.transaction_id)::bigint = h.id
-            where h.receipt_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.receipt_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
 
@@ -335,8 +473,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit), sum(d.credit)
             from cash_purchase h
             join cash_purchase_details d on d.transaction_id = h.id
-            where h.purchase_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.purchase_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
 
@@ -344,8 +484,10 @@ foreach ($codes as $code) {
             select d.acct_code, sum(d.debit), sum(d.credit)
             from cash_sales h
             join cash_sales_details d on (d.transaction_id)::bigint = h.id
-            where h.sales_date between :s and :e
-              and d.acct_code between :sa and :ea
+where h.sales_date between :s and :e
+  and h.is_cancel = 'n'
+  and d.acct_code between :sa and :ea
+
               ".($cid > 0 ? "and h.company_id = :cid" : "")."
             group by d.acct_code
         )
@@ -364,6 +506,225 @@ foreach ($codes as $code) {
             'credit' => (float)$r->credit,
         ]);
     }
+
+    /**
+     * SUM(beginning_balance.amount) for all accounts with numeric prefix >= $threshold
+     * Company-scoped.
+     */
+    private function sumBeginningBalanceTotalGreaterOrEqual(int $threshold): float
+    {
+        return (float) DB::table('beginning_balance as bb')
+            ->when($this->companyId > 0, fn($q) => $q->where('bb.company_id', $this->companyId))
+            ->whereRaw("
+                (
+                  CASE
+                    WHEN bb.account_code ~ '^[0-9]+'
+                      THEN (substring(bb.account_code from '^[0-9]+'))::int
+                    ELSE NULL
+                  END
+                ) >= ?
+            ", [$threshold])
+            ->sum('bb.amount');
+    }
+
+    /**
+     * Net income for a year = SUM(net) for accounts with numeric prefix > 4031,
+     * for the full year [Jan 1..Dec 31], company-scoped.
+     */
+    private function sumNetIncomeForYear(int $year): float
+    {
+        $from = sprintf('%04d-01-01', $year);
+        $to   = sprintf('%04d-12-31', $year);
+
+        // reuse your existing movement net aggregator, but across acct_code > 4031
+        $cid = (int) $this->companyId;
+
+        $sql = "
+        with src as (
+            select coalesce(sum(d.debit),0) deb, coalesce(sum(d.credit),0) cred
+            from general_accounting h
+            join general_accounting_details d on (d.transaction_id)::bigint = h.id
+            where h.gen_acct_date between :s and :e
+            and h.is_cancel = 'n'
+              and (
+                case when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int else null end
+              ) > :thr
+              ".($cid > 0 ? "and h.company_id = :cid" : "")."
+
+            union all
+            select coalesce(sum(d.debit),0), coalesce(sum(d.credit),0)
+            from cash_disbursement h
+            join cash_disbursement_details d on d.transaction_id = h.id
+            where h.disburse_date between :s and :e
+            and h.is_cancel = 'n'
+              and (
+                case when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int else null end
+              ) > :thr
+              ".($cid > 0 ? "and h.company_id = :cid" : "")."
+
+            union all
+            select coalesce(sum(d.debit),0), coalesce(sum(d.credit),0)
+            from cash_receipts h
+            join cash_receipt_details d on (d.transaction_id)::bigint = h.id
+            where h.receipt_date between :s and :e
+            and h.is_cancel = 'n'
+              and (
+                case when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int else null end
+              ) > :thr
+              ".($cid > 0 ? "and h.company_id = :cid" : "")."
+
+            union all
+            select coalesce(sum(d.debit),0), coalesce(sum(d.credit),0)
+            from cash_purchase h
+            join cash_purchase_details d on d.transaction_id = h.id
+            where h.purchase_date between :s and :e
+            and h.is_cancel = 'n'
+              and (
+                case when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int else null end
+              ) > :thr
+              ".($cid > 0 ? "and h.company_id = :cid" : "")."
+
+            union all
+            select coalesce(sum(d.debit),0), coalesce(sum(d.credit),0)
+            from cash_sales h
+            join cash_sales_details d on (d.transaction_id)::bigint = h.id
+            where h.sales_date between :s and :e
+            and h.is_cancel = 'n'
+              and (
+                case when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int else null end
+              ) > :thr
+              ".($cid > 0 ? "and h.company_id = :cid" : "")."
+        )
+        select coalesce(sum(deb) - sum(cred), 0) as net
+        from src
+        ";
+
+        $b = ['s' => $from, 'e' => $to, 'thr' => self::RE_THRESHOLD];
+        if ($cid > 0) $b['cid'] = $cid;
+
+        $row = DB::selectOne($sql, $b);
+        return (float) ($row->net ?? 0.0);
+    }
+
+
+
+
+    /**
+     * Base retained earnings derivation:
+     * SUM(beginning_balance.amount) for all accounts with numeric prefix > $threshold.
+     * (Baseline snapshot is Dec 2024 in your system.)
+     */
+    private function sumBeginningBalanceTotalGreaterThan(int $threshold): float
+    {
+        return (float) DB::table('beginning_balance as bb')
+            ->when($this->companyId > 0, fn($q) => $q->where('bb.company_id', $this->companyId))
+            ->whereRaw("
+                (
+                  CASE
+                    WHEN bb.account_code ~ '^[0-9]+'
+                      THEN (substring(bb.account_code from '^[0-9]+'))::int
+                    ELSE NULL
+                  END
+                ) > ?
+            ", [$threshold])
+            ->sum('bb.amount');
+    }
+
+    /**
+     * Net income helper:
+     * Total net (debit - credit) across ALL accounts with numeric prefix > $threshold for [from..to].
+     * This does NOT depend on startAccount/endAccount range.
+     */
+    private function sumMovementsNetTotalGreaterThan(int $threshold, string $from, string $to): float
+    {
+        $cid = (int) $this->companyId;
+
+    $sql = "
+with src as (
+    select coalesce(sum(d.debit),0) deb, coalesce(sum(d.credit),0) cred
+    from general_accounting h
+    join general_accounting_details d on (d.transaction_id)::bigint = h.id
+    where h.gen_acct_date between :s and :e
+      and h.is_cancel = 'n'
+      and (
+        case
+          when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int
+          else null
+        end
+      ) > :thr
+      ".($cid > 0 ? "and h.company_id = :cid" : "")."
+
+    union all
+    select coalesce(sum(d.debit),0), coalesce(sum(d.credit),0)
+    from cash_disbursement h
+    join cash_disbursement_details d on d.transaction_id = h.id
+    where h.disburse_date between :s and :e
+      and h.is_cancel = 'n'
+      and (
+        case
+          when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int
+          else null
+        end
+      ) > :thr
+      ".($cid > 0 ? "and h.company_id = :cid" : "")."
+
+    union all
+    select coalesce(sum(d.debit),0), coalesce(sum(d.credit),0)
+    from cash_receipts h
+    join cash_receipt_details d on (d.transaction_id)::bigint = h.id
+    where h.receipt_date between :s and :e
+      and h.is_cancel = 'n'
+      and (
+        case
+          when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int
+          else null
+        end
+      ) > :thr
+      ".($cid > 0 ? "and h.company_id = :cid" : "")."
+
+    union all
+    select coalesce(sum(d.debit),0), coalesce(sum(d.credit),0)
+    from cash_purchase h
+    join cash_purchase_details d on d.transaction_id = h.id
+    where h.purchase_date between :s and :e
+      and h.is_cancel = 'n'
+      and (
+        case
+          when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int
+          else null
+        end
+      ) > :thr
+      ".($cid > 0 ? "and h.company_id = :cid" : "")."
+
+    union all
+    select coalesce(sum(d.debit),0), coalesce(sum(d.credit),0)
+    from cash_sales h
+    join cash_sales_details d on (d.transaction_id)::bigint = h.id
+    where h.sales_date between :s and :e
+      and h.is_cancel = 'n'
+      and (
+        case
+          when d.acct_code ~ '^[0-9]+' then (substring(d.acct_code from '^[0-9]+'))::int
+          else null
+        end
+      ) > :thr
+      ".($cid > 0 ? "and h.company_id = :cid" : "")."
+)
+select coalesce(sum(deb) - sum(cred), 0) as net
+from src
+";
+
+        $b = ['s' => $from, 'e' => $to, 'thr' => $threshold];
+        if ($cid > 0) $b['cid'] = $cid;
+
+        $row = DB::selectOne($sql, $b);
+        return (float) ($row->net ?? 0.0);
+    }
+
+
+
+
+
 
     /* --------------------------- writers --------------------------- */
 /* --------------------------- writers (PDF) --------------------------- */
@@ -388,15 +749,18 @@ private function writePdf(array $report, string $sdate, string $edate, string $o
 
     $isPortrait = strtolower($orientation) === 'portrait';
     $pageOrient = $isPortrait ? 'P' : 'L';
-    $asOf       = \Carbon\Carbon::parse($edate)->format('Y-m-d'); // matches legacy “Date Requested”
+    //$asOf       = \Carbon\Carbon::parse($edate)->format('Y-m-d'); // matches legacy “Date Requested”
+$periodStart = \Carbon\Carbon::parse($sdate)->format('Y-m-d');
+$periodEnd   = \Carbon\Carbon::parse($edate)->format('Y-m-d');
 
     // Column widths (percent)
     //  Code 10% | Desc 40% | 4 numeric columns 12.5% each = 100%
     $wCode = '10%'; $wDesc = '40%'; $wAmt = '12.5%';
 
-    $addHeader = function() use ($pdf, $asOf, $wCode, $wDesc, $wAmt) {
-        $this->renderTbHeader($pdf, $asOf, $wCode, $wDesc, $wAmt);
-    };
+$addHeader = function() use ($pdf, $periodStart, $periodEnd, $wCode, $wDesc, $wAmt) {
+    $this->renderTbHeader($pdf, $periodStart, $periodEnd, $wCode, $wDesc, $wAmt);
+};
+
 
     $pdf->AddPage($pageOrient, 'A4');
     $addHeader();
@@ -443,7 +807,7 @@ HTML,
 /**
  * Renders the centered company header + TB columns exactly like the legacy sample.
  */
-private function renderTbHeader(\TCPDF $pdf, string $asOf, string $wCode, string $wDesc, string $wAmt): void
+private function renderTbHeader(\TCPDF $pdf, string $periodStart, string $periodEnd, string $wCode, string $wDesc, string $wAmt): void
 {
     // Top title block (centered)
     $pdf->SetFont('helvetica', 'B', 14);
@@ -451,7 +815,10 @@ private function renderTbHeader(\TCPDF $pdf, string $asOf, string $wCode, string
     $pdf->SetFont('helvetica', 'B', 12);
     $pdf->writeHTML('<div style="text-align:center;">Trial Balance</div>', false, false, false, false, '');
     $pdf->SetFont('helvetica', '', 10);
-    $pdf->writeHTML('<div style="text-align:center;">Date Requested: '.$this->escape($asOf).'</div>', false, false, false, false, '');
+$pdf->writeHTML(
+    '<div style="text-align:center;">Period: '.$this->escape($periodStart).' — '.$this->escape($periodEnd).'</div>',
+    false, false, false, false, ''
+);
 
     // Thin rule
     $pdf->Ln(2);
@@ -636,4 +1003,4 @@ private function targetLocal(string $base, string $ext, string $downloadName): a
     {
         return htmlspecialchars((string)$s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
-}
+}  

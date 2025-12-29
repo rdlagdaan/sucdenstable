@@ -15,35 +15,34 @@ use Illuminate\Database\QueryException;
 class ReferenceAccountController extends Controller
 {
     /** List (paginated + search + filters) */
-    public function index(Request $request): JsonResponse
-    {
-        $perPage   = max(1, min((int)$request->input('per_page', 10), 100));
-        $search    = trim((string)$request->input('search',''));
-        $companyId = $this->resolveCompanyId($request);
+public function index(Request $request): JsonResponse
+{
+    $perPage   = max(1, min((int)$request->input('per_page', 10), 100));
+    $q         = trim((string) ($request->query('q', $request->query('search', ''))));
+    $companyId = $this->resolveCompanyId($request);
 
-        $q = AccountCode::query()->where('company_id', $companyId);
-
-        if ($search !== '') {
-            $like = "%{$search}%";
-            $q->where(function ($x) use ($like) {
-                $x->where('acct_code','ILIKE',$like)
-                  ->orWhere('acct_desc','ILIKE',$like)
-                  ->orWhere('main_acct','ILIKE',$like)
-                  ->orWhere('main_acct_code','ILIKE',$like)
-                  ->orWhere('acct_type','ILIKE',$like);
+    $query = AccountCode::query()
+        ->where('company_id', $companyId)
+        ->when($q !== '', function ($w) use ($q) {
+            $like = "%{$q}%";
+            $w->where(function ($x) use ($like) {
+                $x->where('acct_code', 'ILIKE', $like)
+                  ->orWhere('acct_desc', 'ILIKE', $like);
             });
-        }
+        });
 
-        // Optional filter examples (fs, group, type...) if you wire them from the UI
-        foreach (['fs','acct_group','acct_group_sub1','acct_group_sub2','normal_bal','acct_type'] as $f) {
-            $v = trim((string)$request->input($f, ''));
-            if ($v !== '') $q->where($f, $v);
-        }
-
-        return response()->json(
-            $q->orderBy('acct_code')->paginate($perPage)
-        );
+    // keep your optional filters
+    foreach (['fs','acct_group','acct_group_sub1','acct_group_sub2','normal_bal','acct_type'] as $f) {
+        $v = trim((string)$request->input($f, ''));
+        if ($v !== '') $query->where($f, $v);
     }
+
+    return response()->json(
+        $query->orderBy('acct_code')->paginate($perPage)
+    );
+}
+
+
 
     /** Distinct meta for combos */
     public function meta(Request $request): JsonResponse

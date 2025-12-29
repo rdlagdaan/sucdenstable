@@ -88,6 +88,52 @@ class MyPurchaseVoucherPDF extends \TCPDF {
 
 class PurchaseJournalController extends Controller
 {
+
+    // ----------------------------
+    // Cash Receipts baseline helpers
+    // ----------------------------
+    private function isCancelledFlag($flag): bool
+    {
+        $v = strtolower((string)($flag ?? ''));
+        return $v === 'y' || $v === 'c' || $v === 'd';
+    }
+
+    private function requireNotCancelledOrDeleted(int $id, ?int $companyId = null): void
+    {
+        $q = CashPurchase::where('id', $id);
+        if ($companyId) $q->where('company_id', $companyId);
+
+        $flag = $q->value('is_cancel');
+        if ($this->isCancelledFlag($flag)) {
+            abort(422, 'Transaction is cancelled/deleted and cannot be modified.');
+        }
+    }
+
+private function requireApprovedEdit(int $transactionId, int $companyId): void
+{
+    $row = DB::table('approvals')
+        ->where('module', 'purchase_journal')              // ✅ MUST match frontend MODULE
+        ->where('record_id', $transactionId)
+        ->where('company_id', $companyId)
+        ->whereRaw('LOWER(action) = ?', ['edit'])          // ✅ case-insensitive like ApprovalController
+        ->whereRaw('LOWER(status) = ?', ['approved'])
+        ->whereNull('consumed_at')
+        ->whereNotNull('expires_at')
+        ->where('expires_at', '>', now())
+        ->orderByDesc('id')
+        ->first();
+
+    if (!$row) {
+        abort(403, 'No active edit approval window. Please request edit again.');
+    }
+}
+
+
+
+
+
+
+
     // 1) Generate next CP number (incremental)
     public function generateCpNumber(Request $req)
     {
@@ -139,6 +185,40 @@ public function storeMain(Request $req)
 }
 
 
+    // 2b) Update main header (approval protected)
+    public function updateMain(Request $req)
+    {
+        $data = $req->validate([
+            'id'            => ['required','integer','exists:cash_purchase,id'],
+            'vend_id'        => ['required','string','max:50'],
+            'purchase_date'  => ['required','date'],
+            'explanation' => ['nullable','string','max:1000'],
+            'sugar_type'     => ['nullable','string','max:10'],
+            'crop_year'      => ['nullable','string','max:10'],
+            'mill_id'        => ['nullable','string','max:25'],
+            'booking_no'     => ['nullable','string','max:25'],
+            'company_id'     => ['required','integer'],
+        ]);
+
+        $tx = CashPurchase::findOrFail($data['id']);
+
+        $this->requireNotCancelledOrDeleted((int)$tx->id, (int)$data['company_id']);
+        $this->requireApprovedEdit((int)$tx->id, (int)$data['company_id']);
+
+        $tx->update([
+            'vend_id'       => $data['vend_id'],
+            'purchase_date' => $data['purchase_date'],
+            'explanation'   => $data['explanation'],
+            'sugar_type'    => $data['sugar_type'] ?? null,
+            'crop_year'     => $data['crop_year'] ?? null,
+            'mill_id'       => $data['mill_id'] ?? null,
+            'booking_no'    => $data['booking_no'] ?? null,
+        ]);
+
+        return response()->json(['ok' => true]);
+    }
+
+
     // 3) Insert a detail row (prevents duplicate acct_code per transaction)
     public function saveDetail(Request $req)
     {
@@ -151,6 +231,11 @@ public function storeMain(Request $req)
             'user_id'        => ['nullable','integer'],
             'workstation_id' => ['nullable','string','max:25'],
         ]);
+
+        $this->requireNotCancelledOrDeleted((int)$payload['transaction_id'], (int)($payload['company_id'] ?? 0));
+        $this->requireApprovedEdit((int)$payload['transaction_id'], (int)($payload['company_id'] ?? 0));
+
+
 
         $debit  = (float)($payload['debit'] ?? 0);
         $credit = (float)($payload['credit'] ?? 0);
@@ -191,6 +276,13 @@ public function storeMain(Request $req)
             'credit'         => ['nullable','numeric'],
         ]);
 
+        $tx = CashPurchase::find($payload['transaction_id']);
+        $companyId = $tx ? (int)($tx->company_id ?? 0) : 0;
+
+        $this->requireNotCancelledOrDeleted((int)$payload['transaction_id'], $companyId);
+        $this->requireApprovedEdit((int)$payload['transaction_id'], $companyId);
+
+
         $detail = CashPurchaseDetail::find($payload['id']);
         if (!$detail) return response()->json(['message' => 'Detail not found.'], 404);
 
@@ -217,6 +309,14 @@ public function storeMain(Request $req)
             'id'             => ['required','integer','exists:cash_purchase_details,id'],
             'transaction_id' => ['required','integer','exists:cash_purchase,id'],
         ]);
+
+        $tx = CashPurchase::find($payload['transaction_id']);
+        $companyId = $tx ? (int)($tx->company_id ?? 0) : 0;
+
+        $this->requireNotCancelledOrDeleted((int)$payload['transaction_id'], $companyId);
+        $this->requireApprovedEdit((int)$payload['transaction_id'], $companyId);
+
+
         CashPurchaseDetail::where('id',$payload['id'])->delete();
         $totals = $this->recalcTotals($payload['transaction_id']);
         return response()->json(['ok'=>true,'totals'=>$totals]);
@@ -263,6 +363,7 @@ public function list(Request $req)
     $qq = strtolower($q);
 
     $rows = CashPurchase::from('cash_purchase as p')
+        ->whereRaw("LOWER(COALESCE(p.is_cancel,'')) != 'd'")
         ->when($companyId, fn ($qr) => $qr->where('p.company_id', $companyId))
         ->leftJoin('vendor_list as v', function ($j) use ($companyId) {
             // ✅ correct join: vendor_list.vend_code ↔ cash_purchase.vend_id
@@ -271,14 +372,27 @@ public function list(Request $req)
                 $j->where('v.company_id', $companyId);
             }
         })
-        ->when($q !== '', function ($qr) use ($qq) {
-            $qr->where(function ($w) use ($qq) {
-                $w->whereRaw('LOWER(p.cp_no) LIKE ?',        ["%{$qq}%"])
-                  ->orWhereRaw('LOWER(p.vend_id) LIKE ?',     ["%{$qq}%"])
-                  ->orWhereRaw('LOWER(v.vend_name) LIKE ?',   ["%{$qq}%"]);
-            });
-        })
-        ->orderByDesc('p.cp_no')
+->when($q !== '', function ($qr) use ($qq) {
+    $qr->where(function ($w) use ($qq) {
+        // existing
+        $w->whereRaw('LOWER(COALESCE(p.cp_no, \'\')) LIKE ?',      ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(p.vend_id, \'\')) LIKE ?',   ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(v.vend_name, \'\')) LIKE ?', ["%{$qq}%"])
+
+          // NEW: allow searching by ID, date, amount, booking, mill, sugar/crop, invoice
+          ->orWhereRaw('CAST(p.id AS TEXT) LIKE ?',                 ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(CAST(p.purchase_date AS TEXT), \'\')) LIKE ?', ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(CAST(p.purchase_amount AS TEXT), \'\')) LIKE ?', ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(p.booking_no, \'\')) LIKE ?', ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(p.mill_id, \'\')) LIKE ?',    ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(p.sugar_type, \'\')) LIKE ?', ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(p.crop_year, \'\')) LIKE ?',  ["%{$qq}%"])
+          ->orWhereRaw('LOWER(COALESCE(p.rr_no, \'\')) LIKE ?', ["%{$qq}%"]);
+    });
+})
+
+        ->orderByDesc('p.purchase_date')
+        ->orderByDesc('p.id')
         ->limit(50)
         ->get([
             'p.id',
@@ -286,6 +400,7 @@ public function list(Request $req)
             'p.vend_id',
             'p.purchase_date',
             'p.purchase_amount',
+            'p.rr_no',                // ✅ ADD THIS
             'p.is_cancel',
             'p.sugar_type',
             'p.crop_year',
@@ -316,6 +431,71 @@ public function list(Request $req)
         ]);
         return response()->json($items);
     }
+
+
+public function mills(Request $req)
+{
+    $companyId = $req->query('company_id');
+
+    $rows = DB::table('mill_list')
+        ->when($companyId, fn($q) => $q->where('company_id', $companyId))
+        ->orderBy('mill_id')
+        ->get(['mill_id','mill_name','prefix']);
+
+    // Shape for DropdownWithHeaders: code/label/description
+    $items = $rows->map(fn($r) => [
+        'code'        => (string) $r->mill_id,
+        'label'       => (string) $r->mill_id,
+        'description' => (string) ($r->mill_name ?? ''),
+        'mill_id'     => (string) $r->mill_id,
+        'mill_name'   => (string) ($r->mill_name ?? ''),
+        'prefix'      => (string) ($r->prefix ?? ''),
+    ]);
+
+    return response()->json($items);
+}
+
+// 2c) Update main header (NO approval) — for Save Main button
+public function updateMainNoApproval(Request $req)
+{
+    $data = $req->validate([
+        'id'            => ['required','integer','exists:cash_purchase,id'],
+        'company_id'    => ['required','integer'],
+        'purchase_date' => ['required','date'],
+        'explanation'   => ['nullable','string','max:1000'],
+
+        // optional: allow these if you want Save Main to update them too
+        'vend_id'       => ['nullable','string','max:50'],
+        'sugar_type'    => ['nullable','string','max:10'],
+        'crop_year'     => ['nullable','string','max:10'],
+        'mill_id'       => ['nullable','string','max:25'],
+        'booking_no'    => ['nullable','string','max:25'],
+    ]);
+
+    $tx = CashPurchase::findOrFail($data['id']);
+
+    // still block cancelled/deleted
+    $this->requireNotCancelledOrDeleted((int)$tx->id, (int)$data['company_id']);
+
+    // IMPORTANT: no requireApprovedEdit() here
+
+    $tx->update([
+        // If you want only Date + Explanation to be editable without approval,
+        // just keep these two lines and remove the others.
+        'purchase_date' => $data['purchase_date'],
+        'explanation'   => $data['explanation'],
+
+        'vend_id'    => $data['vend_id']    ?? $tx->vend_id,
+        'sugar_type' => $data['sugar_type'] ?? $tx->sugar_type,
+        'crop_year'  => $data['crop_year']  ?? $tx->crop_year,
+        'mill_id'    => $data['mill_id']    ?? $tx->mill_id,
+        'booking_no' => $data['booking_no'] ?? $tx->booking_no,
+    ]);
+
+    return response()->json(['ok' => true]);
+}
+
+
 
     public function accounts(Request $req)
     {
@@ -479,8 +659,187 @@ EOD;
 }
 
 
-    public function checkPdf($id)  { return response('Check PDF stub – implement renderer', 200); }
-    
+// ✅ ADD THIS METHOD inside PurchaseJournalController
+public function checkPdf(Request $request, $id)
+{
+    $companyId = $request->query('company_id');
+
+    // --- Header info (scope by company, join vendor name) ---
+    $header = DB::table('cash_purchase as cp')
+        ->leftJoin('vendor_list as v', function ($j) use ($companyId) {
+            $j->on('cp.vend_id', '=', 'v.vend_code');
+            if ($companyId) {
+                $j->where('v.company_id', '=', $companyId);
+            }
+        })
+        ->select(
+            'cp.id',
+            'cp.cp_no',
+            'cp.vend_id',
+            'cp.is_cancel',
+            DB::raw("cp.purchase_date as raw_purchase_date"),
+            DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
+            DB::raw("COALESCE(v.vend_name,'') as vend_name")
+        )
+        ->where('cp.id', $id)
+        ->when($companyId, fn ($q) => $q->where('cp.company_id', $companyId))
+        ->first();
+
+    if (
+        !$header ||
+        $this->isCancelledFlag($header->is_cancel) // y/c/d (case-insensitive via your helper)
+    ) {
+        abort(404, 'Purchase Voucher not found or cancelled');
+    }
+
+    // --- Details (ensure balanced) ---
+    $details = DB::table('cash_purchase_details as d')
+        ->where('d.transaction_id', $id)
+        ->when($companyId, fn ($q) => $q->where('d.company_id', $companyId))
+        ->get(['d.debit', 'd.credit']);
+
+    $totalDebit  = (float) $details->sum('debit');
+    $totalCredit = (float) $details->sum('credit');
+
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        $html = sprintf(
+            '<!doctype html><meta charset="utf-8">
+            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+            <h2>Cannot print Check</h2>
+            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing the check.</p>
+            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+            number_format($totalDebit, 2),
+            number_format($totalCredit, 2)
+        );
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    // --- Amount in figures + derived words ---
+    $amountNumeric    = round($totalDebit, 2);
+    $amountNumericStr = number_format($amountNumeric, 2);
+
+    // ✅ Always derive from figure
+    $amountWords = $this->numberToPesoWords($amountNumeric);
+
+    // Payee = vendor name (fallback to vend_id)
+    $payeeName = trim((string)($header->vend_name ?? ''));
+    if ($payeeName === '') {
+        $payeeName = (string)($header->vend_id ?? '');
+    }
+
+    // Use purchase_date as check date
+    $date = $header->raw_purchase_date
+        ? \Carbon\Carbon::parse($header->raw_purchase_date)
+        : \Carbon\Carbon::now();
+
+    $mm   = $date->format('m');
+    $dd   = $date->format('d');
+    $yyyy = $date->format('Y');
+
+    // --- TCPDF check size (LANDSCAPE) ---
+    $checkWidthMm  = 8.0 * 25.4;  // 203.2 mm
+    $checkHeightMm = 3.0 * 25.4;  // 76.2 mm
+
+    $pdf = new \TCPDF('L', 'mm', [$checkWidthMm, $checkHeightMm], true, 'UTF-8', false);
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+    $pdf->SetMargins(5, 5, 5);
+    $pdf->SetAutoPageBreak(false, 0);
+
+    $pdf->AddPage();
+    $pdf->SetFont('helvetica', '', 9);
+
+    // 1) Date (MM  DD  YYYY) – upper-right
+    $pdf->SetXY(140, 10);
+    $pdf->Cell(0, 5, $mm . '   ' . $dd . '   ' . $yyyy, 0, 1, 'L');
+
+    // 2) Payee
+    $pdf->SetXY(20, 25);
+    $pdf->Cell(120, 6, $payeeName, 0, 1, 'L');
+
+    // 3) Amount in figures
+    $pdf->SetXY(145, 25);
+    $pdf->Cell(50, 6, $amountNumericStr, 0, 1, 'R');
+
+    // 4) Amount in words
+    $pdf->SetXY(20, 35);
+    $pdf->MultiCell(160, 6, $amountWords, 0, 'L', false, 1);
+
+    $fileName   = 'check_' . (($header->cp_no ?? '') !== '' ? $header->cp_no : $id) . '.pdf';
+    $pdfContent = $pdf->Output($fileName, 'S');
+
+    return response($pdfContent, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="'.$fileName.'"');
+}
+
+
+
+// ✅ ADD THESE HELPERS inside PurchaseJournalController (near the bottom, like Sales)
+protected function numberToPesoWords(float $amount): string
+{
+    $amount = round($amount, 2);
+    $integerPart = (int) floor($amount);
+    $cents = (int) round(($amount - $integerPart) * 100);
+
+    $words = ($integerPart === 0) ? 'zero' : $this->numberToWords($integerPart);
+    $words = ucfirst($words) . ' pesos';
+
+    if ($cents > 0) {
+        $words .= ' and ' . str_pad((string) $cents, 2, '0', STR_PAD_LEFT) . '/100';
+    } else {
+        $words .= ' only';
+    }
+
+    return $words;
+}
+
+protected function numberToWords(int $num): string
+{
+    $ones = ['', 'one','two','three','four','five','six','seven','eight','nine','ten',
+             'eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen','eighteen','nineteen'];
+    $tens = ['', '', 'twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+    $scales = ['', 'thousand', 'million', 'billion'];
+
+    if ($num === 0) return 'zero';
+
+    $words = [];
+    $scaleIndex = 0;
+
+    while ($num > 0) {
+        $chunk = $num % 1000;
+        if ($chunk > 0) {
+            $chunkWords = [];
+
+            $hundreds  = intdiv($chunk, 100);
+            $remainder = $chunk % 100;
+
+            if ($hundreds > 0) $chunkWords[] = $ones[$hundreds] . ' hundred';
+
+            if ($remainder > 0) {
+                if ($remainder < 20) {
+                    $chunkWords[] = $ones[$remainder];
+                } else {
+                    $t = intdiv($remainder, 10);
+                    $u = $remainder % 10;
+                    $chunkWords[] = $tens[$t] . ($u ? '-' . $ones[$u] : '');
+                }
+            }
+
+            if ($scales[$scaleIndex] !== '') $chunkWords[] = $scales[$scaleIndex];
+
+            array_unshift($words, implode(' ', $chunkWords));
+        }
+
+        $num = intdiv($num, 1000);
+        $scaleIndex++;
+    }
+
+    return implode(' ', $words);
+}
+
+
+
 public function formExcel(Request $request, $id)
 {
     // 1) Header (same join logic as PDF — note vend_id ↔ vend_code)

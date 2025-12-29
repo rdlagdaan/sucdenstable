@@ -13,8 +13,16 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
+
+use TCPDF;
+use Illuminate\Support\Facades\Auth;
+
+
 class ReceivingController extends Controller
 {
+
     // RR list with search + posted filter
     public function rrList(Request $req)
     {
@@ -60,6 +68,7 @@ class ReceivingController extends Controller
 
         // include vendor name from PBN (if needed)
         $pbn = PbnEntry::where('pbn_number', $entry->pbn_number)->first();
+        
         $entry->vendor_name = $pbn?->vendor_name ?? '';
 
         return response()->json($entry);
@@ -114,41 +123,89 @@ class ReceivingController extends Controller
     }
 
     // Mill rates "as of" a date
-    public function millRateAsOf(Request $req)
-    {
-        $millName = $req->get('mill_name');
-        $asOf = $req->get('as_of'); // YYYY-MM-DD
+public function millRateAsOf(Request $req)
+{
+    $millName  = $req->get('mill_name');
+    $companyId = (int) $req->get('company_id');   // pass this from FE if not already
+    $cropYear  = $req->get('crop_year');          // pass this from FE OR derive if you want
 
-        $mill = MillList::where('mill_name', $millName)->first();
-        if (!$mill) return response()->json(['insurance_rate'=>0,'storage_rate'=>0,'days_free'=>0]);
-
-        $rate = MillRateHistory::where('mill_id', $mill->mill_id)
-            ->when($asOf, function($q) use ($asOf) {
-                $q->where(function($x) use ($asOf) {
-                    $x->whereDate('valid_from', '<=', $asOf)
-                      ->where(function($y) use ($asOf) {
-                         $y->whereNull('valid_to')->orWhereDate('valid_to', '>=', $asOf);
-                      });
-                });
-            })
-            ->orderByDesc('valid_from')
-            ->first();
-
-        return response()->json([
-            'insurance_rate' => (float)($rate->insurance_rate ?? 0),
-            'storage_rate'   => (float)($rate->storage_rate ?? 0),
-            'days_free'      => (int)($rate->days_free ?? 0),
-        ]);
+    if (!$millName || !$companyId || !$cropYear) {
+        return response()->json(['insurance_rate'=>0,'storage_rate'=>0,'days_free'=>0]);
     }
 
+    $mill = MillList::where('mill_name', $millName)
+        ->where('company_id', $companyId)
+        ->first();
+
+    if (!$mill) return response()->json(['insurance_rate'=>0,'storage_rate'=>0,'days_free'=>0]);
+
+    $rate = MillRateHistory::where('mill_id', $mill->mill_id)
+        ->where('crop_year', $cropYear)
+        ->orderByDesc('updated_at')
+        ->orderByDesc('id')
+        ->first();
+
+    return response()->json([
+        'insurance_rate' => (float)($rate->insurance_rate ?? 0),
+        'storage_rate'   => (float)($rate->storage_rate ?? 0),
+        'days_free'      => (int)($rate->days_free ?? 0),
+    ]);
+}
+
+
+
+protected function resolveMillRateByCropYear(string $millName, int $companyId, string $cropYear): array
+{
+    // Mill is company-scoped in your system
+    $mill = MillList::query()
+        ->where('company_id', $companyId)
+        ->where('mill_name', $millName)
+        ->first();
+
+    if (!$mill) {
+        return ['insurance_rate' => 0, 'storage_rate' => 0, 'days_free' => 0];
+    }
+
+    // mill_rate_history has NO valid_from/valid_to; use crop_year match
+    $q = MillRateHistory::query()
+        ->where('mill_id', $mill->mill_id)
+        ->where('crop_year', $cropYear);
+
+    // Choose latest record deterministically
+    if (Schema::hasColumn('mill_rate_history', 'updated_at')) {
+        $q->orderByDesc('updated_at');
+    } elseif (Schema::hasColumn('mill_rate_history', 'created_at')) {
+        $q->orderByDesc('created_at');
+    }
+    $q->orderByDesc('id');
+
+    $rate = $q->first();
+
+    return [
+        'insurance_rate' => (float)($rate->insurance_rate ?? 0),
+        'storage_rate'   => (float)($rate->storage_rate ?? 0),
+        'days_free'      => (int)  ($rate->days_free ?? 0),
+    ];
+}
+
+
     // Batch insert/upsert a single edited row (called repeatedly)
-    public function batchInsertDetails(Request $req)
-    {
-        $receiptNo = $req->get('receipt_no');
+
+public function batchInsertDetails(Request $req)
+{
+    try {
+        $receiptNo = (string) $req->get('receipt_no');
         $rowIdx    = (int) $req->get('row_index', 0);
-        $row       = $req->get('row', []);
+        $row       = (array) $req->get('row', []);
 
         $entry = ReceivingEntry::where('receipt_no', $receiptNo)->firstOrFail();
+
+        // ---- safe date helpers ----
+        $toDate = function ($v) {
+            if (!$v) return null;
+            try { return Carbon::parse($v)->format('Y-m-d'); }
+            catch (\Throwable $e) { return null; }
+        };
 
         // lookup planter name if TIN provided
         $planterName = '';
@@ -159,86 +216,173 @@ class ReceivingController extends Controller
 
         // bring pricing context (unit/commission + mill rates)
         $pbnItem = PbnEntryDetail::where('pbn_number', $entry->pbn_number)
-                    ->where('row', $entry->item_number)->first();
-        $unitCost    = (float) ($pbnItem->unit_cost ?? 0);
-        $commission  = (float) ($pbnItem->commission ?? 0);
+            ->where('row', $entry->item_number)
+            ->first();
+
+        $unitCost   = (float) ($pbnItem->unit_cost ?? 0);
+        $commission = (float) ($pbnItem->commission ?? 0);
+
+        // receipt_date ISO (works whether casted or string)
+        $receDateISO = $toDate($entry->receipt_date);
+
+$pbn = PbnEntry::where('pbn_number', $entry->pbn_number)
+    ->where('company_id', $entry->company_id)
+    ->first();
+
+$cropYear = $pbn?->crop_year ?? null;
+
 
         // mill rates as-of receipt date (or latest)
-        $rate = $this->resolveMillRate($entry->mill, optional($entry->receipt_date)->format('Y-m-d'));
-        $insuranceRate = $entry->no_insurance ? 0 : $rate['insurance_rate'];
-        $storageRate   = $entry->no_storage   ? 0 : $rate['storage_rate'];
-        $daysFree      = $rate['days_free'];
+$rate = $this->resolveMillRateByCropYear(
+    (string)$entry->mill,
+    (int)$entry->company_id,
+    $cropYear
+);
+        $insuranceRate = $entry->no_insurance ? 0 : ($rate['insurance_rate'] ?? 0);
+        $storageRate   = $entry->no_storage   ? 0 : ($rate['storage_rate'] ?? 0);
+        $daysFree      = (int) ($rate['days_free'] ?? 0);
 
-        // compute insurance/storage/AP per legacy rules
-        $weekEnding = $row['week_ending'] ?? null;
-        $weISO = $weekEnding ? date('Y-m-d', strtotime($weekEnding)) : null;
-        $receDateISO = optional($entry->receipt_date)->format('Y-m-d');
+        $weISO = $toDate($row['week_ending'] ?? null);
 
-        // week overrides from header if provided
-        $weekForIns = $entry->insurance_week ? $entry->insurance_week->format('Y-m-d') : $weISO;
-        $weekForSto = $entry->storage_week ? $entry->storage_week->format('Y-m-d') : $weISO;
+        // week overrides from header if provided (works whether casted or string)
+        $weekForIns = $toDate($entry->insurance_week) ?: $weISO;
+        $weekForSto = $toDate($entry->storage_week)   ?: $weISO;
 
         $qty = (float) ($row['quantity'] ?? 0);
 
         $monthsIns = ($weekForIns && $receDateISO) ? $this->monthsCeil($weekForIns, $receDateISO) : 0;
         $monthsSto = ($weekForSto && $receDateISO) ? $this->monthsFloorStorage($weekForSto, $receDateISO, $daysFree) : 0;
 
-        $insurance = $qty * $insuranceRate * $monthsIns;
-        $storage   = $qty * $storageRate   * $monthsSto;
-        $totalAP   = ($qty * $unitCost) - $insurance - $storage;
+$liens     = (float) ($row['liens'] ?? 0);
 
+$insurance = $qty * $insuranceRate * $monthsIns;
+$storage   = $qty * $storageRate   * $monthsSto;
+
+// ✅ legacy: AP = cost - liens - insurance - storage
+$totalAP   = ($qty * $unitCost) - $liens - $insurance - $storage;
+
+
+        // ✅ DO NOT upsert by id=0
+        // Use (receipt_no,row) as the stable identity
         $detail = ReceivingDetail::updateOrCreate(
-            ['id' => $row['id'] ?? 0],
+            [
+                'receipt_no' => $receiptNo,
+                'row'        => $rowIdx,
+            ],
             [
                 'receiving_entry_id' => $entry->id,
-                'row'        => $rowIdx,
-                'receipt_no' => $receiptNo,
-                'quedan_no'  => $row['quedan_no'] ?? null,
-                'quantity'   => $qty,
-                'liens'      => (float) ($row['liens'] ?? 0),
-                'week_ending'=> $weISO,
-                'date_issued'=> $row['date_issued'] ?? null,
-                'planter_tin'=> $row['planter_tin'] ?? null,
-                'planter_name'=> $planterName,
-                'item_no'    => $entry->item_number,
-                'mill'       => $entry->mill,
-                'unit_cost'  => $unitCost,
-                'commission' => $commission,
-                'storage'    => $storage,
-                'insurance'  => $insurance,
-                'total_ap'   => $totalAP,
-                'user_id'    => $entry->user_id,
-                'workstation_id' => $entry->workstation_id,
+                'quedan_no'     => $row['quedan_no'] ?? null,
+                'quantity'      => $qty,
+                'liens' => $liens,
+                'week_ending'   => $weISO,
+                'date_issued'   => $toDate($row['date_issued'] ?? null),
+                'planter_tin'   => $row['planter_tin'] ?? null,
+                'planter_name'  => $planterName,
+                'item_no'       => $entry->item_number,
+                'mill'          => $entry->mill,
+                'unit_cost'     => $unitCost,
+                'commission'    => $commission,
+                'storage'       => $storage,
+                'insurance'     => $insurance,
+                'total_ap'      => $totalAP,
+                'user_id'       => $entry->user_id,
+                'workstation_id'=> $entry->workstation_id,
             ]
         );
 
-        return response()->json(['id' => $detail->id]);
+        return response()->json([
+            'id'           => $detail->id,
+            'row'          => $detail->row,
+            'planter_tin'  => $detail->planter_tin,
+            'planter_name' => $detail->planter_name,
+
+            'item_no'      => $detail->item_no,
+            'mill'         => $detail->mill,
+            'unit_cost'    => (float)$detail->unit_cost,
+            'commission'   => (float)$detail->commission,
+
+            'storage'      => (float)$detail->storage,
+            'insurance'    => (float)$detail->insurance,
+            'total_ap'     => (float)$detail->total_ap,
+        ]);
+    } catch (\Throwable $e) {
+        Log::error('Receiving batch-insert failed', [
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString(),
+            'payload' => $req->all(),
+        ]);
+
+        // return something more helpful while debugging
+        return response()->json([
+            'message' => 'Server Error',
+            'debug'   => $e->getMessage(),
+        ], 500);
+    }
+}
+
+
+public function updateFlag(Request $req)
+{
+    $companyId = $this->companyIdFromRequest($req);
+
+    $req->validate([
+        'receipt_no' => 'required',
+        'field'      => 'in:no_storage,no_insurance',
+        'value'      => 'required|in:0,1',
+    ]);
+
+    $entry = \App\Models\ReceivingEntry::where('company_id', $companyId)
+        ->where('receipt_no', $req->receipt_no)
+        ->firstOrFail();
+
+    $entry->update([$req->field => (int)$req->value]);
+
+    // ✅ CRITICAL FIX: recompute detail computed fields
+    $this->recomputeReceivingDetails($entry->fresh());
+
+    return response()->json(['ok' => true]);
+}
+
+
+public function updateDate(Request $req)
+{
+    $companyId = $this->companyIdFromRequest($req);
+
+    $req->validate([
+        'receipt_no' => 'required',
+        'field'      => 'in:storage_week,insurance_week,receipt_date',
+    ]);
+
+    $entry = ReceivingEntry::where('company_id', $companyId)
+        ->where('receipt_no', $req->receipt_no)
+        ->firstOrFail();
+
+    $val = $req->get('value');
+    $newDate = $val ? date('Y-m-d', strtotime($val)) : null;
+
+    // ✅ Update header (safe now because $timestamps=false on ReceivingEntry)
+    $entry->{$req->field} = $newDate;
+    $entry->save();
+
+    // ✅ LEGACY BEHAVIOR:
+    // Selecting Storage Week OR Insurance Week forces ALL row.week_ending to that date
+    if (in_array($req->field, ['storage_week', 'insurance_week'], true) && $newDate) {
+        DB::table('receiving_details')
+            ->where('receiving_entry_id', $entry->id)
+            ->where('receipt_no', $entry->receipt_no)
+            ->update([
+                'week_ending' => $newDate,
+                'updated_at'  => now(),
+            ]);
     }
 
-    public function updateFlag(Request $req)
-    {
-        $req->validate([
-            'receipt_no' => 'required',
-            'field'      => 'in:no_storage,no_insurance',
-            'value'      => 'required|in:0,1',
-        ]);
-        $entry = ReceivingEntry::where('receipt_no', $req->receipt_no)->firstOrFail();
-        $entry->update([$req->field => (int)$req->value]);
-        return response()->json(['ok' => true]);
-    }
+    // ✅ Recompute after any date change (receipt_date affects months calc)
+    $this->recomputeReceivingDetails($entry->fresh());
 
-    public function updateDate(Request $req)
-    {
-        $req->validate([
-            'receipt_no' => 'required',
-            'field'      => 'in:storage_week,insurance_week,receipt_date',
-        ]);
-        $entry = ReceivingEntry::where('receipt_no', $req->receipt_no)->firstOrFail();
-        $val = $req->get('value');
-        $entry->{$req->field} = $val ? date('Y-m-d', strtotime($val)) : null;
-        $entry->save();
-        return response()->json(['ok' => true]);
-    }
+    return response()->json(['ok' => true]);
+}
+
+
 
     public function updateGL(Request $req)
     {
@@ -264,42 +408,66 @@ class ReceivingController extends Controller
         return response()->json(['ok' => true]);
     }
 
-    public function updateMillName(Request $req)
-    {
-        $req->validate([
-            'receipt_no' => 'required',
-            'mill'       => 'required|string',
-        ]);
-        $exists = MillList::where('mill_name', $req->mill)->exists();
-        if (!$exists) return response()->json(['ok' => false, 'msg' => 'Mill not found'], 422);
+public function updateMillName(Request $req)
+{
+    $companyId = $this->companyIdFromRequest($req);
 
-        ReceivingEntry::where('receipt_no', $req->receipt_no)->update(['mill' => $req->mill]);
-        return response()->json(['ok' => true]);
+    $req->validate([
+        'receipt_no' => 'required',
+        'mill'       => 'required|string',
+    ]);
+
+    $entry = ReceivingEntry::where('company_id', $companyId)
+        ->where('receipt_no', $req->receipt_no)
+        ->firstOrFail();
+
+    $exists = MillList::where('company_id', $companyId)
+        ->where('mill_name', $req->mill)
+        ->exists();
+
+    if (!$exists) {
+        return response()->json(['ok' => false, 'msg' => 'Mill not found'], 422);
     }
+
+    // update header
+    $entry->mill = $req->mill;
+    $entry->save();
+
+    // ✅ recompute computed fields after mill change
+    $this->recomputeReceivingDetails($entry->fresh());
+
+    return response()->json(['ok' => true]);
+}
+
 
     // --- helpers ---
-    protected function resolveMillRate(string $millName, ?string $asOf): array
-    {
-        $mill = MillList::where('mill_name', $millName)->first();
-        if (!$mill) return ['insurance_rate'=>0,'storage_rate'=>0,'days_free'=>0];
-
-        $q = MillRateHistory::where('mill_id', $mill->mill_id);
-        if ($asOf) {
-            $q->where(function($x) use ($asOf) {
-                $x->whereDate('valid_from', '<=', $asOf)
-                  ->where(function($y) use ($asOf) {
-                      $y->whereNull('valid_to')->orWhereDate('valid_to', '>=', $asOf);
-                  });
-            });
-        }
-        $rate = $q->orderByDesc('valid_from')->first();
-
-        return [
-            'insurance_rate' => (float)($rate->insurance_rate ?? 0),
-            'storage_rate'   => (float)($rate->storage_rate ?? 0),
-            'days_free'      => (int)($rate->days_free ?? 0),
-        ];
+protected function resolveMillRate(string $millName, ?int $companyId, ?string $cropYear): array
+{
+    if (!$millName || !$companyId || !$cropYear) {
+        return ['insurance_rate'=>0,'storage_rate'=>0,'days_free'=>0];
     }
+
+    // 1) Resolve the mill row in mill_list (company-scoped)
+    $mill = MillList::where('mill_name', $millName)
+        ->where('company_id', $companyId)
+        ->first();
+
+    if (!$mill) return ['insurance_rate'=>0,'storage_rate'=>0,'days_free'=>0];
+
+    // 2) Resolve rate by mill_id + crop_year (no valid_from/valid_to in your schema)
+    $rate = MillRateHistory::where('mill_id', $mill->mill_id)
+        ->where('crop_year', $cropYear)
+        ->orderByDesc('updated_at')
+        ->orderByDesc('id')
+        ->first();
+
+    return [
+        'insurance_rate' => (float)($rate->insurance_rate ?? 0),
+        'storage_rate'   => (float)($rate->storage_rate ?? 0),
+        'days_free'      => (int)($rate->days_free ?? 0),
+    ];
+}
+
 
     protected function monthsCeil(string $fromISO, string $toISO): int
     {
@@ -494,6 +662,1069 @@ public function createEntry(\Illuminate\Http\Request $req)
         return response()->json(['message' => $e->getMessage()], 500);
     }
 }
+
+
+
+public function pricingContext(Request $req)
+{
+    $pbnNumber  = (string) $req->get('pbn_number');
+    $itemNo     = (string) $req->get('item_no');
+    $millName   = (string) $req->get('mill_name');
+    $companyId  = (int) ($req->header('X-Company-ID') ?: $req->get('company_id'));
+
+    if (!$pbnNumber || $itemNo === '' || !$millName || !$companyId) {
+        return response()->json([
+            'unit_cost' => 0, 'commission' => 0,
+            'insurance_rate' => 0, 'storage_rate' => 0, 'days_free' => 0,
+            'crop_year' => null, 'mill' => $millName,
+        ]);
+    }
+
+    $pbn = PbnEntry::where('pbn_number', $pbnNumber)
+        ->where('company_id', $companyId)
+        ->first();
+
+    $cropYear = $pbn?->crop_year ?? null;
+
+    $pbnItem = PbnEntryDetail::query()
+        ->where('pbn_number', $pbnNumber)
+        ->where('row', $itemNo)
+        ->select('unit_cost','commission','mill')
+        ->first();
+
+    // prefer mill from pbn detail if present
+    $finalMill = (string) ($pbnItem?->mill ?: $millName);
+
+    $rate = $this->resolveMillRateByCropYear($finalMill, $companyId, (string)$cropYear);
+
+    return response()->json([
+        'unit_cost'      => (float)($pbnItem?->unit_cost ?? 0),
+        'commission'     => (float)($pbnItem?->commission ?? 0),
+        'insurance_rate' => (float)($rate['insurance_rate'] ?? 0),
+        'storage_rate'   => (float)($rate['storage_rate'] ?? 0),
+        'days_free'      => (int)  ($rate['days_free'] ?? 0),
+        'crop_year'      => $cropYear,
+        'mill'           => $finalMill,
+    ]);
+}
+
+
+
+// =========================
+// Helpers: company + recompute
+// =========================
+
+private function companyIdFromRequest(\Illuminate\Http\Request $req): int
+{
+    // Priority: explicit param -> header (axiosnapi usually sets X-Company-ID)
+    $companyId = (int) ($req->input('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        abort(422, 'Missing company_id (param or X-Company-ID header).');
+    }
+    return $companyId;
+}
+
+private function loadMillRateContext(int $companyId, string $mill, ?string $asOfDate): array
+{
+    // mill_list table (you gave exact fields)
+    $millRow = \Illuminate\Support\Facades\DB::table('mill_list')
+        ->where('company_id', $companyId)
+        ->where(function ($q) use ($mill) {
+            $q->where('mill_name', $mill)
+              ->orWhere('mill_id', $mill);
+        })
+        ->first();
+
+    if (!$millRow) {
+        // no mill match -> safe fallback (no rates)
+        return ['insurance_rate' => 0, 'storage_rate' => 0, 'days_free' => 0];
+    }
+
+    $q = \Illuminate\Support\Facades\DB::table('mill_rate_history')
+        ->where('mill_record_id', $millRow->id);
+
+    // choose the rate "as of" receipt_date if possible (created_at <= receipt_date),
+    // otherwise fallback to latest record
+    if ($asOfDate) {
+        $q->whereDate('created_at', '<=', $asOfDate);
+    }
+
+    $rate = $q->orderByDesc('created_at')->first();
+
+    if (!$rate) {
+        // fallback: latest of all
+        $rate = \Illuminate\Support\Facades\DB::table('mill_rate_history')
+            ->where('mill_record_id', $millRow->id)
+            ->orderByDesc('created_at')
+            ->first();
+    }
+
+    return [
+        'insurance_rate' => (float) ($rate->insurance_rate ?? 0),
+        'storage_rate'   => (float) ($rate->storage_rate   ?? 0),
+        'days_free'      => (int)   ($rate->days_free      ?? 0),
+    ];
+}
+
+private function calcMonthsCeil(?string $fromDate, ?string $toDate): int
+{
+    if (!$fromDate || !$toDate) return 0;
+
+    $from = strtotime($fromDate);
+    $to   = strtotime($toDate);
+    if (!$from || !$to) return 0;
+
+    $diffDays = max(0, ($to - $from) / 86400);
+    return (int) ceil($diffDays / 30);
+}
+
+private function calcMonthsFloorStorage(?string $fromDate, ?string $toDate, int $freeDays): int
+{
+    if (!$fromDate || !$toDate) return 0;
+
+    $from = strtotime($fromDate);
+    $to   = strtotime($toDate);
+    if (!$from || !$to) return 0;
+
+    $diffDays = max(0, ($to - $from) / 86400);
+    $diffDays = max(0, $diffDays - max(0, $freeDays));
+    return (int) floor($diffDays / 30);
+}
+
+private function recomputeReceivingDetails(ReceivingEntry $entry): void
+{
+    $ctx = $this->loadMillRateContext((int)$entry->company_id, (string)$entry->mill, $entry->receipt_date);
+
+    $insuranceRate = (float) $ctx['insurance_rate'];
+    $storageRate   = (float) $ctx['storage_rate'];
+    $daysFree      = (int)   $ctx['days_free'];
+
+    $receiptDate = $entry->receipt_date ? $entry->receipt_date->format('Y-m-d') : null;
+
+    $headerInsWeek = $entry->insurance_week ? date('Y-m-d', strtotime($entry->insurance_week)) : null;
+    $headerStoWeek = $entry->storage_week   ? date('Y-m-d', strtotime($entry->storage_week))   : null;
+
+    $details = DB::table('receiving_details')
+        ->where('receipt_no', $entry->receipt_no)
+        ->where('receiving_entry_id', $entry->id)
+        ->get();
+
+    foreach ($details as $d) {
+        $qty      = (float) ($d->quantity  ?? 0);
+        $unitCost = (float) ($d->unit_cost ?? 0);
+
+        $rowWeek = $d->week_ending ? date('Y-m-d', strtotime($d->week_ending)) : null;
+
+        // ✅ insurance uses insurance_week if present else row week
+        $weekForIns = $headerInsWeek ?: $rowWeek;
+
+        // ✅ storage uses storage_week if present else row week
+        $weekForSto = $headerStoWeek ?: $rowWeek;
+
+        $ins = 0.0;
+        if (!$entry->no_insurance && $weekForIns && $receiptDate) {
+            $m = $this->calcMonthsCeil($weekForIns, $receiptDate);
+            $ins = $qty * $insuranceRate * $m;
+        }
+
+        $sto = 0.0;
+        if (!$entry->no_storage && $weekForSto && $receiptDate) {
+            $m = $this->calcMonthsFloorStorage($weekForSto, $receiptDate, $daysFree);
+            $sto = $qty * $storageRate * $m;
+        }
+
+$liens   = (float) ($d->liens ?? 0);
+$totalAp = ($qty * $unitCost) - $liens - $sto - $ins;
+
+        DB::table('receiving_details')
+            ->where('id', $d->id)
+            ->update([
+                'insurance' => round($ins, 2),
+                'storage'   => round($sto, 2),
+                'total_ap'  => round($totalAp, 2),
+                'updated_at'=> now(),
+            ]);
+    }
+}
+
+
+public function millList(Request $req)
+{
+    try {
+        $companyId = $this->companyIdFromRequest($req);
+        $q = trim((string) $req->query('q', ''));
+
+        $rows = MillList::query()
+            ->select('mill_name')
+            ->where('company_id', $companyId)
+            ->when($q !== '', function ($qr) use ($q) {
+                $qq = strtolower($q);
+                $qr->whereRaw('LOWER(mill_name) LIKE ?', ["%{$qq}%"]);
+            })
+            ->orderBy('mill_name')
+            ->limit(200)
+            ->get();
+
+        return response()->json($rows);
+    } catch (\Throwable $e) {
+        Log::error('millList failed', [
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString(),
+            'q' => $req->query('q'),
+            'company_id_param' => $req->input('company_id'),
+            'company_id_header' => $req->header('X-Company-ID'),
+        ]);
+
+        return response()->json([
+            'message' => 'Server Error',
+            // keep this while debugging; remove later if you want
+            'debug' => $e->getMessage(),
+        ], 500);
+    }
+}
+
+
+// App\Http\Controllers\ReceivingController.php
+
+
+
+public function receivingReportPdf(Request $req, string $receiptNo)
+{
+    $companyId = (int) ($req->query('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    // ----------------------------
+    // 1) Load header + PBN context
+    // ----------------------------
+    $entry = ReceivingEntry::query()
+        ->where('company_id', $companyId)
+        ->where('receipt_no', $receiptNo)
+        ->firstOrFail();
+
+    $pbn = PbnEntry::query()
+        ->where('company_id', $companyId)
+        ->where('pbn_number', $entry->pbn_number)
+        ->first();
+
+    $sugarType  = (string) ($pbn?->sugar_type ?? '');
+    $cropYear   = (string) ($pbn?->crop_year ?? '');
+    $vendorName = (string) ($pbn?->vendor_name ?? '');
+    $vendorCode = (string) ($pbn?->vend_code ?? '');
+
+    // Legacy "yearPrefix" is last 2 digits of PBN date (mm/dd/yyyy)
+    // New system: safest equivalent is last 2 digits of crop_year if present, else receipt year
+    $yearPrefix = '';
+    if ($cropYear !== '') {
+        $yearPrefix = substr($cropYear, -2);
+    } else {
+        $yearPrefix = date('y', strtotime((string)$entry->receipt_date));
+    }
+
+    $pbnNo     = (string) $entry->pbn_number;
+    $pbnDate   = $pbn?->pbn_date ? date('m/d/Y', strtotime($pbn->pbn_date)) : ''; // if your pbn_entry has pbn_date
+    $receiptDt = $entry->receipt_date ? date('m/d/Y', strtotime((string)$entry->receipt_date)) : '';
+
+    // ----------------------------
+    // 2) Control no (new system)
+    // ----------------------------
+    // Uses application_settings row:
+    //   appset_code = 'ReceivingReportControlNum'
+    //   company_id  = ?
+    //   type        = sugarType (optional but matches legacy style)
+    $controlNo = $this->nextReceivingReportControlNo($companyId, $sugarType);
+
+    // ----------------------------
+    // 3) Load details (quedan lines)
+    // ----------------------------
+    $details = ReceivingDetail::query()
+        ->where('receiving_entry_id', $entry->id)
+        ->where('receipt_no', $entry->receipt_no)
+        ->orderBy('row')
+        ->get();
+
+    // ----------------------------
+    // 4) Totals (legacy-style)
+    // ----------------------------
+    // In legacy table header, it shows ONE line per RR No (receiptNo).
+    // Your new module is already per receipt_no, so we summarize all details into ONE RR row.
+    $totalQty   = 0.0;
+    $totalLiens = 0.0;
+    $unitCost   = (float)($details->first()?->unit_cost ?? 0);
+
+    foreach ($details as $d) {
+        $totalQty   += (float)$d->quantity;
+        $totalLiens += (float)$d->liens;
+    }
+
+    // Determine rates (company + mill + crop_year)
+    $rate = $this->resolveMillRateByCropYear((string)$entry->mill, (int)$entry->company_id, (string)$cropYear);
+    $insuranceRate = $entry->no_insurance ? 0.0 : (float)($rate['insurance_rate'] ?? 0);
+    $storageRate   = $entry->no_storage   ? 0.0 : (float)($rate['storage_rate'] ?? 0);
+    $daysFree      = (int) ($rate['days_free'] ?? 0);
+
+    // Recompute Insurance/Storage exactly like your legacy report:
+    // legacy loops each detail row and sums insurance+storage based on receiptDate vs weekEnding
+    $receiptISO = $entry->receipt_date ? date('Y-m-d', strtotime((string)$entry->receipt_date)) : null;
+
+    $totalInsurance = 0.0;
+    $totalStorage   = 0.0;
+    $totalAssocDues = 0.0;
+
+    foreach ($details as $d) {
+        $qty = (float)$d->quantity;
+
+        $rowWeekISO = $d->week_ending ? date('Y-m-d', strtotime((string)$d->week_ending)) : null;
+
+        $insWeekISO = $entry->insurance_week
+            ? date('Y-m-d', strtotime((string)$entry->insurance_week))
+            : $rowWeekISO;
+
+        $stoWeekISO = $entry->storage_week
+            ? date('Y-m-d', strtotime((string)$entry->storage_week))
+            : $rowWeekISO;
+
+        if (!$entry->no_insurance && $insWeekISO && $receiptISO) {
+            $monthsIns = $this->monthsCeil($insWeekISO, $receiptISO);
+            $totalInsurance += ($qty * $insuranceRate * $monthsIns);
+        }
+
+        if (!$entry->no_storage && $stoWeekISO && $receiptISO) {
+            $monthsSto = $this->monthsFloorStorage($stoWeekISO, $receiptISO, $daysFree);
+            $totalStorage += ($qty * $storageRate * $monthsSto);
+        }
+    }
+
+    // If you store assoc_dues in header (receiving_entry.assoc_dues), use that.
+    $totalAssocDues = (float)($entry->assoc_dues ?? 0);
+
+    $totalCost = $unitCost * $totalQty;
+    $totalAP   = $totalCost - ($totalLiens + $totalInsurance + $totalStorage);
+
+    // Withholding Tax: 1% of COST, truncated (floor to 2 decimals)
+    $withHoldingTax = $totalCost * 0.01;
+    $withHoldingTaxV = floor($withHoldingTax * 100) / 100;
+
+    $netAP = $totalAP - ($withHoldingTax + $totalAssocDues);
+
+    // Formatting
+    $fmt2 = fn($n) => number_format((float)$n, 2);
+
+    $totalQtyV       = $fmt2($totalQty);
+    $unitCostV       = $fmt2($unitCost);
+    $totalCostV      = $fmt2($totalCost);
+    $totalLiensV     = $fmt2($totalLiens);
+    $totalInsV       = $fmt2($totalInsurance);
+    $totalStoV       = $fmt2($totalStorage);
+    $totalAPV        = $fmt2($totalAP);
+    $assocDuesV      = $fmt2($totalAssocDues);
+    $withHoldingTaxV = $fmt2($withHoldingTaxV);
+    $netAPV          = $fmt2($netAP);
+
+    // ----------------------------
+    // 5) Account mapping (legacy)
+    // ----------------------------
+    $inventoryAcct = match ($sugarType) {
+        'A' => '1201',
+        'B' => '1203',
+        'C' => '1202',
+        'D' => '1204',
+        default => '1201',
+    };
+
+    $liensPayAcct = match ($sugarType) {
+        'A' => '3031',
+        'B' => '3033',
+        'C' => '3032',
+        default => '3031',
+    };
+    $insurancePayAcct = match ($sugarType) {
+        'A' => '3041',
+        'B' => '3043',
+        'C' => '3042',
+        default => '3041',
+    };
+    $storagePayAcct = match ($sugarType) {
+        'A' => '3051',
+        'B' => '3053',
+        'C' => '3052',
+        default => '3051',
+    };
+
+    $withHoldingTaxAcct = '3074';
+    $assocDueAcct       = '1401';
+    $apAcct             = '3023';
+
+    // fetch descriptions from account_code.acct_code
+    $acctDesc = function (string $acct) use ($companyId) {
+        $row = DB::table('account_code')
+            ->where('acct_code', $acct)
+            ->first();
+        return (string)($row->acct_desc ?? '');
+    };
+
+    $inventoryDesc = $acctDesc($inventoryAcct);
+    $liensDesc     = $acctDesc($liensPayAcct);
+    $insDesc       = $acctDesc($insurancePayAcct);
+    $stoDesc       = $acctDesc($storagePayAcct);
+    $whtDesc       = $acctDesc($withHoldingTaxAcct);
+    $assocDesc     = $acctDesc($assocDueAcct);
+    $apDesc        = $acctDesc($apAcct);
+
+    // ----------------------------
+    // 6) TCPDF (legacy layout)
+    // ----------------------------
+    // NOTE: adjust this path to your actual logo location in Laravel
+// ----------------------------
+// 6) TCPDF (legacy layout) + LOGO
+// ----------------------------
+
+// Try common logo locations (supports jpg/png)
+// ----------------------------
+// 6) TCPDF (legacy layout) + LOGO (company-based)
+// ----------------------------
+
+// company_id=1 => sucdenLogo
+// company_id=2 => ameropLogo
+$logoCandidates = match ((int)$companyId) {
+    1 => [
+        public_path('sucdenLogo.jpg'),
+        public_path('sucdenLogo.png'),
+        public_path('images/sucdenLogo.jpg'),
+        public_path('images/sucdenLogo.png'),
+    ],
+    2 => [
+        public_path('ameropLogo.jpg'),
+        public_path('ameropLogo.png'),
+        public_path('images/ameropLogo.jpg'),
+        public_path('images/ameropLogo.png'),
+    ],
+    default => [
+        public_path('sucdenLogo.jpg'),
+        public_path('sucdenLogo.png'),
+        public_path('images/sucdenLogo.jpg'),
+        public_path('images/sucdenLogo.png'),
+    ],
+};
+
+$logoPath = '';
+foreach ($logoCandidates as $p) {
+    if (is_file($p)) { $logoPath = $p; break; }
+}
+
+
+// Custom PDF class for header + last-page footer
+$pdf = new class($logoPath) extends \TCPDF {
+    private bool $last_page_flag = false;
+    private string $logoPath;
+
+    public function __construct(string $logoPath)
+    {
+        $this->logoPath = $logoPath;
+        parent::__construct('P', 'mm', 'LETTER', true, 'UTF-8', false);
+    }
+
+    public function Close(): void
+    {
+        $this->last_page_flag = true;
+        parent::Close();
+    }
+
+    public function Header(): void
+    {
+        if ($this->logoPath && is_file($this->logoPath)) {
+            $ext  = strtolower(pathinfo($this->logoPath, PATHINFO_EXTENSION));
+            $type = ($ext === 'png') ? 'PNG' : 'JPG';
+
+            // Same coordinates as legacy/PBN feel
+            $this->Image($this->logoPath, 15, 10, 50, 0, $type, '', 'T', false, 200);
+        }
+    }
+
+    public function Footer(): void
+    {
+        if (!$this->last_page_flag) return;
+
+        $this->SetY(-40);
+        $this->SetFont('helvetica', 'I', 8);
+
+        $currentDate = date('M d, Y');
+        $currentTime = date('h:i');
+
+        $preparedBy = session('userName', '');
+        $checkedBy  = session('checkedBy', '');
+        $notedBy    = session('notedBy', '');
+        $postedBy   = session('postedBy', '');
+        $encodedBy  = session('encodedBy', '');
+
+        $html = '';
+        $html .= '<table border="0">';
+        $html .= '  <tr>';
+        $html .= '    <td width="28%">';
+        $html .= '      <table border="0" cellpadding="5">';
+        $html .= '        <tr><td align="left"><font size="6"><br><br><br></font></td></tr>';
+        $html .= '        <tr><td><font size="7">APV #________<br>Print Date: '.$currentDate.' '.$currentTime.'</font></td></tr>';
+        $html .= '      </table>';
+        $html .= '    </td>';
+        $html .= '    <td width="2%"></td>';
+        $html .= '    <td width="70%">';
+        $html .= '      <table border="1" cellpadding="5">';
+        $html .= '        <tr>';
+        $html .= '          <td><font size="8">Encoded by:<br><br><br><br><br>'.$encodedBy.'</font></td>';
+        $html .= '          <td><font size="8">Prepared by:<br><br><br><br><br>'.$preparedBy.'</font></td>';
+        $html .= '          <td><font size="8">Checked by:<br><br><br><br><br>'.$checkedBy.'</font></td>';
+        $html .= '          <td><font size="8">Noted by:<br><br><br><br><br>'.$notedBy.'</font></td>';
+        $html .= '          <td><font size="8">Posted by:<br><br><br><br><br>'.$postedBy.'</font></td>';
+        $html .= '        </tr>';
+        $html .= '      </table>';
+        $html .= '    </td>';
+        $html .= '  </tr>';
+        $html .= '</table>';
+
+        $this->writeHTML($html, true, false, false, false, '');
+    }
+};
+
+    // PDF setup similar to legacy
+    $pdf->SetMargins(15, 27, 15);
+    $pdf->SetHeaderMargin(5);
+    $pdf->SetFooterMargin(15);
+    $pdf->SetAutoPageBreak(true, 25);
+    $pdf->AddPage('P', 'LETTER');
+    $pdf->SetFont('helvetica', '', 7);
+
+    // Title block (legacy-like)
+    $controlDisplay = htmlspecialchars($sugarType.$yearPrefix.'-'.$controlNo);
+
+    $tbl  = '<br><br>';
+    $tbl .= '<table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">';
+    $tbl .= '  <tr>
+                <td width="15%"></td>
+                <td width="30%"></td>
+                <td width="20%"></td>
+                <td width="40%" colspan="2"><div><font size="14"><b>Receiving Report</b></font></div></td>
+              </tr>';
+    $tbl .= '  <tr><td colspan="5"></td></tr>';
+
+    $tbl .= '  <tr>
+                <td width="15%"><font size="8">PBN No:</font></td>
+                <td width="30%"><font size="8">'.htmlspecialchars($pbnNo).'</font></td>
+                <td width="20%"></td>
+                <td width="35%" colspan="2">
+                    <font size="8">Control No:</font>
+                    <font size="14" color="blue"><b><u>               '.$controlDisplay.'</u></b></font><br>
+                </td>
+              </tr>';
+
+    $tbl .= '  <tr>
+                <td width="15%"><font size="8">PBN Date:</font></td>
+                <td width="30%"><font size="8">'.htmlspecialchars($pbnDate).'</font></td>
+                <td width="20%"></td>
+                <td width="15%"><font size="8">Receipt Date:</font></td>
+                <td width="20%"><font size="8">'.htmlspecialchars($receiptDt).'</font></td>
+              </tr>';
+
+    $tbl .= '  <tr>
+                <td width="15%"><font size="8">Coop/Supplier:</font></td>
+                <td width="30%"><font size="8">'.htmlspecialchars($vendorName).'</font></td>
+                <td width="20%"></td>
+                <td width="15%"><font size="8">Sugar Type:</font></td>
+                <td width="20%"><font size="8">'.htmlspecialchars($sugarType).'</font></td>
+              </tr>';
+
+    $tbl .= '  <tr>
+                <td width="15%"><font size="8">Trader:</font></td>
+                <td width="30%"><font size="8">'.htmlspecialchars($vendorCode).'</font></td>
+                <td width="20%"></td>
+                <td width="15%"></td>
+                <td width="20%"></td>
+              </tr>';
+    $tbl .= '</table>';
+
+    // Detail table header (legacy)
+    $tbl .= '<table border="0" cellpadding="0" cellspacing="0" nobr="true" width="100%">';
+    $tbl .= '  <tr><td colspan="10"><hr height="2px"></td></tr>';
+    $tbl .= '  <tr align="left">
+                <td width="12%"><font size="8">RR No:</font></td>
+                <td width="11%"><font size="8">Mill</font></td>
+                <td width="11%" align="center"><font size="8">LKG</font></td>
+                <td width="11%" align="center"><font size="8">Unit Cost</font></td>
+                <td width="11%" align="center"><font size="8">Cost</font></td>
+                <td width="11%" align="center"><font size="8">Liens</font></td>
+                <td width="11%" align="center"><font size="8">Insurance</font></td>
+                <td width="11%" align="center"><font size="8">Storage</font></td>
+                <td width="11%" align="center"><font size="8">AP</font></td>
+              </tr>';
+    $tbl .= '  <tr><td colspan="10"><hr height="1px"></td></tr>';
+
+    // Single summary row (new module = one receipt_no)
+    $tbl .= '  <tr>
+                <td align="left">'.htmlspecialchars($entry->receipt_no).'</td>
+                <td align="left">'.htmlspecialchars((string)$entry->mill).'</td>
+                <td align="right">'.$totalQtyV.'</td>
+                <td align="right">'.$unitCostV.'</td>
+                <td align="right">'.$totalCostV.'</td>
+                <td align="right">'.$totalLiensV.'</td>
+                <td align="right">'.$totalInsV.'</td>
+                <td align="right">'.$totalStoV.'</td>
+                <td align="right">'.$totalAPV.'</td>
+              </tr>';
+
+    // Totals underline section (legacy look)
+    $tbl .= '  <tr>
+                <td></td><td></td>
+                <td align="right"><hr></td>
+                <td></td>
+                <td align="right"><hr></td>
+                <td align="right" colspan="4"><hr></td>
+              </tr>';
+
+    $tbl .= '  <tr>
+                <td align="left"></td>
+                <td align="left"></td>
+                <td align="right">'.$totalQtyV.'</td>
+                <td align="right"></td>
+                <td align="right">'.$totalCostV.'</td>
+                <td align="right">'.$totalLiensV.'</td>
+                <td align="right">'.$totalInsV.'</td>
+                <td align="right">'.$totalStoV.'</td>
+                <td align="right">'.$totalAPV.'</td>
+              </tr>';
+
+    $tbl .= '  <tr>
+                <td></td><td></td>
+                <td align="right"><hr height="2px"></td>
+                <td></td>
+                <td align="right"><hr height="2px"></td>
+                <td align="right" colspan="4"><hr height="2px"></td>
+              </tr>';
+
+    // Summary box (legacy)
+    $tbl .= '  <tr><td align="right" colspan="9"><br></td></tr>';
+
+    $tbl .= '  <tr><td colspan="9">
+                <table cellspacing="2" cellpadding="2">
+                  <tr>
+                    <td colspan="7"></td>
+                    <td align="left"><font size="8">Assoc Due</font></td>
+                    <td align="right"></td>
+                    <td align="right"><font size="8">'.$assocDuesV.'</font></td>
+                  </tr>
+                  <tr>
+                    <td colspan="7"></td>
+                    <td align="left"><font size="8">Insurance</font></td>
+                    <td align="right"></td>
+                    <td align="right"><font size="8">'.$totalInsV.'</font></td>
+                  </tr>
+                  <tr>
+                    <td colspan="7"></td>
+                    <td align="left"><font size="8">Storage</font></td>
+                    <td align="right"></td>
+                    <td align="right"><font size="8">'.$totalStoV.'</font></td>
+                  </tr>
+                  <tr>
+                    <td colspan="7"></td>
+                    <td align="left" colspan="2"><font size="8">Withholding Tax%</font></td>
+                    <td align="right"><font size="8">'.$withHoldingTaxV.'</font></td>
+                  </tr>
+                  <tr>
+                    <td colspan="7"></td>
+                    <td align="left"></td>
+                    <td align="right" colspan="2"><hr></td>
+                  </tr>
+                  <tr>
+                    <td colspan="7"></td>
+                    <td align="left"><font size="8">Net AP</font></td>
+                    <td align="right"></td>
+                    <td align="right"><font size="8">'.$netAPV.'</font></td>
+                  </tr>
+                  <tr>
+                    <td colspan="7"></td>
+                    <td align="left"></td>
+                    <td align="right" colspan="2"><hr height="2px"></td>
+                  </tr>
+                </table>
+              </td></tr>';
+
+    $tbl .= '  <tr><td colspan="10">Note: Quedan Listings Attached</td></tr>';
+    $tbl .= '  <tr><td colspan="10"><br><br></td></tr>';
+
+    // Accounting entries (legacy block)
+    $tbl .= '  <tr>
+                <td colspan="7">
+                  <table border="1">
+                    <tr>
+                      <td>
+                        <table cellpadding="2">
+                          <tr>
+                            <td width="15%"><font size="8">Account</font></td>
+                            <td width="35%"><font size="8">Description</font></td>
+                            <td width="20%" align="center"><font size="8">Debit</font></td>
+                            <td width="20%" align="center"><font size="8">Credit</font></td>
+                          </tr>
+
+                          <tr>
+                            <td><font size="8">'.$inventoryAcct.'</font></td>
+                            <td><font size="8">'.htmlspecialchars($inventoryDesc).'</font></td>
+                            <td align="right"><font size="8">'.$totalCostV.'</font></td>
+                            <td align="right"><font size="8"></font></td>
+                          </tr>
+
+                          <tr>
+                            <td><font size="8">'.$liensPayAcct.'</font></td>
+                            <td><font size="8">'.htmlspecialchars($liensDesc).'</font></td>
+                            <td align="right"><font size="8"></font></td>
+                            <td align="right"><font size="8">'.$totalLiensV.'</font></td>
+                          </tr>
+
+                          <tr>
+                            <td><font size="8">'.$insurancePayAcct.'</font></td>
+                            <td><font size="8">'.htmlspecialchars($insDesc).'</font></td>
+                            <td align="right"><font size="8"></font></td>
+                            <td align="right"><font size="8">'.$totalInsV.'</font></td>
+                          </tr>
+
+                          <tr>
+                            <td><font size="8">'.$storagePayAcct.'</font></td>
+                            <td><font size="8">'.htmlspecialchars($stoDesc).'</font></td>
+                            <td align="right"><font size="8"></font></td>
+                            <td align="right"><font size="8">'.$totalStoV.'</font></td>
+                          </tr>
+
+                          <tr>
+                            <td><font size="8">'.$withHoldingTaxAcct.'</font></td>
+                            <td><font size="8">'.htmlspecialchars($whtDesc).'</font></td>
+                            <td align="right"><font size="8"></font></td>
+                            <td align="right"><font size="8">'.$withHoldingTaxV.'</font></td>
+                          </tr>
+
+                          <tr>
+                            <td><font size="8">'.$assocDueAcct.'</font></td>
+                            <td><font size="8">'.htmlspecialchars($assocDesc).'</font></td>
+                            <td align="right"><font size="8">'.$assocDuesV.'</font></td>
+                            <td align="right"><font size="8"></font></td>
+                          </tr>
+
+                          <tr>
+                            <td><font size="8">'.$apAcct.'</font></td>
+                            <td><font size="8">'.htmlspecialchars($apDesc).'</font></td>
+                            <td align="right"><font size="8"></font></td>
+                            <td align="right"><font size="8">'.$netAPV.'</font></td>
+                          </tr>
+
+                        </table>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+                <td colspan="3"></td>
+              </tr>';
+
+    $tbl .= '</table>';
+
+    $pdf->writeHTML($tbl, true, false, false, false, '');
+
+    $pdfBytes = $pdf->Output('', 'S'); // return as string
+
+    $fileName = "receiving-report-{$entry->receipt_no}.pdf";
+
+    return response($pdfBytes, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="'.$fileName.'"')
+        ->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        ->header('Pragma', 'no-cache');
+}
+
+/**
+ * Generate control no like legacy _generateIDNumberMaximum999 (zero-pad to 3)
+ * and store/advance a counter in application_settings.
+ */
+private function nextReceivingReportControlNo(int $companyId, string $sugarType): string
+{
+    $codeCol  = Schema::hasColumn('application_settings', 'apset_code') ? 'apset_code' : 'appset_code';
+    $valueCol = Schema::hasColumn('application_settings', 'value')
+        ? 'value'
+        : (Schema::hasColumn('application_settings', 'apset_value') ? 'apset_value' : null);
+
+    if (!$valueCol) {
+        // fallback if schema is unexpected
+        return str_pad('1', 3, '0', STR_PAD_LEFT);
+    }
+
+    return DB::transaction(function () use ($companyId, $sugarType, $codeCol, $valueCol) {
+        $row = DB::table('application_settings')
+            ->where($codeCol, 'ReceivingReportControlNum')
+            ->where('company_id', $companyId)
+            ->when($sugarType !== '', fn($q) => $q->where('type', $sugarType))
+            ->lockForUpdate()
+            ->first();
+
+        if (!$row) {
+            // create seed row if missing
+            $id = DB::table('application_settings')->insertGetId([
+                $codeCol      => 'ReceivingReportControlNum',
+                $valueCol     => 1,
+                'company_id'  => $companyId,
+                'type'        => $sugarType,
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ]);
+            $num = 1;
+        } else {
+            $current = (int)($row->{$valueCol} ?? 0);
+            $num = $current + 1;
+            DB::table('application_settings')->where('id', $row->id)->update([
+                $valueCol    => $num,
+                'updated_at' => now(),
+            ]);
+        }
+
+        // legacy: maximum 999 formatting
+        if ($num > 999) $num = $num % 1000;
+        if ($num === 0) $num = 1;
+
+        return str_pad((string)$num, 3, '0', STR_PAD_LEFT);
+    });
+}
+
+
+
+// =========================
+// Quedan Listing - PDF
+// =========================
+public function quedanListingPdf(Request $req, string $receiptNo)
+{
+    $companyId = (int) ($req->query('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    // 1) Load receiving entry (scoped)
+    $entry = ReceivingEntry::query()
+        ->where('company_id', $companyId)
+        ->where('receipt_no', $receiptNo)
+        ->firstOrFail();
+
+    // 2) Load PBN context (scoped)
+    $pbn = PbnEntry::query()
+        ->where('company_id', $companyId)
+        ->where('pbn_number', $entry->pbn_number)
+        ->first();
+
+    $sugarType = strtoupper((string)($pbn?->sugar_type ?? ''));
+    $cropYearRaw = (string)($pbn?->crop_year ?? '');
+
+    // legacy-like crop year display (CY2022-2023)
+    $cropYearDisplay = $cropYearRaw;
+    if ($cropYearDisplay !== '' && strpos($cropYearDisplay, '-') === false) {
+        // if numeric year like "2022", show "2022-2023"
+        if (preg_match('/^\d{4}$/', $cropYearDisplay)) {
+            $cropYearDisplay = $cropYearDisplay . '-' . ((int)$cropYearDisplay + 1);
+        }
+    }
+
+    // 3) Load receiving details (quedan lines)
+    $rows = ReceivingDetail::query()
+        ->where('receiving_entry_id', $entry->id)
+        ->where('receipt_no', $entry->receipt_no)
+        ->orderBy('row', 'asc')
+        ->get();
+
+    // 4) Resolve mill prefix + millmark (legacy gets from PBN detail + mill_list)
+    // We’ll try: mill_name from entry->mill; prefix from mill_list (company-scoped)
+    $millName = (string)($entry->mill ?? '');
+    $millRow = MillList::query()
+        ->where('company_id', $companyId)
+        ->where('mill_name', $millName)
+        ->first();
+
+    $prefix   = (string)($millRow->prefix ?? '');
+    $millMark = $prefix !== '' ? $prefix : $millName; // legacy shows "BISCOM" etc; adjust if your prefix is separate
+
+    // 5) Header text by company_id
+    $shipper = 'SUCDEN PHILIPPINES, INC.';
+    $buyer   = ($companyId === 2) ? 'AMEROP AMERICAS CORP' : 'SUCDEN AMERICAS CORP';
+    $currentDate = date('M d, Y');
+
+    // 6) TCPDF setup (no header/footer like legacy)
+    if (!class_exists('\TCPDF', false)) {
+        $tcpdfPath = base_path('vendor/tecnickcom/tcpdf/tcpdf.php');
+        if (file_exists($tcpdfPath)) require_once $tcpdfPath;
+        else abort(500, 'TCPDF not installed. Run: composer require tecnickcom/tcpdf');
+    }
+
+    $pdf = new \TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
+    $pdf->SetPrintHeader(false);
+    $pdf->SetPrintFooter(false);
+
+    // legacy-ish margins
+    $pdf->SetMargins(3, 5, 3);
+    $pdf->SetAutoPageBreak(true, 10);
+    $pdf->AddPage('P', 'LETTER');
+    $pdf->SetFont('helvetica', '', 7);
+
+    // 7) Build HTML with legacy paging logic (50 rows/page)
+    $tbl = '';
+    $tbl .= '<br><br>';
+    $tbl .= '<table border="0" cellpadding="0" cellspacing="1" nobr="true" width="100%">';
+    $tbl .= '  <tr>
+                <td colspan="8"><font size="8">'
+                .'Shipper:  '.htmlspecialchars($shipper, ENT_QUOTES, 'UTF-8').'<br>'
+                .'Buyer:  '.htmlspecialchars($buyer, ENT_QUOTES, 'UTF-8').'<br>'
+                .'Quedan Listings (CY'.htmlspecialchars($cropYearDisplay, ENT_QUOTES, 'UTF-8').')<br>'
+                .htmlspecialchars($currentDate, ENT_QUOTES, 'UTF-8').'<br>'
+                .'RR No.:  '.htmlspecialchars($receiptNo, ENT_QUOTES, 'UTF-8').'<br>'
+                .'</font></td>
+              </tr>';
+
+    $tbl .= '  <tr align="center">
+                <td width="15%"><font size="8">MillMark</font></td>
+                <td width="10%"><font size="8">Quedan No.</font></td>
+                <td width="8%"><font size="8">Quantity</font></td>
+                <td width="8%"><font size="8">Liens</font></td>
+                <td width="8%"><font size="7">Week Ending</font></td>
+                <td width="8%"><font size="8">Date Issued</font></td>
+                <td width="10%"><font size="8">TIN</font></td>
+                <td width="33%" align="left"><font size="8">PLANTER</font></td>
+              </tr>';
+
+    $grandQty  = 0.0;
+    $grandLiens= 0.0;
+
+    $pageQty   = 0.0;
+    $pageLiens = 0.0;
+    $ctr       = 0;
+    $pcs       = 0;
+    $totalPcs  = 0;
+
+    $formatDateMDY = function ($v) {
+        if (!$v) return '';
+        try { return date('m/d/Y', strtotime((string)$v)); } catch (\Throwable $e) { return ''; }
+    };
+
+    $formatQuedanNo = function ($raw) use ($sugarType, $prefix) {
+        $raw = trim((string)$raw);
+
+        // if already formatted like "B26-000123" keep it
+        if (preg_match('/^[A-Z].+-\d+$/', $raw)) {
+            return $raw;
+        }
+
+        // otherwise extract digits and pad to 6
+        $digits = preg_replace('/\D+/', '', $raw);
+        if ($digits === '') $digits = '0';
+        $num = (int)$digits;
+        $pad = str_pad((string)$num, 6, '0', STR_PAD_LEFT);
+        return $sugarType . $prefix . '-' . $pad;
+    };
+
+    foreach ($rows as $r) {
+        $qty   = (float)($r->quantity ?? 0);
+        $liens = (float)($r->liens ?? 0);
+
+        $quedanNo = $formatQuedanNo($r->quedan_no ?? '');
+        $weekEnding = $formatDateMDY($r->week_ending);
+        $dateIssued = $formatDateMDY($r->date_issued);
+
+        $planterTIN  = (string)($r->planter_tin ?? '');
+        $planterName = (string)($r->planter_name ?? '');
+
+        $ctr++;
+        $pcs = $ctr;
+        $totalPcs++;
+
+        $pageQty   += $qty;
+        $pageLiens += $liens;
+
+        $grandQty   += $qty;
+        $grandLiens += $liens;
+
+        $tbl .= '<tr>
+            <td align="center"><font size="8">'.htmlspecialchars($millMark).'</font></td>
+            <td align="center"><font size="8">'.htmlspecialchars($quedanNo).'</font></td>
+            <td align="right"><font size="8">'.number_format($qty, 2).'</font></td>
+            <td align="right"><font size="8">'.number_format($liens, 2).'</font></td>
+            <td align="center"><font size="8">'.htmlspecialchars($weekEnding).'</font></td>
+            <td align="center"><font size="8">'.htmlspecialchars($dateIssued).'</font></td>
+            <td align="center"><font size="8">'.htmlspecialchars($planterTIN).'</font></td>
+            <td align="left"><font size="7">'.htmlspecialchars($planterName).'</font></td>
+        </tr>';
+
+        // legacy: page total every 50 rows
+        if (($ctr % 50) === 0) {
+            $tbl .= '<tr>
+                <td align="right"><font size="8">PAGE TOTAL:</font></td>
+                <td align="right"><font size="8">'.(int)$pcs.' PCS.</font></td>
+                <td align="right"><font size="8">'.number_format($pageQty, 2).'</font></td>
+                <td align="right"><font size="8">'.number_format($pageLiens, 2).'</font></td>
+                <td align="right" colspan="4"></td>
+            </tr>';
+
+            $tbl .= '<br pagebreak="true"/>';
+
+            // repeat header + column headers after page break
+            $tbl .= '<tr><td colspan="8"></td></tr>';
+            $tbl .= '<tr>
+                <td colspan="8"><font size="8">'
+                .'Shipper:  '.htmlspecialchars($shipper, ENT_QUOTES, 'UTF-8').'<br>'
+                .'Buyer:  '.htmlspecialchars($buyer, ENT_QUOTES, 'UTF-8').'<br>'
+                .'Quedan Listings (CY'.htmlspecialchars($cropYearDisplay, ENT_QUOTES, 'UTF-8').')<br>'
+                .htmlspecialchars($currentDate, ENT_QUOTES, 'UTF-8').'<br>'
+                .'RR No.:  '.htmlspecialchars($receiptNo, ENT_QUOTES, 'UTF-8').'<br>'
+                .'</font></td>
+            </tr>';
+
+            $tbl .= '<tr align="center">
+                <td width="15%"><font size="8">MillMark</font></td>
+                <td width="10%"><font size="8">Quedan No.</font></td>
+                <td width="8%"><font size="8">Quantity</font></td>
+                <td width="8%"><font size="8">Liens</font></td>
+                <td width="8%"><font size="7">Week Ending</font></td>
+                <td width="8%"><font size="8">Date Issued</font></td>
+                <td width="10%"><font size="8">TIN</font></td>
+                <td width="33%" align="left"><font size="8">PLANTER</font></td>
+            </tr>';
+
+            // reset page totals
+            $pageQty = 0.0;
+            $pageLiens = 0.0;
+            $ctr = 0;
+        }
+    }
+
+    // final page total + grand total
+    $tbl .= '<tr>
+        <td align="right"><font size="8">PAGE TOTAL:</font></td>
+        <td align="right"><font size="8">'.(int)$pcs.' PCS.</font></td>
+        <td align="right"><font size="8">'.number_format($pageQty, 2).'</font></td>
+        <td align="right"><font size="8">'.number_format($pageLiens, 2).'</font></td>
+        <td align="right" colspan="4"></td>
+    </tr>';
+
+    $tbl .= '<tr>
+        <td align="right"><font size="8">GRAND TOTAL:</font></td>
+        <td align="right"><font size="8">'.(int)$totalPcs.' PCS.</font></td>
+        <td align="right"><font size="8">'.number_format($grandQty, 2).'</font></td>
+        <td align="right"><font size="8">'.number_format($grandLiens, 2).'</font></td>
+        <td align="right" colspan="4"></td>
+    </tr>';
+
+    $tbl .= '</table>';
+
+    $pdf->writeHTML($tbl, true, false, false, false, '');
+
+    $pdfBytes = $pdf->Output('', 'S');
+    $fileName = "quedan-listing-{$receiptNo}.pdf";
+
+    return response($pdfBytes, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="'.$fileName.'"')
+        ->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        ->header('Pragma', 'no-cache');
+}
+
+
 
 
 }

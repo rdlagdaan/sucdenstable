@@ -44,13 +44,13 @@ class MillListController extends Controller
             return DB::table('mill_rate_history as r')
                 ->select($col)
                 ->whereColumn('r.mill_id', 'mill_list.mill_id')
-                ->where('r.company_id', $companyId)
                 ->where('r.valid_from', '<=', $asOf)
                 ->where(function ($q) use ($asOf) {
                     $q->whereNull('r.valid_to')->orWhere('r.valid_to', '>', $asOf);
                 })
                 ->orderByDesc('r.valid_from')
                 ->limit(1);
+
         };
 
         return MillList::query()

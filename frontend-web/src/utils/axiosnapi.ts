@@ -9,6 +9,8 @@ const napi = axios.create({
   headers: { 'X-Requested-With': 'XMLHttpRequest' },
 });
 
+
+
 // Let axios also do its normal xsrf behavior
 (napi.defaults as any).xsrfCookieName = 'XSRF-TOKEN';
 (napi.defaults as any).xsrfHeaderName = 'X-XSRF-TOKEN';

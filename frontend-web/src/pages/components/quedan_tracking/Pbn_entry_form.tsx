@@ -705,7 +705,7 @@ const handleDownloadPbnExcel = async () => {
 
 
   return (
-    <div className="space-y-4 p-6">
+    <div className="min-h-screen pb-40 space-y-4 p-6">
       <ToastContainer position="top-right" autoClose={3000} />
 
       <div className="bg-yellow-50 shadow-md rounded-lg p-6 space-y-4 border border-yellow-400">

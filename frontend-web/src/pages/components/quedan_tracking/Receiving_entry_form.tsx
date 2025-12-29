@@ -10,8 +10,22 @@ import { toast, ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
 import napi from '../../../utils/axiosnapi';
-import DropdownWithHeaders from '../DropdownWithHeaders';
-import { ChevronDownIcon, PrinterIcon, PlusIcon, CheckCircleIcon } from '@heroicons/react/24/outline';
+//import DropdownWithHeaders from '../DropdownWithHeaders';
+import DropdownWithHeadersDynamic from '../DropdownWithHeadersDynamic';
+
+//import { ChevronDownIcon, PrinterIcon, PlusIcon, CheckCircleIcon } from '@heroicons/react/24/outline';
+// ✅ ReceivingEntry.tsx — update to add legacy-like Download + Print dropdowns
+// 1) Add imports (replace your heroicons import line with this)
+
+import {
+  ChevronDownIcon,
+  PrinterIcon,
+  PlusIcon,
+  CheckCircleIcon,
+  ArrowDownTrayIcon, // ✅ NEW
+} from '@heroicons/react/24/outline';
+
+
 import AttachedDropdown from '../../components/AttachedDropdown';
 
 Handsontable.cellTypes.registerCellType('numeric', NumericCellType);
@@ -75,6 +89,21 @@ const currency = (n: number) =>
 const toISO = (d: string | null | undefined) => (!d ? '' : new Date(d).toISOString().slice(0, 10));
 
 export default function ReceivingEntry() {
+  
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+  const companyId = user?.company_id;
+
+
+  const requireCompany = (): boolean => {
+    if (!companyId) {
+      toast.error('Missing company id; please sign in again.');
+      return false;
+    }
+    return true;
+  };
+
+  
   const hotRef = useRef<HotTableClass>(null);
 
   // ---- main header state ----
@@ -89,6 +118,10 @@ export default function ReceivingEntry() {
   const [vendorName, setVendorName] = useState('');
   const [mill, setMill] = useState('');
   const [glAccountKey, setGlAccountKey] = useState('');
+
+  // ---- GL Account dropdown ----
+
+
   const [assocDues, setAssocDues] = useState<number | ''>('');
   const [others, setOthers] = useState<number | ''>('');
   const [noStorage, setNoStorage] = useState(false);
@@ -100,7 +133,18 @@ export default function ReceivingEntry() {
   const [pbnOptions, setPbnOptions] = useState<PbnDropdownItem[]>([]);
   const [pbnSearch, setPbnSearch] = useState('');
   const [itemOptions, setItemOptions] = useState<PBNItemRow[]>([]);
-  const [_itemSearch, _setItemSearch] = useState('');
+
+type GlAccountItem = { acct_code: string; acct_desc: string };
+
+const [glOptions, setGlOptions] = useState<GlAccountItem[]>([]);
+const [glSearch, setGlSearch] = useState('');
+
+const glDisplay = useMemo(() => {
+  if (!glAccountKey) return '';
+  const row = glOptions.find((x) => String(x.acct_code) === String(glAccountKey));
+  return `${glAccountKey} — ${row?.acct_desc ?? ''}`;
+}, [glAccountKey, glOptions]);
+
 
   // ---- mill rates / formula inputs ----
   const [unitCost, setUnitCost] = useState(0);
@@ -120,6 +164,13 @@ export default function ReceivingEntry() {
   const [tInsurance, setTInsurance] = useState(0);
   const [tUnitCost, setTUnitCost] = useState(0);
   const [tAP, setTAP] = useState(0);
+
+const [cropYear, setCropYear] = useState<string>('');
+
+// --- Receiving Report PDF modal state ---
+const [showRrPdf, setShowRrPdf] = useState(false);
+const [rrPdfUrl, setRrPdfUrl] = useState<string>('');
+
 
 
 const requireFields = (...pairs: Array<[string, string | undefined | null]>) => {
@@ -147,66 +198,232 @@ const requireFields = (...pairs: Array<[string, string | undefined | null]>) => 
   // (near other state)
   const itemDisplay = itemNumber ? `${itemNumber} — ${mill || ''}` : '';
 
+const pct = (n: number) =>
+  Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 }) + '%';
 
 
   // RR list
-  useEffect(() => {
-    (async () => {
-      const { data } = await napi.get('/api/receiving/rr-list', {
-        params: { include_posted: includePosted ? '1' : '0', q: rrSearch },
-      });
-      setRrOptions(data || []);
-    })().catch(console.error);
-  }, [includePosted, rrSearch]);
-
-  // PBN list (always include posted=1, per legacy)
-// PBN list (always include posted=1, per legacy)
 useEffect(() => {
   (async () => {
-    const resp = await napi.get('/api/pbn/list', { params: { q: pbnSearch } });
+    const resp = await napi.get('/receiving/rr-list', {
+      params: { include_posted: includePosted ? '1' : '0', q: rrSearch },
+    });
+
+    const arr = Array.isArray(resp.data)
+      ? resp.data
+      : Array.isArray(resp.data?.data)
+      ? resp.data.data
+      : [];
+
+    setRrOptions(arr);
+  })().catch(console.error);
+}, [includePosted, rrSearch]);
+
+
+  // PBN list (always include posted=1, per legacy)
+// PBN list (POSTED only; backend requires company_id)
+useEffect(() => {
+  (async () => {
+    const storedUser = localStorage.getItem('user');
+    const user = storedUser ? JSON.parse(storedUser) : null;
+    const companyId = user?.company_id;
+
+    if (!companyId) {
+      setPbnOptions([]);
+      return;
+    }
+
+    const resp = await napi.get('/pbn/list', {
+      params: {
+        company_id: companyId,   // ✅ REQUIRED by backend
+        q: pbnSearch,
+      },
+    });
+
     // Accept both: `[]` or `{ data: [] }`
     const arr =
       Array.isArray(resp.data) ? resp.data :
       Array.isArray(resp.data?.data) ? resp.data.data :
       [];
 
-
     setPbnOptions(arr);
-    console.log('PBN items →', pbnOptions.length, pbnOptions[0]);
-
-  })().catch(console.error);
+    // optional debug
+    console.log('PBN options loaded →', arr.length, arr[0]);
+  })().catch((e) => {
+    console.error(e);
+    setPbnOptions([]);
+  });
 }, [pbnSearch]);
 
 
+useEffect(() => {
+  (async () => {
+    if (!requireCompany()) {
+      setGlOptions([]);
+      return;
+    }
+    const resp = await napi.get('/references/accounts', {
+      params: { q: glSearch, company_id: companyId },
+    });
+
+    const arr =
+      Array.isArray(resp.data) ? resp.data :
+      Array.isArray(resp.data?.data) ? resp.data.data :
+      [];
+
+    setGlOptions(arr);
+  })().catch((e) => {
+    console.error(e);
+    setGlOptions([]);
+  });
+}, [glSearch, companyId]);
 
 
 
-  const filteredRR = useMemo(() => {
-    const term = rrSearch.toLowerCase();
-    return rrOptions.filter(
-      (r) =>
-        (r.receipt_no || '').toLowerCase().includes(term) ||
-        (r.pbn_number || '').toLowerCase().includes(term) ||
-        (r.vendor_name || '').toLowerCase().includes(term),
-    );
-  }, [rrOptions, rrSearch]);
+
+// ---- planter lookup cache + debounce ----
+const planterNameCacheRef = useRef<Map<string, string>>(new Map());
+const planterLookupTimerRef = useRef<Record<number, number>>({});
+const planterLookupInFlightRef = useRef<Record<number, boolean>>({});
+
+type MillOption = { mill_name: string };
+
+const [millOptions, setMillOptions] = useState<MillOption[]>([]);
+const [millSearch, setMillSearch] = useState('');
+const [showMillPicker, setShowMillPicker] = useState(false);
+
+
+const normalizeTin = (v: any) => String(v ?? '').trim();
+
+const fetchPlanterNameByTin = useCallback(
+  async (tin: string): Promise<string> => {
+    const t = normalizeTin(tin);
+    if (!t) return '';
+
+    // cache hit
+    const cached = planterNameCacheRef.current.get(t);
+    if (cached !== undefined) return cached;
+
+    // call your existing PlanterController index route
+    // GET /api/references/planters?search=<tin>&per_page=10
+    const resp = await napi.get('/references/planters', {
+      params: { search: t, per_page: 10 },
+    });
+
+    // accept paginator or plain array
+    const list = Array.isArray(resp.data)
+      ? resp.data
+      : Array.isArray(resp.data?.data)
+      ? resp.data.data
+      : [];
+
+    const exact = list.find((x: any) => String(x?.tin ?? '').trim() === t);
+    const name = String(exact?.display_name ?? '');
+
+    planterNameCacheRef.current.set(t, name);
+    return name;
+  },
+  []
+);
+
+
+// ---- planter TIN autocomplete options (async) ----
+type PlanterOption = { tin: string; display_name: string };
+
+const planterOptionsCacheRef = useRef<Map<string, PlanterOption[]>>(new Map());
+
+const fetchPlanterOptions = useCallback(async (term: string): Promise<PlanterOption[]> => {
+  const q = normalizeTin(term);
+  const key = q.toLowerCase();
+
+  // cache hit (including empty array)
+  if (planterOptionsCacheRef.current.has(key)) {
+    return planterOptionsCacheRef.current.get(key)!;
+  }
+
+  const resp = await napi.get('/references/planters', {
+    params: { search: q, per_page: 20 },
+  });
+
+  const list = Array.isArray(resp.data)
+    ? resp.data
+    : Array.isArray(resp.data?.data)
+    ? resp.data.data
+    : [];
+
+  const rows: PlanterOption[] = list
+    .map((x: any) => ({
+      tin: normalizeTin(x?.tin),
+      display_name: String(x?.display_name ?? '').trim(),
+    }))
+    .filter((x: PlanterOption) => x.tin !== '');
+
+  // also feed name cache for instant fill
+  rows.forEach((r) => planterNameCacheRef.current.set(r.tin, r.display_name));
+
+  planterOptionsCacheRef.current.set(key, rows);
+  return rows;
+}, []);
+
+
+
+const onSelectGL = async (acct_code: string) => {
+  setGlAccountKey(acct_code);
+  if (!selectedRR) return;
+  try {
+    await napi.post('/receiving/update-gl', {
+      receipt_no: selectedRR,
+      gl_account_key: acct_code,
+    });
+    toast.success('GL Account updated');
+  } catch {
+    toast.error('Failed to update GL Account');
+  }
+};
+
+
+const filteredRR = useMemo(() => {
+  const term = rrSearch.toLowerCase();
+  const list = Array.isArray(rrOptions) ? rrOptions : [];  // ✅ guard
+  return list.filter(
+    (r) =>
+      (r.receipt_no || '').toLowerCase().includes(term) ||
+      (r.pbn_number || '').toLowerCase().includes(term) ||
+      (r.vendor_name || '').toLowerCase().includes(term),
+  );
+}, [rrOptions, rrSearch]);
 
 
 const applyItemSelection = async (i: PBNItemRow) => {
   setItemNumber(String(i.row));
   setMill(i.mill || '');
-  setUnitCost(Number(i.unit_cost || 0));
-  setCommission(Number(i.commission || 0));
 
   try {
-    const { data: rate } = await napi.get('/api/mills/rate', {
-      params: { mill_name: i.mill, as_of: dateReceived || undefined },
+    const { data } = await napi.get('/receiving/pricing-context', {
+      params: {
+        pbn_number: pbnNumber,
+        item_no: String(i.row),
+        mill_name: i.mill || mill || '',
+        crop_year: cropYear || undefined, 
+        // company_id not needed if X-Company-ID is attached by axiosnapi (yours is)
+      },
     });
-    setInsuranceRate(Number(rate?.insurance_rate || 0));
-    setStorageRate(Number(rate?.storage_rate || 0));
-    setDaysFree(Number(rate?.days_free || 0));
-  } catch { /* keep previous rates */ }
+
+    setUnitCost(Number(data?.unit_cost || 0));
+    setCommission(Number(data?.commission || 0));
+    setInsuranceRate(Number(data?.insurance_rate || 0));
+    setStorageRate(Number(data?.storage_rate || 0));
+    setDaysFree(Number(data?.days_free || 0));
+
+    // keep mill in sync if backend chooses pbn-detail mill
+    if (data?.mill) setMill(String(data.mill));
+  } catch {
+    // fallback to local values if API fails
+    setUnitCost(Number(i.unit_cost || 0));
+    setCommission(Number(i.commission || 0));
+  }
 };
+
 
 
 
@@ -216,7 +433,7 @@ const applyItemSelection = async (i: PBNItemRow) => {
     try {
       setSelectedRR(receiptNo);
 
-      const { data: entry } = await napi.get('/api/receiving/entry', { params: { receipt_no: receiptNo } });
+      const { data: entry } = await napi.get('/receiving/entry', { params: { receipt_no: receiptNo } });
       setDateReceived(toISO(entry.receipt_date) || '');
       setPbnNumber(entry.pbn_number || '');
       setItemNumber(entry.item_number || '');
@@ -233,24 +450,61 @@ const applyItemSelection = async (i: PBNItemRow) => {
       // preload PBN list row into dropdown (so it shows vendor etc.)
       if (entry.pbn_number) {
         // also fetch its items for the Item # combobox and preselect current item
-        const [{ data: pbnItems }, { data: pbnItemOne }, { data: rate }] = await Promise.all([
-          napi.get('/api/pbn/items', { params: { pbn_number: entry.pbn_number } }),
-          napi.get('/api/receiving/pbn-item', { params: { pbn_number: entry.pbn_number, item_no: entry.item_number } }),
-          napi.get('/api/mills/rate', { params: { mill_name: entry.mill, as_of: toISO(entry.receipt_date) } }),
-        ]);
+const [{ data: pbnItems }, { data: pbnItemOne }, { data: ctx }] = await Promise.all([
+  napi.get('/pbn/items', { params: { company_id: companyId, pbn_number: entry.pbn_number } }),
+  napi.get('/receiving/pbn-item', { params: { pbn_number: entry.pbn_number, item_no: entry.item_number } }),
+  napi.get('/receiving/pricing-context', {
+    params: {
+      pbn_number: entry.pbn_number,
+      item_no: entry.item_number,
+      mill_name: entry.mill,
+      crop_year: entry.crop_year || cropYear || undefined,
+      // company_id not required if axiosnapi sends X-Company-ID (yours does)
+    },
+  }),
+]);
 
-        setItemOptions(Array.isArray(pbnItems) ? pbnItems : []);
-        setUnitCost(Number(pbnItemOne?.unit_cost || 0));
-        setCommission(Number(pbnItemOne?.commission || 0));
-        setInsuranceRate(Number(rate?.insurance_rate || 0));
-        setStorageRate(Number(rate?.storage_rate || 0));
-        setDaysFree(Number(rate?.days_free || 0));
+setItemOptions(Array.isArray(pbnItems) ? pbnItems : []);
+setUnitCost(Number(pbnItemOne?.unit_cost || 0));
+setCommission(Number(pbnItemOne?.commission || 0));
+
+// ✅ authoritative rates + crop year for Rate Basis message
+setInsuranceRate(Number(ctx?.insurance_rate || 0));
+setStorageRate(Number(ctx?.storage_rate || 0));
+setDaysFree(Number(ctx?.days_free || 0));
+setCropYear(String(ctx?.crop_year || ''));
+
+// keep mill synced if backend corrected it
+if (ctx?.mill) setMill(String(ctx.mill));
+
       }
 
+
+
+
+
       // load detail rows
-      const { data: details } = await napi.get('/api/receiving/details', { params: { receipt_no: receiptNo } });
-      setTableData(Array.isArray(details) ? details.map((d) => ({ ...d, persisted: true })) : []);
-      setHandsontableEnabled(true);
+// load detail rows
+// load detail rows
+const { data: details } = await napi.get('/receiving/details', { params: { receipt_no: receiptNo } });
+
+const loaded: ReceivingDetailRow[] = Array.isArray(details)
+  ? details.map((d: any) => ({ ...d, persisted: true }))
+  : [];
+
+// ✅ ALWAYS keep one ready row for input
+const withBuffer = ensureTrailingBuffer(loaded);
+setTableData(withBuffer);
+
+
+setHandsontableEnabled(true);
+
+// (optional but helps HOT repaint instantly)
+requestAnimationFrame(() => {
+  hotRef.current?.hotInstance?.loadData(withBuffer as any);
+});
+
+
     } catch (e) {
       console.error(e);
       toast.error('Failed to load Receiving Entry.');
@@ -259,31 +513,40 @@ const applyItemSelection = async (i: PBNItemRow) => {
 
   // ----------------- PBN + ITEM BEHAVIOR -----------------
 
+// DROP-IN: replace your entire onSelectPBN with this version
 const onSelectPBN = async (pbn: string) => {
   try {
     setPbnNumber(pbn);
 
-    const row = pbnOptions.find(r => r.pbn_number === pbn);
-    if (row) setVendorName(row.vendor_name || '');
+    // ✅ use your existing helper (no duplicate localStorage checks needed here)
+    if (!requireCompany()) return;
 
-    const { data } = await napi.get('/api/pbn/items', { params: { pbn_number: pbn } });
+    const row = pbnOptions.find((r) => r.pbn_number === pbn);
+    setVendorName(row?.vendor_name || '');
+setCropYear(String(row?.crop_year || ''));
+    // ✅ assume companyId is already available in component scope
+    // (define once near top of component, from localStorage)
+    const { data } = await napi.get('/pbn/items', {
+      params: { company_id: companyId, pbn_number: pbn },
+    });
+
     const itemsArr: PBNItemRow[] = Array.isArray(data) ? data : [];
     setItemOptions(itemsArr);
 
     if (itemsArr.length === 1) {
-      // ✅ apply directly from the fresh array (no race with setItemOptions)
       await applyItemSelection(itemsArr[0]);
-    } else {
-      // reset + focus Item # so the user picks
-      setItemNumber('');
-      setMill('');
-      setUnitCost(0);
-      setCommission(0);
-      setTimeout(() => {
-        const input = itemDropdownRef.current?.querySelector('input');
-        input?.focus();
-      }, 0);
+      return;
     }
+
+    // reset + focus Item # so the user picks
+    setItemNumber('');
+    setMill('');
+    setUnitCost(0);
+    setCommission(0);
+
+    setTimeout(() => {
+      itemDropdownRef.current?.querySelector('input')?.focus();
+    }, 0);
   } catch (e) {
     console.error(e);
     toast.error('Failed to load PBN items.');
@@ -293,7 +556,255 @@ const onSelectPBN = async (pbn: string) => {
 
 
 
+const RateBasisBar = () => (
+  <div className="text-xs rounded border px-3 py-2 bg-slate-50 border-slate-300 flex flex-wrap items-center gap-2">
+    <span className="font-semibold text-slate-700">Rate Basis:</span>
 
+    <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 border border-indigo-200">
+      Mill: <b>{mill || '-'}</b>
+    </span>
+
+    <span className="px-2 py-0.5 rounded bg-violet-100 text-violet-800 border border-violet-200">
+      Crop Year: <b>{cropYear || '-'}</b>
+    </span>
+
+    <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200">
+      Storage: <b>{pct(storageRate)}</b>
+    </span>
+
+    <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+      Insurance: <b>{pct(insuranceRate)}</b>
+    </span>
+
+    {daysFree > 0 && (
+      <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200">
+        Days Free: <b>{daysFree}</b>
+      </span>
+    )}
+
+    {(storageRate === 0 && insuranceRate === 0) && (
+      <span className="px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-200">
+        ⚠️ Rates not loaded (check mill/crop_year/company)
+      </span>
+    )}
+  </div>
+);
+
+// 2) Add these helpers INSIDE ReceivingEntry() (place near other helpers, before the return)
+
+type ActionMenuItem = {
+  label: string;
+  onClick: () => void | Promise<void>;
+};
+
+function useOutsideClick(
+  refs: Array<React.RefObject<HTMLElement | null>>,
+  onOutside: () => void,
+  enabled: boolean
+) {
+  useEffect(() => {
+    if (!enabled) return;
+
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node;
+      const inside = refs.some((r) => r.current && r.current.contains(t));
+      if (!inside) onOutside();
+    };
+
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [refs, onOutside, enabled]);
+}
+
+const downloadBlob = (blob: Blob, filename: string) => {
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+};
+
+/** ✅ IMPORTANT: these MUST be above exportEndpoints (because exportEndpoints uses addQuery) */
+const apiBase =
+  (napi as any)?.defaults?.baseURL?.replace(/\/$/, '') || '';
+
+const buildApiUrl = (pathWithLeadingSlash: string) => {
+  if (!pathWithLeadingSlash.startsWith('/')) return pathWithLeadingSlash;
+  if (apiBase) return `${apiBase}${pathWithLeadingSlash}`;
+  return pathWithLeadingSlash;
+};
+
+const addQuery = (path: string, params: Record<string, any>) => {
+  const u = new URL(buildApiUrl(path), window.location.origin);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === '') return;
+    u.searchParams.set(k, String(v));
+  });
+  return u.toString();
+};
+
+// ✅ NOTE: Replace these endpoints with your real backend routes.
+// I’m wiring them in a clean centralized way so you only edit here.
+const exportEndpoints = useMemo(() => {
+  if (!selectedRR) {
+    return {
+      dl_quedan_excel: '',
+      dl_quedan_inssto_excel: '',
+      pr_quedan_pdf: '',
+      pr_quedan_inssto_pdf: '',
+      pr_receiving_report_pdf: '',
+    };
+  }
+
+  const common = { company_id: companyId, receipt_no: selectedRR, _: Date.now() };
+
+  return {
+    // ✅ Downloads
+    dl_quedan_excel: addQuery('/receiving/quedan-listing-excel', common),
+    dl_quedan_inssto_excel: addQuery('/receiving/quedan-listing-insurance-storage-excel', common),
+
+    // ✅ Prints
+    pr_quedan_pdf: addQuery('/receiving/quedan-listing-pdf', common),
+    pr_quedan_inssto_pdf: addQuery('/receiving/quedan-listing-insurance-storage-pdf', common),
+
+    // ✅ Receiving Report PDF
+    pr_receiving_report_pdf: addQuery(
+      `/receiving/receiving-report-pdf/${encodeURIComponent(selectedRR)}`,
+      { company_id: companyId, _: Date.now() }
+    ),
+  };
+}, [selectedRR, companyId]);
+
+const doExcelDownload = async (url: string, filename: string) => {
+  if (!selectedRR || !url) return;
+  try {
+    const resp = await napi.get(url, { responseType: 'blob' as any });
+    downloadBlob(resp.data, filename);
+  } catch (e: any) {
+    console.error(e);
+    toast.error(e?.response?.data?.message || 'Download failed (check export endpoint).');
+  }
+};
+
+
+
+
+const openReceivingReportPdfModal = async () => {
+  if (!selectedRR) return;
+
+  if (rrPdfUrl) {
+    URL.revokeObjectURL(rrPdfUrl);
+    setRrPdfUrl('');
+  }
+
+  try {
+    const resp = await napi.get(
+      `/receiving/receiving-report-pdf/${encodeURIComponent(selectedRR)}`,
+      {
+        params: { company_id: companyId, _: Date.now() },
+        responseType: 'arraybuffer',     // ✅ best for PDFs
+        withCredentials: true,           // ✅ if you use sanctum/cookies
+        headers: { Accept: 'application/pdf' },
+      }
+    );
+
+    const contentType =
+      String(resp.headers?.['content-type'] || resp.headers?.['Content-Type'] || '').toLowerCase();
+
+    // ✅ If server didn’t return a PDF, decode and show what it DID return
+    if (!contentType.includes('application/pdf')) {
+      const txt = new TextDecoder('utf-8').decode(resp.data);
+      console.error('Receiving Report NOT PDF:', { contentType, txt });
+      toast.error(`Server returned ${contentType || 'unknown'} (not PDF)`);
+      if (txt) toast.info(txt.slice(0, 200));
+      return;
+    }
+
+    const blob = new Blob([resp.data], { type: 'application/pdf' });
+
+    // ✅ Signature check: PDFs start with "%PDF"
+    const head = await blob.slice(0, 5).text();
+    if (head !== '%PDF-') {
+      const preview = await blob.slice(0, 300).text().catch(() => '');
+      console.error('Invalid PDF signature:', { head, preview });
+      toast.error('Response is not a valid PDF stream (corrupted output).');
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    setRrPdfUrl(url);
+    setShowRrPdf(true);
+  } catch (e: any) {
+    console.error(e);
+    toast.error(e?.response?.data?.message || 'Failed to load Receiving Report PDF.');
+  }
+};
+
+
+
+
+
+type ActionDropdownProps = {
+  disabled?: boolean;
+  icon: React.ReactNode;
+  label: string;
+  items: ActionMenuItem[];
+};
+
+const ActionDropdown = ({ disabled, icon, label, items }: ActionDropdownProps) => {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useOutsideClick([wrapRef], () => setOpen(false), open);
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative inline-flex"
+      onMouseEnter={() => !disabled && setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        disabled={!!disabled}
+        onClick={() => !disabled && setOpen((s) => !s)}
+        className={[
+          'inline-flex items-center gap-2 rounded border px-3 py-2',
+          'bg-sky-100 border-sky-300 text-slate-800',
+          'hover:bg-sky-200',
+          disabled ? 'opacity-60 cursor-not-allowed hover:bg-sky-100' : '',
+        ].join(' ')}
+      >
+        {icon}
+        <span className="text-sm">{label}</span>
+        <ChevronDownIcon className="h-4 w-4" />
+      </button>
+
+      {open && !disabled && (
+        <div className="absolute left-0 top-full mt-1 w-[360px] rounded border bg-white shadow-lg z-50">
+          <div className="py-1">
+            {items.map((it) => (
+              <button
+                key={it.label}
+                type="button"
+                onClick={async () => {
+                  setOpen(false);
+                  await it.onClick();
+                }}
+                className="w-full text-left px-3 py-2 text-[14px] text-blue-600 hover:bg-slate-100"
+              >
+                {it.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 
 const onSelectItem = async (item: string | PBNItemRow) => {
@@ -310,68 +821,74 @@ const onSelectItem = async (item: string | PBNItemRow) => {
 
 
 
+const normQuedan = (v: any) => String(v ?? '').trim().toLowerCase();
+
+const isDuplicateQuedan = (rows: ReceivingDetailRow[], rowIndex: number, quedan: string) => {
+  const q = normQuedan(quedan);
+  if (!q) return false;
+
+  for (let i = 0; i < rows.length; i++) {
+    if (i === rowIndex) continue;
+    if (normQuedan(rows[i]?.quedan_no) === q) return true;
+  }
+  return false;
+};
+
+
+
+
+
+
+
 
   // ----------------- FORMULAS -----------------
 
-  const calcMonthsCeil = (fromISO: string, toISOdate: string) => {
-    const diffDays = (new Date(toISOdate).getTime() - new Date(fromISO).getTime()) / 86400000;
-    return Math.ceil(Math.abs(diffDays) / 30);
-  };
-  const calcMonthsFloorStorage = (fromISO: string, toISOdate: string, freeDays: number) => {
-    let diffDays = (new Date(toISOdate).getTime() - new Date(fromISO).getTime()) / 86400000;
-    diffDays -= freeDays;
-    if (diffDays < 0) diffDays = 0;
-    return Math.floor(diffDays / 30);
-  };
 
-  const recomputeTotals = (rows: ReceivingDetailRow[]) => {
-    let totalQty = 0,
-      totalLiens = 0,
-      totalSto = 0,
-      totalIns = 0,
-      totalUnit = 0,
-      totalAP = 0;
 
-    const rrDate = dateReceived || '';
-    const insOverride = insuranceWeek || '';
-    const stoOverride = storageWeek || '';
+const recomputeTotals = (rows: ReceivingDetailRow[]) => {
+  let totalQty = 0;
+  let totalLiens = 0;
+  let totalSto = 0;
+  let totalIns = 0;
+  let totalCost = 0;   // Σ(qty * unit_cost)
+  let totalAP = 0;     // Σ(total_ap)
 
-    rows.forEach((r) => {
-      const qty = Number(r.quantity || 0);
-      const li = Number(r.liens || 0);
-      totalQty += qty;
-      totalLiens += li;
+  rows.forEach((r) => {
+    const qty = Number(r.quantity || 0);
+    const li  = Number(r.liens || 0);
 
-      const weekIns = insOverride || (r.week_ending ? toISO(r.week_ending) : '');
-      const weekSto = stoOverride || (r.week_ending ? toISO(r.week_ending) : '');
+    // skip blank buffer row
+    const isBlank = !String(r.quedan_no || '').trim() && qty === 0 && li === 0;
+    if (isBlank) return;
 
-      let ins = 0;
-      if (weekIns && rrDate && !noInsurance) {
-        const m = calcMonthsCeil(weekIns, rrDate);
-        ins = qty * (insuranceRate || 0) * m;
-      }
+    totalQty += qty;
+    totalLiens += li;
 
-      let sto = 0;
-      if (weekSto && rrDate && !noStorage) {
-        const m = calcMonthsFloorStorage(weekSto, rrDate, daysFree || 0);
-        sto = qty * (storageRate || 0) * m;
-      }
+    const rowUnitCost = Number(r.unit_cost ?? unitCost ?? 0);
+    totalCost += qty * rowUnitCost;
 
-      const uc = qty * (unitCost || 0) - (commission || 0);
+    // ✅ server truth (no client recompute)
+    totalIns += Number(r.insurance || 0);
+    totalSto += Number(r.storage || 0);
+    totalAP  += Number(r.total_ap || 0);
+  });
 
-      totalIns += ins;
-      totalSto += sto;
-      totalUnit += uc;
-      totalAP += qty * (unitCost || 0) - ins - sto;
-    });
+  setTQty(totalQty);
+  setTLiens(totalLiens);
+  setTStorage(totalSto);
+  setTInsurance(totalIns);
+  setTUnitCost(totalCost);
+  setTAP(totalAP);
+};
 
-    setTQty(totalQty);
-    setTLiens(totalLiens);
-    setTStorage(totalSto);
-    setTInsurance(totalIns);
-    setTUnitCost(totalUnit);
-    setTAP(totalAP);
-  };
+
+
+
+
+
+
+
+
 
   useEffect(() => {
     recomputeTotals(tableData);
@@ -394,7 +911,7 @@ const onSelectItem = async (item: string | PBNItemRow) => {
 
   const pushFlag = async (field: 'no_storage' | 'no_insurance', val: boolean) => {
     if (!selectedRR) return;
-    await napi.post('/api/receiving/update-flag', {
+    await napi.post('/receiving/update-flag', {
       receipt_no: selectedRR,
       field,
       value: val ? 1 : 0,
@@ -403,75 +920,120 @@ const onSelectItem = async (item: string | PBNItemRow) => {
 
   const pushDate = async (field: 'storage_week' | 'insurance_week' | 'receipt_date', valISO: string) => {
     if (!selectedRR) return;
-    await napi.post('/api/receiving/update-date', {
+    await napi.post('/receiving/update-date', {
       receipt_no: selectedRR,
       field,
       value: valISO || null,
     });
   };
 
-  const onChangeNoStorage = async (val: boolean) => {
-    setNoStorage(val);
-    try {
-      await pushFlag('no_storage', val);
-      toast.success('Storage flag updated');
-    } catch {
-      toast.error('Failed to update storage flag');
-    }
-  };
-  const onChangeNoInsurance = async (val: boolean) => {
-    setNoInsurance(val);
-    try {
-      await pushFlag('no_insurance', val);
-      toast.success('Insurance flag updated');
-    } catch {
-      toast.error('Failed to update insurance flag');
-    }
-  };
+const onChangeNoStorage = async (val: boolean) => {
+  setNoStorage(val);
 
-  const onChangeStorageWeek = async (val: string) => {
-    setStorageWeek(val);
-    try {
-      await pushDate('storage_week', val);
-    } catch {
-      toast.error('Failed to update Storage Week');
-    }
-  };
-  const onChangeInsuranceWeek = async (val: string) => {
-    setInsuranceWeek(val);
-    try {
-      await pushDate('insurance_week', val);
-    } catch {
-      toast.error('Failed to update Insurance Week');
-    }
-  };
+  try {
+    await pushFlag('no_storage', val);
+    await reloadDetailsFromServer(); // ✅ server-confirmed recalculation
+    toast.success('Storage flag updated');
+  } catch {
+    toast.error('Failed to update storage flag');
+  }
+};
 
-  const onChangeDateReceived = async (val: string) => {
-    setDateReceived(val);
-    try {
-      await pushDate('receipt_date', val);
-      toast.success('Date Received updated');
-    } catch {
-      toast.error('Failed to update Date Received');
-    }
-  };
 
-  const handleAutoSave = async (rowData: ReceivingDetailRow, rowIndex: number) => {
-    if (!selectedRR) return;
-    try {
-      const payload = { receipt_no: selectedRR, row_index: rowIndex, row: rowData };
-      const { data } = await napi.post('/api/receiving/batch-insert', payload);
-      const id = data?.id;
-      if (id) {
-        const updated = [...tableData];
-        updated[rowIndex] = { ...rowData, id, persisted: true };
-        setTableData(updated);
-      }
-    } catch (e) {
-      console.error(e);
-      toast.error('Auto-save failed.');
-    }
+const onChangeNoInsurance = async (val: boolean) => {
+  setNoInsurance(val);
+
+  try {
+    await pushFlag('no_insurance', val);
+    await reloadDetailsFromServer(); // ✅ server-confirmed recalculation
+    toast.success('Insurance flag updated');
+  } catch {
+    toast.error('Failed to update insurance flag');
+  }
+};
+
+
+
+const onChangeStorageWeek = async (val: string) => {
+  setStorageWeek(val);
+
+  try {
+    await pushDate('storage_week', val);
+    await reloadDetailsFromServer(); // ✅ server-confirmed recalculation
+  } catch {
+    toast.error('Failed to update Storage Week');
+  }
+};
+
+
+const onChangeInsuranceWeek = async (val: string) => {
+  setInsuranceWeek(val);
+
+  try {
+    await pushDate('insurance_week', val);
+    await reloadDetailsFromServer(); // ✅ server-confirmed recalculation
+  } catch {
+    toast.error('Failed to update Insurance Week');
+  }
+};
+
+
+
+const onChangeDateReceived = async (val: string) => {
+  setDateReceived(val);
+  try {
+    await pushDate('receipt_date', val);
+    await reloadDetailsFromServer(); // ✅ server-confirmed recalculation
+    toast.success('Date Received updated');
+  } catch {
+    toast.error('Failed to update Date Received');
+  }
+};
+
+
+const handleAutoSave = async (rowData: ReceivingDetailRow, rowIndex: number) => {
+  if (!selectedRR) return;
+
+  try {
+    const payload = { receipt_no: selectedRR, row_index: rowIndex, row: rowData };
+    const { data } = await napi.post('/receiving/batch-insert', payload);
+
+const server = data || {};
+const id = server?.id;
+
+setTableData((prev) => {
+  const copy = [...prev];
+  copy[rowIndex] = {
+    ...(copy[rowIndex] || {}),
+    ...rowData,
+    ...server,           // ✅ authoritative computed fields from backend
+    id: id || copy[rowIndex]?.id,
+    persisted: true,
   };
+  return copy;
+});
+
+
+    //const id = data?.id;
+
+    // always mark persisted if we got an id
+    //if (id) {
+    //  setTableData((prev) => {
+    //    const copy = [...prev];
+    //    copy[rowIndex] = { ...(copy[rowIndex] || {}), ...rowData, id, persisted: true };
+    //    return copy;
+    //  });
+    //}
+
+    // ✅ MERGE authoritative server-computed fields (planter_name, storage, insurance, total_ap, etc.)
+    // since backend currently returns only {id}, we pull the row back from /receiving/details
+
+  } catch (e) {
+    console.error(e);
+    toast.error('Auto-save failed.');
+  }
+};
+
 
 
 const onSaveNewReceiving = async () => {
@@ -514,7 +1076,7 @@ const onSaveNewReceiving = async () => {
       mill,
     };
 
-    const { data } = await napi.post('/api/receiving/create-entry', payload);
+    const { data } = await napi.post('/receiving/create-entry', payload);
 
     const newRR = data?.receipt_no;
     if (!newRR) throw new Error('Server did not return receipt_no');
@@ -539,7 +1101,7 @@ const onSaveNewReceiving = async () => {
 
     // 6) (Optional) refresh the RR list from the server so it’s 100% accurate
     try {
-      const { data: rr } = await napi.get('/api/receiving/rr-list', {
+      const { data: rr } = await napi.get('/receiving/rr-list', {
         params: { include_posted: includePosted ? '1' : '0', q: '' },
       });
       setRrOptions(rr || []);
@@ -558,9 +1120,43 @@ const onSaveNewReceiving = async () => {
 
 
 
+const saveAssocOthers = async () => {
+  if (!selectedRR) return;
+  try {
+    await napi.post('/receiving/update-assoc-others', {
+      receipt_no: selectedRR,
+      assoc_dues: Number(assocDues || 0),
+      others: Number(others || 0),
+    });
+    toast.success('Assoc/Others saved');
+  } catch {
+    toast.error('Failed to save Assoc/Others');
+  }
+};
+
+
+
+
+
+
 // === Receiving grid helpers (drop-in) ===
 const gridWrapRef = useRef<HTMLDivElement>(null);
 const [dynamicHeight, setDynamicHeight] = useState(520);
+
+useEffect(() => {
+  if (!showMillPicker) return;
+
+  (async () => {
+    if (!requireCompany()) return;
+const resp = await napi.get('/receiving/mills', {
+  params: { q: millSearch, company_id: companyId },
+});
+    const arr = Array.isArray(resp.data) ? resp.data : (Array.isArray(resp.data?.data) ? resp.data.data : []);
+    setMillOptions(arr);
+  })().catch(() => setMillOptions([]));
+}, [showMillPicker, millSearch]); // eslint-disable-line
+
+
 
 // compute a nice grid height based on viewport
 useEffect(() => {
@@ -604,13 +1200,67 @@ const ensureTrailingBuffer = (rows: ReceivingDetailRow[]) => {
   return copy;
 };
 
+// ✅ NEW: server-confirmed refresh of details (single source of truth)
+const reloadDetailsFromServer = useCallback(async (receiptNo?: string) => {
+  const rr = receiptNo || selectedRR;
+  if (!rr) return;
+
+  const { data: details } = await napi.get('/receiving/details', { params: { receipt_no: rr } });
+
+  const loaded: ReceivingDetailRow[] = Array.isArray(details)
+    ? details.map((d: any) => ({ ...d, persisted: true }))
+    : [];
+
+  const withBuffer = ensureTrailingBuffer(loaded);
+  setTableData(withBuffer);
+
+  // optional: force HOT repaint
+  requestAnimationFrame(() => {
+    hotRef.current?.hotInstance?.loadData(withBuffer as any);
+  });
+}, [selectedRR]);
+
+
+
+
 // when grid first turns on and there are no rows, add a blank buffer row
 useEffect(() => {
-  if (handsontableEnabled && tableData.length === 0) {
-    setTableData(ensureTrailingBuffer(tableData));
+  if (!handsontableEnabled) return;
+
+  // ✅ if table ever becomes empty, re-add buffer row
+  if (tableData.length === 0) {
+    setTableData(ensureTrailingBuffer([]));
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [handsontableEnabled]);
+}, [handsontableEnabled, tableData.length, itemNumber, mill, unitCost, commission]);
+
+const refreshRatesAndDetails = useCallback(async () => {
+  if (!selectedRR) return;
+
+  // reload entry header (mill/date might have changed)
+  const { data: entry } = await napi.get('/receiving/entry', { params: { receipt_no: selectedRR } });
+  setDateReceived(toISO(entry.receipt_date) || '');
+  setMill(entry.mill || '');
+  setPbnNumber(entry.pbn_number || '');
+  setItemNumber(entry.item_number || '');
+
+  // reload pricing context (rates + crop year)
+  const { data: ctx } = await napi.get('/receiving/pricing-context', {
+    params: {
+      pbn_number: entry.pbn_number,
+      item_no: entry.item_number,
+      mill_name: entry.mill,
+    },
+  });
+
+  setInsuranceRate(Number(ctx?.insurance_rate || 0));
+  setStorageRate(Number(ctx?.storage_rate || 0));
+  setDaysFree(Number(ctx?.days_free || 0));
+  setCropYear(String(ctx?.crop_year || ''));
+
+  // reload computed details from server (storage/insurance/total_ap)
+  await reloadDetailsFromServer(selectedRR);
+}, [selectedRR, reloadDetailsFromServer]);
 
 
 // put near: const hotRef = useRef<HotTableClass>(null);
@@ -643,14 +1293,76 @@ useEffect(() => {
 
 
 
+const openQuedanListingPdfModal = async () => {
+  if (!selectedRR) return;
+
+  if (rrPdfUrl) {
+    URL.revokeObjectURL(rrPdfUrl);
+    setRrPdfUrl('');
+  }
+
+  try {
+    const resp = await napi.get(
+      `/receiving/quedan-listing-pdf/${encodeURIComponent(selectedRR)}`,
+      {
+        params: { company_id: companyId, _: Date.now() },
+        responseType: 'arraybuffer',
+        headers: { Accept: 'application/pdf' },
+      }
+    );
+
+    const blob = new Blob([resp.data], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+
+    setRrPdfUrl(url);
+    setShowRrPdf(true);
+  } catch (e) {
+    console.error(e);
+    toast.error('Failed to load Quedan Listing PDF.');
+  }
+};
+
+const openQuedanListingInsStoPdfModal = async () => {
+  if (!selectedRR) return;
+
+  if (rrPdfUrl) {
+    URL.revokeObjectURL(rrPdfUrl);
+    setRrPdfUrl('');
+  }
+
+  try {
+    const resp = await napi.get(
+      `/receiving/quedan-listing-inssto-pdf/${encodeURIComponent(selectedRR)}`,
+      {
+        params: { company_id: companyId, _: Date.now() },
+        responseType: 'arraybuffer',
+        headers: { Accept: 'application/pdf' },
+      }
+    );
+
+    const blob = new Blob([resp.data], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+
+    setRrPdfUrl(url);
+    setShowRrPdf(true);
+  } catch (e) {
+    console.error(e);
+    toast.error('Failed to load Quedan Listing Insurance/Storage PDF.');
+  }
+};
+
+
+
+
   // ----------------- UI -----------------
   return (
-    <div className="space-y-4 p-6">
+    <div className="min-h-screen pb-40 space-y-4 p-6">
       <ToastContainer position="top-right" autoClose={2500} />
 
       {/* Header card */}
       <div className="bg-yellow-50 shadow rounded-lg p-4 border border-yellow-300 space-y-4">
         <h2 className="text-lg font-bold text-slate-700">RECEIVING ENTRY</h2>
+<RateBasisBar />
 
         {/* line 1: receiving + date */}
         <div className="grid grid-cols-12 gap-3 items-end">
@@ -666,26 +1378,24 @@ useEffect(() => {
               />
               <div className="flex-1">
                
-                <DropdownWithHeaders
-                  label=""
-                  value={selectedRR}
-                  onChange={onSelectRR}
-                  items={filteredRR.map((r) => ({
-                    code: r.receipt_no,
-                    label: r.receipt_no,
-                    description: r.vendor_name,
-                    quantity: r.quantity,
-                    pbn_number: r.pbn_number,
-                    sugar_type: r.sugar_type,
-                    receipt_date: r.receipt_date,
-                  }))}
-                  search={rrSearch}
-                  onSearchChange={setRrSearch}
-                  headers={['Receipt No', 'Quantity', 'Sugar Type', 'PBN No', 'RDate', 'Vendor ID', 'Vendor Name']}
-                  columnWidths={['120px', '90px', '70px', '110px', '110px', '110px', '220px']}
-                  customKey="rr"
-                  inputClassName={`${fieldSize} bg-green-100 text-green-900`}
-                />
+                <DropdownWithHeadersDynamic
+  label=""
+  value={selectedRR}
+  onChange={onSelectRR}
+  items={filteredRR.map((r) => ({
+    code: r.receipt_no,
+    label: r.sugar_type,
+    description: r.vendor_name,
+    quantity: r.quantity,
+    pbn_number: r.pbn_number,
+    receipt_date: r.receipt_date,
+  }))}
+  search={rrSearch}
+  onSearchChange={setRrSearch}
+  headers={['Receipt No', 'Sugar Type', 'Vendor Name', 'Qty', 'PBN No', 'RDate']}
+  columnWidths={['130px', '50px', '240px', '50px', '120px', '110px']}
+  customKey="rr"
+  inputClassName={`${fieldSize} bg-green-100 text-green-1000`}                />
               </div>
             </div>
           </div>
@@ -699,7 +1409,26 @@ useEffect(() => {
                 onChange={(e) => onChangeDateReceived(e.target.value)}
                 className="w-full border p-2 rounded bg-yellow-100"
               />
-              <span className="inline-flex items-center text-xs px-2 rounded border">UD</span>
+<button
+  type="button"
+  disabled={!selectedRR}
+  onClick={async () => {
+    if (!selectedRR) return;
+    try {
+      await pushDate('receipt_date', dateReceived);
+      //await refreshRatesAndDetails(); // ✅ new helper below
+      toast.success('Date updated');
+    } catch {
+      toast.error('Failed to update date');
+    }
+  }}
+  className={`inline-flex items-center text-xs px-2 rounded border ${
+    selectedRR ? 'bg-white hover:bg-slate-50' : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+  }`}
+  title="Update Date (recompute rates)"
+>
+  UD
+</button>
             </div>
           </div>
         </div>
@@ -773,7 +1502,17 @@ useEffect(() => {
             <label className="block text-sm text-slate-600">Mill</label>
             <div className="flex gap-2">
               <input value={mill} disabled className="w-full border p-2 bg-yellow-100 rounded" />
-              <span className="inline-flex items-center text-xs px-2 rounded border">UM</span>
+{/*<button
+  type="button"
+  disabled={!selectedRR}
+  onClick={() => setShowMillPicker(true)}
+  className={`inline-flex items-center text-xs px-2 rounded border ${
+    selectedRR ? 'bg-white hover:bg-slate-50' : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+  }`}
+  title="Update Mill (recompute rates)"
+>
+  UM
+</button>*/}
             </div>
           </div>
         </div>
@@ -790,7 +1529,7 @@ useEffect(() => {
   {handsontableEnabled && (
     // Outer wrapper can look nice (padding/border) — this does NOT host HotTable directly
 
-  <div className="rounded-md border border-slate-300 bg-white p-2">
+<div className="rec-grid rounded-md border border-slate-300 bg-white p-2">
       {/* keep the direct host clean; allow overlays */}
       <div ref={gridWrapRef} style={{ padding: 0, border: 0, overflow: 'visible', position: 'relative' }}>
         
@@ -830,7 +1569,23 @@ useEffect(() => {
             { data: 'liens',    type: 'numeric', numericFormat: { pattern: '0,0.00' }, className: 'htRight' },
             { data: 'week_ending', type: 'date', dateFormat: 'YYYY-MM-DD', correctFormat: true, className: 'htCenter' },
             { data: 'date_issued', type: 'date', dateFormat: 'YYYY-MM-DD', correctFormat: true, className: 'htCenter' },
-            { data: 'planter_tin', type: 'text', className: 'htCenter' },
+{
+  data: 'planter_tin',
+  type: 'autocomplete',
+  strict: false,       // allow typing, not only pick
+  filter: true,
+  visibleRows: 8,
+  className: 'htCenter',
+
+  // Handsontable expects (query, process)
+source: function (this: any, query: string, process: (items: string[]) => void) {
+  process([]); // ✅ immediate response to keep editor alive
+  fetchPlanterOptions(query)
+    .then((rows) => process(rows.map((r) => r.tin)))
+    .catch(() => process([]));
+},
+
+},
             { data: 'planter_name', readOnly: true },
             { data: 'item_no',     readOnly: true, className: 'htCenter' },
             { data: 'unit_cost',   type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' }, className: 'htRight' },
@@ -841,73 +1596,165 @@ useEffect(() => {
           ]}
 
           /* Your existing autosave + recompute logic */
-          afterChange={(changes, source) => {
-            if (!changes || source !== 'edit') return;
+afterChange={(changes, source) => {
+  if (!changes || !['edit', 'Autocomplete', 'paste'].includes(String(source))) return;
 
-            const updated: ReceivingDetailRow[] = [...tableData];
-            let shouldAppendRow = false;
+  // ✅ ADDED: prevent infinite loop when we revert a duplicate value programmatically
+  if (String(source) === 'dupQuedanRevert') return;
 
-            changes.forEach(([rowIndex]) => {
-              const r = { ...(updated[rowIndex] || {}) };
-              const qty = Number(r.quantity || 0);
 
-              // sync from header state
-              r.item_no    = itemNumber || r.item_no;
-              r.mill       = mill || r.mill;
-              r.unit_cost  = unitCost || 0;
-              r.commission = commission || 0;
+  // ✅ ADDED: access HOT instance so we can revert value + re-focus cell (legacy behavior)
+  const hot = hotRef.current?.hotInstance as any;
 
-              // compute based on your helpers/flags
-              const rrDateISO  = dateReceived || '';
-              const rowWeekISO = r.week_ending ? toISO(r.week_ending) : '';
+  const updated: ReceivingDetailRow[] = [...tableData];
+  let shouldAppendRow = false;
 
-              let ins = 0;
-              const insFrom = (insuranceWeek || rowWeekISO);
-              if (insFrom && rrDateISO && !noInsurance) {
-                const m = calcMonthsCeil(insFrom, rrDateISO);
-                ins = qty * (insuranceRate || 0) * m;
-              }
+  changes.forEach(([rowIndex, prop, oldValue, newValue]) => {
+    const r = { ...(updated[rowIndex as number] || {}) };
 
-              let sto = 0;
-              const stoFrom = (storageWeek || rowWeekISO);
-              if (stoFrom && rrDateISO && !noStorage) {
-                const m = calcMonthsFloorStorage(stoFrom, rrDateISO, daysFree || 0);
-                sto = qty * (storageRate || 0) * m;
-              }
+    // ✅ ADDED: apply edited value into our local row copy FIRST
+    (r as any)[prop as any] = newValue;
 
-              r.storage   = sto;
-              r.insurance = ins;
-              r.total_ap  = qty * (unitCost || 0) - sto - ins;
+// ✅ DUPLICATE QUEDAN CHECK (legacy: alert + revert + keep cursor on the same cell)
+if (prop === 'quedan_no') {
+  const q = String(newValue ?? '').trim();
 
-              updated[rowIndex] = r;
+  if (q) {
+    // ✅ CHANGED: use helper instead of inline updated.some(...)
+    const dup = isDuplicateQuedan(updated, rowIndex as number, q);
 
-              if (r.quedan_no && qty > 0) {
-                setTimeout(() => handleAutoSave(r, rowIndex), 0);
-                if (rowIndex === updated.length - 1) shouldAppendRow = true;
-              }
-            });
+    if (dup) {
+      window.alert('No duplicate quedan number please!!!');
 
-            if (shouldAppendRow) {
-              updated.push({
-                quedan_no: '',
-                quantity: undefined,
-                liens: undefined,
-                week_ending: null,
-                date_issued: null,
-                planter_tin: '',
-                planter_name: '',
-                item_no: itemNumber || '',
-                mill: mill || '',
-                unit_cost: unitCost || 0,
-                commission: commission || 0,
-                storage: 0,
-                insurance: 0,
-                total_ap: 0,
-              });
+      // revert UI + local row to previous value
+      const revertVal = String(oldValue ?? '').trim();
+      hot?.setDataAtRowProp(rowIndex as number, 'quedan_no', revertVal, 'dupQuedanRevert');
+
+      r.quedan_no = revertVal;
+      updated[rowIndex as number] = r;
+      setTableData(updated);
+
+      // legacy feel: keep cursor and reopen editor
+      const propToCol =
+        typeof hot?.propToCol === 'function'
+          ? hot.propToCol.bind(hot)
+          : (p: string) => {
+              const cols = hot?.getSettings?.()?.columns || [];
+              const idx = cols.findIndex((c: any) => c?.data === p);
+              return idx < 0 ? 0 : idx;
+            };
+
+      const colIndex = propToCol('quedan_no');
+
+      requestAnimationFrame(() => {
+        try {
+          hot?.selectCell(rowIndex as number, colIndex);
+          hot?.scrollViewportTo(rowIndex as number, colIndex);
+          hot?.getActiveEditor?.()?.beginEditing?.();
+        } catch {
+          // ignore focus errors
+        }
+      });
+
+      return; // stop processing
+    }
+  }
+}
+
+
+    const qty = Number(r.quantity || 0);
+
+    // sync from header state
+    r.item_no    = itemNumber || r.item_no;
+    r.mill       = mill || r.mill;
+    r.unit_cost  = unitCost || 0;
+    r.commission = commission || 0;
+
+    // compute based on your helpers/flags
+    // ✅ server-confirmed mode:
+    // do NOT compute insurance/storage/total_ap here.
+    // keep unit_cost/commission in sync for display only.
+    r.storage   = r.storage ?? 0;
+    r.insurance = r.insurance ?? 0;
+    r.total_ap  = r.total_ap ?? 0;
+
+
+    updated[rowIndex as number] = r;
+
+    if (r.quedan_no && qty > 0) {
+      setTimeout(() => handleAutoSave(r, rowIndex as number), 0);
+      if ((rowIndex as number) === updated.length - 1) shouldAppendRow = true;
+    }
+
+    // ---- planter TIN -> planter name (debounced) ----
+    if (prop === 'planter_tin') {
+      const tin = normalizeTin(newValue);
+
+      // fast fill from cache (dropdown selections will already be cached)
+      const cachedName = planterNameCacheRef.current.get(tin);
+      if (cachedName !== undefined) {
+        r.planter_tin = tin;
+        r.planter_name = cachedName;
+        updated[rowIndex as number] = r;
+      }
+
+      // clear existing timer for this row
+      const prevTimer = planterLookupTimerRef.current[rowIndex as number];
+      if (prevTimer) window.clearTimeout(prevTimer);
+
+      planterLookupTimerRef.current[rowIndex as number] = window.setTimeout(async () => {
+        if (planterLookupInFlightRef.current[rowIndex as number]) return;
+        planterLookupInFlightRef.current[rowIndex as number] = true;
+
+        try {
+          const name = await fetchPlanterNameByTin(tin);
+
+          setTableData((prev) => {
+            const copy = [...prev];
+            const cur = { ...(copy[rowIndex as number] || {}) };
+
+            // keep latest tin in case user edited again quickly
+            cur.planter_tin = tin;
+
+            // only set name if tin still matches
+            if (normalizeTin(cur.planter_tin) === tin) {
+              cur.planter_name = name || '';
             }
 
-            setTableData(updated);
-          }}
+            copy[rowIndex as number] = cur;
+            return copy;
+          });
+        } catch {
+          // ignore lookup errors; backend will still set planter_name during autosave if tin valid
+        } finally {
+          planterLookupInFlightRef.current[rowIndex as number] = false;
+        }
+      }, 250);
+    }
+  });
+
+  if (shouldAppendRow) {
+    updated.push({
+      quedan_no: '',
+      quantity: undefined,
+      liens: undefined,
+      week_ending: null,
+      date_issued: null,
+      planter_tin: '',
+      planter_name: '',
+      item_no: itemNumber || '',
+      mill: mill || '',
+      unit_cost: unitCost || 0,
+      commission: commission || 0,
+      storage: 0,
+      insurance: 0,
+      total_ap: 0,
+    });
+  }
+
+  setTableData(updated);
+}}
+
         />
 <style>{`
   /* only affects this grid */
@@ -952,24 +1799,28 @@ useEffect(() => {
     {/* LEFT: GL + Assoc + Others */}
     <div className="col-span-6 grid grid-cols-6 gap-4">
       <div className="col-span-6">
-        <label className="block text-xs font-semibold text-slate-600">GL Account</label>
-        <input
-          value={glAccountKey}
-          onChange={(e) => setGlAccountKey(e.target.value)}
-          onBlur={async () => {
-            if (!selectedRR) return;
-            try {
-              await napi.post('/api/receiving/update-gl', {
-                receipt_no: selectedRR,
-                gl_account_key: glAccountKey,
-              });
-              toast.success('GL Account updated');
-            } catch {
-              toast.error('Failed to update GL Account');
-            }
-          }}
-          className="w-full border p-2 rounded bg-yellow-50"
-        />
+<label className="block text-xs font-semibold text-slate-600">GL Account</label>
+
+<AttachedDropdown
+  value={glAccountKey}
+  displayValue={glDisplay}     // ✅ shows: "1001 — CASH IN BANK" etc
+  readOnlyInput
+  onChange={(code) => onSelectGL(String(code))}
+  items={glOptions.map((a) => ({
+    code: a.acct_code,
+    acct_code: a.acct_code,
+    acct_desc: a.acct_desc,
+  }))}
+  headers={['Account Code', 'Description']}
+  columns={['acct_code', 'acct_desc']}
+  search={glSearch}
+  onSearchChange={setGlSearch}
+  inputClassName="bg-yellow-50"
+  dropdownClassName="min-w-[720px]"
+  columnWidths={['140px', '560px']}
+/>
+
+
       </div>
 
       <div className="col-span-3">
@@ -979,19 +1830,6 @@ useEffect(() => {
           step="0.01"
           value={assocDues}
           onChange={(e) => setAssocDues(e.target.value === '' ? '' : Number(e.target.value))}
-          onBlur={async () => {
-            if (!selectedRR) return;
-            try {
-              await napi.post('/api/receiving/update-assoc-others', {
-                receipt_no: selectedRR,
-                assoc_dues: Number(assocDues || 0),
-                others: Number(others || 0),
-              });
-              toast.success('Assoc/Others saved');
-            } catch {
-              toast.error('Failed to save Assoc/Others');
-            }
-          }}
           className="w-full border p-2 rounded bg-yellow-50"
         />
       </div>
@@ -1003,22 +1841,25 @@ useEffect(() => {
           step="0.01"
           value={others}
           onChange={(e) => setOthers(e.target.value === '' ? '' : Number(e.target.value))}
-          onBlur={async () => {
-            if (!selectedRR) return;
-            try {
-              await napi.post('/api/receiving/update-assoc-others', {
-                receipt_no: selectedRR,
-                assoc_dues: Number(assocDues || 0),
-                others: Number(others || 0),
-              });
-              toast.success('Assoc/Others saved');
-            } catch {
-              toast.error('Failed to save Assoc/Others');
-            }
-          }}
+
           className="w-full border p-2 rounded bg-yellow-50"
         />
       </div>
+
+<div className="col-span-6 flex justify-end">
+  <button
+    type="button"
+    disabled={!selectedRR}
+    onClick={saveAssocOthers}
+    className={`px-3 py-2 rounded border text-sm ${
+      selectedRR ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+    }`}
+  >
+    Save Assoc / Others
+  </button>
+</div>
+
+
     </div>
 
     {/* RIGHT: Weeks + Flags */}
@@ -1064,52 +1905,175 @@ useEffect(() => {
       </div>
     </div>
   </div>
+  <RateBasisBar />
+
 </div>
 
 
 
 
       {/* Actions */}
-      <div className="flex items-center gap-2">
-        <button className="inline-flex items-center gap-2 rounded border px-3 py-2 bg-white">
-          <PrinterIcon className="h-5 w-5" />
-          <span>Print</span>
-          <ChevronDownIcon className="h-4 w-4" />
-        </button>
-        <button
-          className="inline-flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
-          onClick={() => {
-            setSelectedRR('');
-            setHandsontableEnabled(false);
-            setTableData([]);
-            setDateReceived('');
-            setPbnNumber('');
-            setItemNumber('');
-            setVendorName('');
-            setMill('');
-            setAssocDues('');
-            setOthers('');
-            setNoInsurance(false);
-            setNoStorage(false);
-            setInsuranceWeek('');
-            setStorageWeek('');
-            toast.success('Ready for new Receiving Entry');
-          }}
-        >
-          <PlusIcon className="h-5 w-5" />
-          New
-        </button>
-        <button
-          disabled={!!selectedRR}
-          className={`inline-flex items-center gap-2 px-4 py-2 rounded 
-                      ${selectedRR ? 'bg-green-400 cursor-not-allowed opacity-60' : 'bg-green-600 hover:bg-green-700'} 
-                      text-white`}
-          onClick={onSaveNewReceiving}
-        >
-          <CheckCircleIcon className="h-5 w-5" />
-          Save
+
+{/* Actions (legacy-style Download + Print dropdowns) */}
+<div className="flex items-center gap-2">
+  <ActionDropdown
+    disabled={!selectedRR}
+    icon={<ArrowDownTrayIcon className="h-5 w-5" />}
+    label="Download"
+    items={[
+      {
+        label: 'Quedan Listing - Excel',
+        onClick: () =>
+          doExcelDownload(
+            exportEndpoints.dl_quedan_excel,
+            `Quedan_Listing_${selectedRR}.xlsx`
+          ),
+      },
+      {
+        label: 'Quedan Listing (Insurance/Storage) - Excel',
+        onClick: () =>
+          doExcelDownload(
+            exportEndpoints.dl_quedan_inssto_excel,
+            `Quedan_Listing_Insurance_Storage_${selectedRR}.xlsx`
+          ),
+      },
+    ]}
+  />
+
+<ActionDropdown
+  disabled={!selectedRR}
+  icon={<PrinterIcon className="h-5 w-5" />}
+  label="Print"
+  items={[
+    {
+      label: 'Quedan Listing - PDF',
+      onClick: openQuedanListingPdfModal,
+    },
+    {
+      label: 'Quedan Listing Insurance/Storage - PDF',
+      onClick: openQuedanListingInsStoPdfModal,
+    },
+    {
+      label: 'Receiving Report - PDF',
+      onClick: openReceivingReportPdfModal,
+    },
+  ]}
+/>
+
+
+  <button
+    className="inline-flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+    onClick={() => {
+      setSelectedRR('');
+      setHandsontableEnabled(false);
+      setTableData([]);
+      setDateReceived('');
+      setPbnNumber('');
+      setItemNumber('');
+      setVendorName('');
+      setMill('');
+      setAssocDues('');
+      setOthers('');
+      setNoInsurance(false);
+      setNoStorage(false);
+      setInsuranceWeek('');
+      setStorageWeek('');
+      toast.success('Ready for new Receiving Entry');
+    }}
+  >
+    <PlusIcon className="h-5 w-5" />
+    New
+  </button>
+
+  <button
+    disabled={!!selectedRR}
+    className={`inline-flex items-center gap-2 px-4 py-2 rounded 
+      ${selectedRR ? 'bg-green-400 cursor-not-allowed opacity-60' : 'bg-green-600 hover:bg-green-700'} 
+      text-white`}
+    onClick={onSaveNewReceiving}
+  >
+    <CheckCircleIcon className="h-5 w-5" />
+    Save
+  </button>
+</div>
+
+{showMillPicker && (
+  <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+    <div className="bg-white rounded-lg shadow-lg w-[720px] max-w-[95vw] p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="font-semibold text-slate-700">Select Mill</div>
+        <button className="px-2 py-1 rounded border" onClick={() => setShowMillPicker(false)}>
+          Close
         </button>
       </div>
+
+      <input
+        className="w-full border rounded px-3 py-2"
+        placeholder="Search mill..."
+        value={millSearch}
+        onChange={(e) => setMillSearch(e.target.value)}
+      />
+
+      <div className="max-h-[320px] overflow-auto border rounded">
+        {millOptions.map((m) => (
+          <button
+            key={m.mill_name}
+            className="w-full text-left px-3 py-2 hover:bg-slate-50 border-b"
+            onClick={async () => {
+              try {
+                await napi.post('/receiving/update-mill', {
+                  receipt_no: selectedRR,
+                  mill: m.mill_name,
+                });
+
+                setShowMillPicker(false);
+                setMillSearch('');
+
+                await refreshRatesAndDetails(); // ✅ rates + recompute cascade
+                toast.success('Mill updated');
+              } catch (e: any) {
+                toast.error(e?.response?.data?.msg || 'Failed to update mill');
+              }
+            }}
+          >
+            {m.mill_name}
+          </button>
+        ))}
+
+        {millOptions.length === 0 && (
+          <div className="p-3 text-sm text-slate-500">No mills found.</div>
+        )}
+      </div>
+    </div>
+  </div>
+)}
+
+{showRrPdf && (
+  <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+    <div className="bg-white rounded-lg shadow-lg w-[92vw] h-[92vh] overflow-hidden relative">
+      <button
+        className="absolute top-3 right-3 px-3 py-1 rounded border bg-white hover:bg-slate-50 z-10"
+        onClick={() => {
+          setShowRrPdf(false);
+          if (rrPdfUrl) URL.revokeObjectURL(rrPdfUrl);
+          setRrPdfUrl('');
+        }}
+      >
+        ✕
+      </button>
+
+      <div className="h-full pt-0">
+        <iframe
+          title="Receiving Report PDF"
+          src={rrPdfUrl}
+          className="w-full h-full"
+        />
+      </div>
+    </div>
+  </div>
+)}
+
+
     </div>
   );
   

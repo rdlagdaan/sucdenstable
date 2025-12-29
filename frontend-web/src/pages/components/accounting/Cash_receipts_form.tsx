@@ -23,8 +23,8 @@ import {
 Handsontable.cellTypes.registerCellType('numeric', NumericCellType);
 
 /* ---------------- helpers ---------------- */
-type Totals =
-  Partial<Record<'sum_debit' | 'sum_credit' | 'debit' | 'credit' | 'total_debit' | 'total_credit', number>>;
+//type Totals =
+//  Partial<Record<'sum_debit' | 'sum_credit' | 'debit' | 'credit' | 'total_debit' | 'total_credit', number>>;
 
 
 const onlyCode = (v?: string) => (v || '').split(';')[0];
@@ -73,6 +73,14 @@ function pesoWords(amount: number) {
 const fmtMoney = (n: number) =>
   (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+const calcTotalsFromDetails = (rows: DetailRow[]) => {
+  const sumD = rows.reduce((a, r) => a + Number(r.debit || 0), 0);
+  const sumC = rows.reduce((a, r) => a + Number(r.credit || 0), 0);
+  const balanced = Math.abs(sumD - sumC) < 0.005;
+  return { sumD, sumC, balanced };
+};
+
+
 /* ---------------- types ---------------- */
 
 
@@ -119,7 +127,24 @@ export default function CashReceiptsForm() {
   const [collectionReceipt, setCollectionReceipt] = useState('');
   const [_locked, setLocked] = useState(false);       // header lock
   const [gridLocked, setGridLocked] = useState(true); // grid lock (separate)
-  const [isCancelled, setIsCancelled] = useState(false);
+const [isCancelled, setIsCancelled] = useState(false); // true if is_cancel === 'c'
+const [isDeleted, setIsDeleted] = useState(false);     // true if is_cancel === 'd'
+
+  // totals (for Balanced pill + Total Debit/Credit display)
+  const [sumDebit, setSumDebit] = useState<number>(0);
+  const [sumCredit, setSumCredit] = useState<number>(0);
+  const [isBalanced, setIsBalanced] = useState<boolean>(false);
+
+  // approvals (Request to Edit)
+  const [approvalStatus, setApprovalStatus] = useState<
+    'none' | 'pending' | 'approved' | 'rejected' | 'expired'
+  >('none');
+  const [approvedActive, setApprovedActive] = useState<boolean>(false);
+  const [_cd_noapprovalId, setApprovalId] = useState<number | null>(null);
+
+const [editMinsLeft, setEditMinsLeft] = useState<number | null>(null);
+const [approvalReason, setApprovalReason] = useState<string>('');
+const [_keyapprovalExpiresAt, setApprovalExpiresAt] = useState<string | null>(null);
 
   const isSaved = useMemo(() => mainId != null, [mainId]);
 
@@ -140,7 +165,10 @@ export default function CashReceiptsForm() {
   const [txSearch, setTxSearch] = useState('');
   const [txOptions, setTxOptions] = useState<ReceiptListRow[]>([]);
  
+ const canExport = isSaved && !isCancelled && !isDeleted;
+
   
+
   const txDropdownItems = useMemo<DropdownItem[]>(() =>
     (txOptions || []).map(o => ({
       code: String(o.id),
@@ -186,6 +214,90 @@ export default function CashReceiptsForm() {
   }, []);
   const companyId = user?.company_id;
 
+  const fetchApprovalStatus = useCallback(async (rid: number) => {
+    if (!rid) return;
+
+    try {
+      const { data } = await napi.get('/approvals/status', {
+        params: {
+          module: 'cash_receipts',      // must match ApprovalController module mapping
+          record_id: rid,
+          company_id: companyId || '',
+          action: 'edit',
+        },
+      });
+
+      if (!data?.exists) {
+        setApprovalStatus('none');
+        setApprovedActive(false);
+        setApprovalId(null);
+        setEditMinsLeft(null);
+        setApprovalReason('');
+        setApprovalExpiresAt(null);
+
+        return;
+      }
+
+const rawStatus = String(data.status || 'none').toLowerCase();
+const isActive = !!data.approved_active;
+
+const minsLeft = minutesLeftFromExpiresAt(data.expires_at);
+setEditMinsLeft(minsLeft);
+
+setApprovalReason(String(data.reason || ''));
+setApprovalExpiresAt(data.expires_at ? String(data.expires_at) : null);
+
+// If backend says "approved" but window already ended, treat as expired in UI
+const uiStatus =
+  rawStatus === 'approved' && !isActive && minsLeft === 0 ? 'expired' : rawStatus;
+
+setApprovalStatus(uiStatus as any);
+setApprovedActive(isActive);
+setApprovalId(Number(data.id || 0) || null);
+
+// ✅ If approved window becomes active, immediately switch UI to edit mode
+if (isActive) {
+  setLocked(false);
+  setGridLocked(false);
+  hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
+} else {
+  // ✅ If not active, force view mode (prevents “history hides Request to Edit”)
+  setLocked(true);
+  setGridLocked(true);
+  hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+}
+
+
+
+
+    } catch {
+      // safest fallback: no approval info
+      setApprovalStatus('none');
+      setApprovedActive(false);
+      setApprovalId(null);
+      setEditMinsLeft(null);
+      setApprovalReason('');
+      setApprovalExpiresAt(null);
+
+
+    }
+  }, [companyId]);
+
+
+useEffect(() => {
+  if (!mainId) return;
+
+  // Only poll while waiting for approval
+  if (approvalStatus !== 'pending' || approvedActive) return;
+
+  const t = window.setInterval(() => {
+    fetchApprovalStatus(mainId);
+  }, 3000);
+
+  return () => window.clearInterval(t);
+}, [mainId, approvalStatus, approvedActive, fetchApprovalStatus]);
+
+
   // amount words
   useEffect(() => {
     setAmountWords(pesoWords(receiptAmount));
@@ -223,6 +335,51 @@ export default function CashReceiptsForm() {
       }
     })();
   }, [companyId]);
+
+
+type ApprovalStatus = {
+  exists?: boolean;
+  status?: string;
+  approved_active?: boolean;
+  expires_at?: string;
+  id?: number;
+};
+
+const getApprovalStatus = useCallback(async (action: string): Promise<ApprovalStatus> => {
+  if (!mainId) return {};
+  const { data } = await napi.get('/approvals/status', {
+    params: {
+      module: 'cash_receipts',
+      record_id: mainId,
+      company_id: companyId,
+      action,
+    },
+  });
+  return data || {};
+}, [mainId, companyId]);
+
+const requestApproval = useCallback(async (action: string, reason: string) => {
+  if (!mainId) return;
+  const { data } = await napi.post('/approvals/request-edit', {
+    module: 'cash_receipts',
+    record_id: mainId,
+    company_id: companyId,
+    action,
+    reason,
+  });
+  return data;
+}, [mainId, companyId]);
+
+const releaseEditApproval = useCallback(async () => {
+  if (!mainId) return;
+  await napi.post('/approvals/release', {
+    module: 'cash_receipts',
+    record_id: mainId,
+    company_id: companyId,
+    action: 'edit',
+  });
+}, [mainId, companyId]);
+
 
   /* --------- search list --------- */
   const fetchTransactions = useCallback(async () => {
@@ -262,12 +419,33 @@ const ensureAccountInSource = useCallback((code: string, desc?: string) => {
       setCustName(sel?.description || '');
 
       setReceiptDate((m.receipt_date || '').slice(0, 10));
-      setReceiptAmount(Number(m.receipt_amount || 0));
+      //setReceiptAmount(Number(m.receipt_amount || 0));
       setBankId(String(m.bank_id || ''));
       setPayMethodId(String(m.pay_method || ''));
       setCollectionReceipt(m.collection_receipt || '');
       setDetails(m.details || '');
-      setIsCancelled((m.is_cancel || m.is_cancelled) === 'y');
+      const flag = String(m.is_cancel || m.is_cancelled || 'n').toLowerCase();
+setIsCancelled(flag === 'c');
+setIsDeleted(flag === 'd');
+if (flag === 'd') {
+  setLocked(true);
+  setGridLocked(true);
+}
+
+      // totals: prefer backend-computed header fields; fallback to details calc
+      /*const hdrD = Number((m.sum_debit ?? 0));
+      const hdrC = Number((m.sum_credit ?? 0));
+      const hdrB = !!(m.is_balanced);
+
+      setSumDebit(hdrD);
+      setSumCredit(hdrC);
+      setIsBalanced(hdrB);*/
+
+      // approvals
+      if (m.id) fetchApprovalStatus(Number(m.id));
+
+
+
 
       /*const details = (data.details || []).map((d: any) => ({
         id: d.id,
@@ -298,6 +476,16 @@ const details = (data.details || []).map((d: any) => {
     persisted: true,
   } as DetailRow;
 });
+
+
+// ✅ Single source of truth: compute totals from DETAILS we actually display
+const { sumD, sumC, balanced } = calcTotalsFromDetails(details);
+setSumDebit(sumD);
+setSumCredit(sumC);
+setIsBalanced(balanced);
+
+// Amount box mirrors total CREDIT (same legacy rule)
+setReceiptAmount(sumC);
 
 
 
@@ -361,58 +549,192 @@ const details = (data.details || []).map((d: any) => {
     }
   };
 
-  const handleUpdateMain = () => {
-    // unlock header & grid for edits (grid still keeps BANK row read-only)
+const handleRequestToEdit = async () => {
+  if (!mainId) return;
+
+  // If already approved + active, just enable editing immediately
+  if (approvedActive) {
     setLocked(false);
     setGridLocked(false);
-    toast.success('Editing enabled.');
-  };
+    hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
+    toast.success('Editing enabled (approved).');
+    return;
+  }
 
-  const handleCancelTxn = async () => {
-    if (!mainId) return;
-    const ok = await Swal.fire({ title: 'Cancel this receipt?', icon: 'warning', showCancelButton: true, confirmButtonText: 'Cancel' });
-    if (!ok.isConfirmed) return;
-    try {
-      const { data } = await napi.post('/cash-receipt/cancel', { id: mainId, flag: 1 });
-      setIsCancelled((data?.is_cancel || data?.is_cancelled) === 'y');
+  const r = await Swal.fire({
+    title: 'Request Edit Approval',
+    input: 'textarea',
+    inputLabel: 'Reason for edit',
+    inputPlaceholder: 'Explain why you need to edit this entry…',
+    showCancelButton: true,
+    confirmButtonText: 'OK',
+    cancelButtonText: 'Cancel',
+    inputValidator: (v) => (!v || !v.trim() ? 'Reason is required.' : null),
+  });
+
+  if (!r.isConfirmed) return;
+
+  try {
+    const reason = String(r.value || '').trim();
+
+    const { data } = await napi.post('/approvals/request-edit', {
+      module: 'cash_receipts',
+      record_id: mainId,
+      company_id: companyId || '',
+      action: 'edit',
+      reason, // ✅ required, like Sales Journal
+    });
+
+    toast.success('Edit request submitted.');
+    setApprovalStatus('pending');
+    setApprovalReason(reason);
+
+
+    if (data?.id) setApprovalId(Number(data.id) || null);
+
+    // Refresh immediately so UI shows Pending right away
+    fetchApprovalStatus(mainId);
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to request edit.');
+  }
+};
+{approvalStatus === 'pending' && (
+  <div className="text-sm mt-2 text-amber-700 font-semibold">
+    Edit approval is pending
+    {approvalReason ? (
+      <> — Reason: <span className="font-bold">{approvalReason}</span></>
+    ) : null}
+  </div>
+)}
+
+
+
+
+const handleSaveEdits = async () => {
+  if (!mainId) return;
+  if (isCancelled || isDeleted) return toast.error('Cannot save edits on cancelled/deleted receipt.');
+
+  try {
+    // Require approval still active
+    const st = await getApprovalStatus('edit');
+    if (!st?.approved_active) {
+      toast.error('No active edit approval window. Click Update to request/refresh approval.');
       setLocked(true);
       setGridLocked(true);
-      toast.success('Receipt marked CANCELLED.');
-      fetchTransactions();
-    } catch {
-      toast.error('Failed to cancel receipt.');
+      return;
     }
+
+    await napi.post('/cash-receipt/update-main', {
+      id: mainId,
+      cust_id: custId,
+      receipt_date: receiptDate,
+      pay_method: payMethodId,
+      bank_id: bankId,
+      collection_receipt: collectionReceipt,
+      details,
+      amount_in_words: pesoWords(receiptAmount).replace(/^\*\*\*\s|\s\*\*\*$/g, ''),
+      company_id: companyId,
+    });
+
+    // consume the approval window (same rule as GA/Sales)
+    await releaseEditApproval();
+
+    await loadReceipt(mainId);
+
+    setLocked(true);
+    setGridLocked(true);
+
+    toast.success('Edits saved and approval released.');
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to save edits.');
+  }
+};
+
+
+const handleSaveMainNoApproval = async () => {
+  if (!mainId) return;
+  if (isCancelled || isDeleted) return toast.error('Cannot save main on cancelled/deleted receipt.');
+
+  if (!custId || !receiptDate || !bankId || !payMethodId || !collectionReceipt) {
+    return toast.error('Please complete Customer, Date, Bank, Payment Method, and Collection Receipt.');
+  }
+
+  const ok = await Swal.fire({
+    title: 'Save main details?',
+    icon: 'question',
+    showCancelButton: true,
+    confirmButtonText: 'Save Main',
+  });
+  if (!ok.isConfirmed) return;
+
+  try {
+    await napi.post('/cash-receipt/update-main-no-approval', {
+      id: mainId,
+      cust_id: custId,
+      receipt_date: receiptDate,
+      pay_method: payMethodId,
+      bank_id: bankId,
+      collection_receipt: collectionReceipt,
+      details,
+      amount_in_words: pesoWords(receiptAmount).replace(/^\*\*\*\s|\s\*\*\*$/g, ''),
+      company_id: companyId,
+    });
+
+    await loadReceipt(mainId);
+    toast.success('Main details saved.');
+    fetchTransactions();
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to save main.');
+  }
+};
+
+
+const minutesLeftFromExpiresAt = (expiresAt?: string) => {
+  if (!expiresAt) return null;
+  const exp = new Date(expiresAt).getTime();
+  const now = Date.now();
+  if (!Number.isFinite(exp)) return null;
+  const mins = Math.max(0, Math.ceil((exp - now) / 60000));
+  return mins;
+};
+
+
+const requestOneShot = async (action: 'CANCEL' | 'UNCANCEL' | 'DELETE') => {
+  if (!mainId) return;
+  if (isDeleted) return toast.error('This receipt is already deleted.');
+  if (action !== 'UNCANCEL' && isCancelled && action !== 'DELETE') return toast.error('Already cancelled.');
+
+  const titleMap: any = {
+    CANCEL: 'Request approval to CANCEL this receipt?',
+    UNCANCEL: 'Request approval to UNCANCEL this receipt?',
+    DELETE: 'Request approval to DELETE this receipt?',
   };
 
-  const handleUncancelTxn = async () => {
-    if (!mainId) return;
-    const ok = await Swal.fire({ title: 'Uncancel this receipt?', icon: 'question', showCancelButton: true, confirmButtonText: 'Uncancel' });
-    if (!ok.isConfirmed) return;
-    try {
-      const { data } = await napi.post('/cash-receipt/cancel', { id: mainId, flag: 0 });
-      setIsCancelled((data?.is_cancel || data?.is_cancelled) !== 'y');
-      setLocked(true);
-      setGridLocked(false);
-      toast.success('Receipt is now ACTIVE.');
-      fetchTransactions();
-    } catch {
-      toast.error('Failed to uncancel receipt.');
-    }
-  };
+  const r = await Swal.fire({
+    title: titleMap[action],
+    input: 'text',
+    inputLabel: 'Reason (required)',
+    inputPlaceholder: 'Enter reason…',
+    showCancelButton: true,
+    confirmButtonText: 'Request',
+    inputValidator: (v) => (!v || !v.trim() ? 'Reason is required.' : null),
+    icon: action === 'DELETE' ? 'warning' : 'question',
+  });
 
-  const handleDeleteTxn = async () => {
-    if (!mainId) return;
-    const ok = await Swal.fire({ title: 'Delete this receipt?', text: 'This action is irreversible.', icon: 'error', showCancelButton: true, confirmButtonText: 'Delete' });
-    if (!ok.isConfirmed) return;
-    try {
-      await napi.delete(`/cash-receipt/${mainId}`);
-      handleNew(); // reset
-      toast.success('Receipt deleted.');
-      fetchTransactions();
-    } catch {
-      toast.error('Failed to delete receipt.');
-    }
-  };
+  if (!r.isConfirmed) return;
+
+  try {
+    await requestApproval(action, String(r.value || '').trim());
+    toast.info(`Request sent for ${action}. Wait for supervisor approval.`);
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || `Failed to request ${action}.`);
+  }
+};
+
+const handleCancelTxn = async () => requestOneShot('CANCEL');
+const handleUncancelTxn = async () => requestOneShot('UNCANCEL');
+const handleDeleteTxn = async () => requestOneShot('DELETE');
+
 
 // ⬇️ Put this near your other helpers (top of file)
 /** Sum debit/credit and check balance (tolerance 0.005) */
@@ -505,25 +827,28 @@ const handleNew = async () => {
   const isRowValid = (r: DetailRow) =>
     !!onlyCode(r.acct_code) && ((r.debit ?? 0) > 0) !== ((r.credit ?? 0) > 0);
 
-const refreshHeaderTotals = (totals?: Totals) => {
+/*const refreshHeaderTotals = (totals?: Totals) => {
   if (!totals) return;
+
+  const d = Number(totals.sum_debit ?? totals.total_debit ?? totals.debit ?? 0);
+  const c = Number(totals.sum_credit ?? totals.total_credit ?? totals.credit ?? 0);
+  const balanced = Math.abs(d - c) < 0.005;
+
+  setSumDebit(d);
+  setSumCredit(c);
+  setIsBalanced(balanced);
+
   // Amount box shows total CREDIT per legacy rule
-  setReceiptAmount(
-    Number(
-      totals.sum_credit ??
-      totals.total_credit ??
-      totals.credit ??
-      0
-    )
-  );
+  setReceiptAmount(c);
+};*/
+
+
+
+const deleteDetail = async (payload: any) => {
+  await napi.post('/cash-receipt/delete-detail', payload);
+  await loadReceipt(payload.transaction_id);
 };
 
-
-  const deleteDetail = async (payload: any) => {
-    const { data } = await napi.post('/cash-receipt/delete-detail', payload);
-    refreshHeaderTotals(data?.totals);
-    await loadReceipt(payload.transaction_id);
-  };
 
 // Replace your existing handleAutoSave with this version
 const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
@@ -536,7 +861,7 @@ const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
   try {
     if (!row.persisted) {
       // ⬇️ CREATE: insert a new detail row
-      const { data } = await napi.post('/cash-receipt/save-detail', {
+        await napi.post('/cash-receipt/save-detail', {
         transaction_id: mainId,
         acct_code: code,
         debit: row.debit || 0,
@@ -547,7 +872,7 @@ const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
 
       // ✅ Update header "Amount" box from server totals (if returned)
       //    (Your backend returns { totals: { sum_debit, sum_credit, ... } })
-      refreshHeaderTotals(data?.totals);
+      //refreshHeaderTotals(data?.totals);
 
       // 🔄 IMPORTANT: reload the whole receipt so we:
       //    - show the server-computed BANK debit immediately
@@ -563,7 +888,7 @@ const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
 
     } else {
       // ⬇️ UPDATE: modify an existing detail row
-      const { data } = await napi.post('/cash-receipt/update-detail', {
+        await napi.post('/cash-receipt/update-detail', {
         id: row.id,
         transaction_id: mainId,
         acct_code: code,
@@ -572,7 +897,7 @@ const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
       });
 
       // ✅ Refresh header totals if backend returned them
-      refreshHeaderTotals(data?.totals);
+      //refreshHeaderTotals(data?.totals);
 
       // 🔄 Reload so BANK debit reflects the new balance immediately
       await loadReceipt(mainId);
@@ -650,9 +975,20 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
 };
 
 
+const isEditPending = approvalStatus === 'pending';
+const canRequestEdit = isSaved && !isCancelled && !isDeleted && _locked && !approvedActive && !isEditPending;
+const canSaveEdits = isSaved && !isCancelled && !isDeleted && !_locked; // your existing meaning
+
+const canSaveMainNoApproval =
+  isSaved && !isCancelled && !isDeleted;
+
+
+
+
+
 
   return (
-    <div className="space-y-4 p-6">
+    <div className="min-h-screen pb-40 space-y-4 p-6">
       <ToastContainer position="top-right" autoClose={3000} />
 
      {/* HEADER */}
@@ -704,7 +1040,7 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
       <input
         type="date"
         value={receiptDate}
-        disabled={isSaved}
+        disabled={isCancelled || isDeleted}
         onChange={(e) => setReceiptDate(e.target.value)}
         className="w-full border p-2 bg-blue-100 text-blue-900"
       />
@@ -716,7 +1052,7 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
         label="Bank Name"
         value={bankId}
         onChange={setBankId}
-        items={banks.map(b => ({ code: String(b.bank_id ?? b.code), description: b.bank_name ?? b.description }))}
+        items={banks}
         search={bankSearch}
         onSearchChange={setBankSearch}
         headers={['Code','Bank']}
@@ -731,7 +1067,7 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
         label="Payment Method"
         value={payMethodId}
         onChange={setPayMethodId}
-        items={payMethods.map(p => ({ code: String(p.pay_method_id ?? p.code), description: p.pay_method ?? p.description }))}
+        items={payMethods}
         search={paySearch}
         onSearchChange={setPaySearch}
         headers={['Code','Method']}
@@ -750,7 +1086,7 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
       <label className="block mb-1">Details</label>
       <input
         value={details}
-        disabled={isSaved && isCancelled}
+        disabled={isCancelled || isDeleted}
         onChange={(e) => setDetails(e.target.value)}
         className="w-full border p-2 bg-blue-100 text-blue-900"
       />
@@ -761,7 +1097,7 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
       <label className="block mb-1">Collection Receipt #</label>
       <input
         value={collectionReceipt}
-        disabled={isSaved && isCancelled}
+        disabled={isCancelled || isDeleted}
         onChange={(e) => setCollectionReceipt(e.target.value)}
         className="w-full border p-2 bg-blue-100 text-blue-900"
       />
@@ -795,6 +1131,50 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
     )}
   </div>
 
+        {/* Transaction summary (like Sales Journal) */}
+        {isSaved && (
+          <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+            <div className="font-semibold text-gray-700">
+              CR No: <span className="font-bold text-gray-900">{crNo || mainId}</span>
+            </div>
+
+            <div className="font-semibold text-gray-700">
+              Total Debit: <span className="font-bold text-gray-900">{fmtMoney(sumDebit)}</span>
+            </div>
+
+            <div className="font-semibold text-gray-700">
+              Total Credit: <span className="font-bold text-gray-900">{fmtMoney(sumCredit)}</span>
+            </div>
+
+            <span
+              className={`inline-flex items-center rounded px-3 py-1 text-xs font-bold ${
+                isBalanced ? 'bg-emerald-600 text-white' : 'bg-gray-300 text-gray-800'
+              }`}
+            >
+              {isBalanced ? 'Balanced' : 'Not Balanced'}
+            </span>
+
+{isCancelled && (
+  <div className="mt-2 text-sm text-red-600 font-semibold">
+    This transaction is CANCELLED. It cannot be edited, printed, or downloaded.
+  </div>
+)}
+
+
+
+            {/* optional tiny approval status text */}
+{approvalStatus !== 'none' && (
+  <span className="text-xs font-semibold text-gray-600">
+    Approval: {approvalStatus}
+    {approvedActive ? ` (active${editMinsLeft != null ? ` — ${editMinsLeft} min left` : ''})` : ''}
+  </span>
+)}
+
+          </div>
+        )}
+
+
+
 
         {/* Actions */}
         <div className="flex gap-2 mt-3">
@@ -805,12 +1185,44 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
             </button>
           ) : (
             <>
-              {!isCancelled && (
-                <button onClick={handleUpdateMain} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700">
-                  <CheckCircleIcon className="h-5 w-5" />
-                  Update
-                </button>
-              )}
+{/* Pending state — disable button and show message + reason (Sales Journal UX) */}
+{isEditPending ? (
+  <button
+    type="button"
+    disabled
+    className="inline-flex items-center gap-2 px-4 py-2 rounded bg-purple-300 text-white cursor-not-allowed opacity-80"
+    title="Edit request is pending approval"
+  >
+    <CheckCircleIcon className="h-5 w-5" />
+    Edit Request Pending
+  </button>
+) : null}
+
+{/* Normal Request to Edit */}
+{canRequestEdit ? (
+  <button
+    onClick={handleRequestToEdit}
+    className="inline-flex items-center gap-2 px-4 py-2 rounded bg-purple-600 text-white hover:bg-purple-700"
+  >
+    <CheckCircleIcon className="h-5 w-5" />
+    Request to Edit
+  </button>
+) : null}
+
+{/* Save Changes (already green in your code) */}
+{canSaveEdits ? (
+  <button
+    onClick={handleSaveEdits}
+    className="inline-flex items-center gap-2 px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+  >
+    <CheckCircleIcon className="h-5 w-5" />
+    Save Changes
+  </button>
+) : null}
+
+
+
+
               {!isCancelled ? (
                 <button onClick={handleCancelTxn} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-amber-500 text-white hover:bg-amber-600">
                   <XMarkIcon className="h-5 w-5" />
@@ -826,11 +1238,30 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
                 <TrashIcon className="h-5 w-5" />
                 Delete
               </button>
+
+{canSaveMainNoApproval ? (
+  <button
+    onClick={handleSaveMainNoApproval}
+    className="inline-flex items-center gap-2 px-4 py-2 rounded bg-gray-600 text-white hover:bg-gray-700"
+    title="Save header changes without requesting edit approval"
+  >
+    <CheckCircleIcon className="h-5 w-5" />
+    Save Main
+  </button>
+) : null}
+
+
             </>
           )}
         </div>
+        {approvalStatus === 'pending' && approvalReason && (
+          <div className="mt-2 text-sm text-amber-700 font-semibold">
+            Edit approval is pending — Reason: {approvalReason}
+          </div>
+        )}
 
-        {isCancelled && <div className="text-red-600 font-bold mt-2">CANCELLED</div>}
+{isCancelled && <div className="text-red-600 font-bold mt-2">CANCELLED</div>}
+{isDeleted && <div className="text-red-700 font-bold mt-2">DELETED</div>}
       </div>
 
       {/* DETAILS */}
@@ -971,30 +1402,34 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
       {/* Download / Print / New */}
       <div className="flex gap-3 mt-4 items-center">
         {/* DOWNLOAD */}
-        <div
-          className="relative inline-block"
-          onMouseEnter={() => setDownloadOpen(true)}
-          onMouseLeave={() => setDownloadOpen(false)}
-        >
-          <button
-            type="button"
-            disabled={!isSaved}
-            className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
-              isSaved ? 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50' : 'bg-gray-100 text-gray-400 border-gray-200'
-            }`}
-          >
+<div
+  className="relative inline-block"
+  onMouseEnter={() => { if (canExport) setDownloadOpen(true); }}
+  onMouseLeave={() => setDownloadOpen(false)}
+>
+
+<button
+  type="button"
+  disabled={!isSaved || isCancelled}
+  className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
+    !isSaved || isCancelled
+      ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+      : 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50'
+  }`}
+>
+
             <ArrowDownTrayIcon className={`h-5 w-5 ${isSaved ? 'text-blue-600' : 'text-gray-400'}`} />
             <span>Download</span>
             <ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
 
-          {downloadOpen && (
+          {canExport && downloadOpen && (
             <div className="absolute left-0 top-full z-50">
               <div className="mt-1 w-64 rounded-md border bg-white shadow-lg py-1">
                 <button
                   type="button"
                   onClick={handleDownloadExcel}
-                  disabled={!isSaved}
+                  disabled={!canExport}
                   className={`flex w-full items-center gap-3 px-3 py-2 text-sm ${
                     isSaved ? 'text-gray-800 hover:bg-blue-50' : 'text-gray-400 cursor-not-allowed'
                   }`}
@@ -1011,18 +1446,20 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
         {/* PRINT */}
         <div
           className="relative inline-block"
-          onMouseEnter={() => setPrintOpen(true)}
+          onMouseEnter={() => { if (canExport) setPrintOpen(true); }}
           onMouseLeave={() => setPrintOpen(false)}
         >
+
           <button type="button" className="inline-flex items-center gap-2 rounded border px-3 py-2 bg-white text-gray-700 hover:bg-gray-50">
             <PrinterIcon className="h-5 w-5" /><span>Print</span><ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
-          {printOpen && (
+          {canExport && printOpen && (
             <div className="absolute left-0 top-full z-50">
               <div className="mt-1 w-64 rounded-md border bg-white shadow-lg py-1">
                 <button
                   type="button"
                   onClick={handleOpenPdf}
+                  disabled={!canExport}
                   className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
                 >
                   <DocumentTextIcon className="h-5 w-5 text-red-600" />

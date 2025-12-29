@@ -55,6 +55,38 @@ use App\Http\Controllers\AccountsReceivableJournalController;
 use App\Http\Controllers\CheckRegisterController;
 
 
+use App\Http\Controllers\ApprovalController;
+
+use App\Http\Controllers\PlanterController;
+
+Route::get('/planters/lookup', [PlanterController::class, 'lookup']);
+
+
+// ...
+
+Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+    // Create / reuse approval request for a record
+    Route::post('/approvals/request-edit', [ApprovalController::class, 'requestEdit']);
+
+    // Status / token for a specific record (module + record_id)
+    Route::get('/approvals/status', [ApprovalController::class, 'statusBySubject']);
+    Route::get('/approvals/status-by-subject', [ApprovalController::class, 'statusBySubject']);
+
+    // Mark an approved request as consumed
+    Route::post('/approvals/release', [ApprovalController::class, 'releaseBySubject']);
+    Route::post('/approvals/release-by-subject', [ApprovalController::class, 'releaseBySubject']);
+
+    // Supervisor inbox / requester outbox
+    Route::get('/approvals/inbox',  [ApprovalController::class, 'inbox']);
+    Route::get('/approvals/outbox', [ApprovalController::class, 'outbox']);
+
+    // Detail + approve / reject by id
+    Route::get ('/approvals/{id}',          [ApprovalController::class, 'show'])->whereNumber('id');
+    Route::post('/approvals/{id}/approve',  [ApprovalController::class, 'approve'])->whereNumber('id');
+    Route::post('/approvals/{id}/reject',   [ApprovalController::class, 'reject'])->whereNumber('id');
+});
+
+
 
 Route::prefix('api')->group(function () {
     // ✅ PBN dropdown
@@ -75,10 +107,10 @@ Route::prefix('api')->group(function () {
 
 
 /* ─── PBN read-only (no auth; safe GETs) ─── */
-Route::prefix('api')->group(function () {
+//Route::prefix('api')->group(function () {
     // Items combobox for a PBN number (if you use it)
-    Route::get('/pbn/items',         [PbnController::class, 'items']);
-});
+    Route::get('/api/pbn/items',         [PbnController::class, 'items']);
+//});
 
 /* ─── PBN stateful CRUD (session + auth) ─── */
 Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
@@ -89,6 +121,24 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 
     // Show a specific PBN (used by handlePbnSelect)
     Route::get('/pbn/{id}', [PbnEntryController::class, 'show'])->whereNumber('id');
+
+    /* ─── PBN Posting (Preview-first + Approval-aligned actions) ─── */
+    Route::get('/pbn/posting/list', [\App\Http\Controllers\PbnPostingController::class, 'list']);
+    Route::get('/pbn/posting/{id}', [\App\Http\Controllers\PbnPostingController::class, 'show'])->whereNumber('id');
+// ===== START ADD: PBN posting approval-request routes =====
+Route::post('/pbn/posting/{id}/request-post', [\App\Http\Controllers\PbnPostingController::class, 'requestPost'])->whereNumber('id');
+Route::post('/pbn/posting/{id}/request-unpost-unused', [\App\Http\Controllers\PbnPostingController::class, 'requestUnpostUnused'])->whereNumber('id');
+Route::post('/pbn/posting/{id}/request-close', [\App\Http\Controllers\PbnPostingController::class, 'requestClose'])->whereNumber('id');
+// ===== END ADD: PBN posting approval-request routes =====
+
+
+
+    /* ─── Receiving-side helper: remaining qty validation ─── */
+    Route::post('/pbn/remaining-check', [\App\Http\Controllers\PbnController::class, 'remainingCheck']);
+
+
+
+
 });
 
 /* ─── PBN helpers & reports (web only; avoid auth redirect/HTML) ─── */
@@ -502,12 +552,17 @@ Route::middleware(['web'])->group(function () {
     Route::post('/api/receiving/update-mill', [ReceivingController::class, 'updateMillName']);
 
     // helpers reused from PBN & mills
-    Route::get('/api/receiving/pbn-item', [ReceivingController::class, 'pbnItemForReceiving']);
-    Route::get('/api/mills/rate', [ReceivingController::class, 'millRateAsOf']);
+    Route::get('/receiving/pbn-item', [ReceivingController::class, 'pbnItemForReceiving']);
+    Route::get('/mills/rate', [ReceivingController::class, 'millRateAsOf']);
 
     Route::get('/api/pbn/list', [PbnController::class, 'list']);
     //Route::get('/api/pbn/items', [PbnController::class, 'items']);
     Route::post('/api/receiving/create-entry', [ReceivingController::class, 'createEntry']);
+
+Route::get('/api/receiving/pricing-context', [ReceivingController::class, 'pricingContext']);
+Route::get('/api/receiving/mills', [ReceivingController::class, 'millList']);
+Route::get('/api/receiving/receiving-report-pdf/{receiptNo}', [\App\Http\Controllers\ReceivingController::class, 'receivingReportPdf']);
+Route::get('/api/receiving/quedan-listing-pdf/{receiptNo}', [ReceivingController::class, 'quedanListingPdf']);
 
     // Sales Journal
     Route::get('/api/sales/generate-cs-number', [SalesJournalController::class, 'generateCsNumber']);
@@ -519,6 +574,9 @@ Route::middleware(['web'])->group(function () {
     Route::get('/api/sales/{id}', [SalesJournalController::class, 'show'])->whereNumber('id');
     Route::post('/api/sales/cancel', [SalesJournalController::class, 'updateCancel']);
 
+    Route::post('/api/sales/delete-main', [SalesJournalController::class, 'softDeleteMain']);
+
+    
     // Dropdowns
     Route::get('/api/customers', [SalesJournalController::class, 'customers']);
     Route::get('/api/accounts', [SalesJournalController::class, 'accounts']);
@@ -530,6 +588,25 @@ Route::middleware(['web'])->group(function () {
 
     Route::get('/api/sales/unbalanced-exists', [SalesJournalController::class, 'unbalancedExists']);
     Route::get('/api/sales/unbalanced', [SalesJournalController::class, 'unbalanced']);
+
+    // ----------------------------
+    // Sales Journal – Approval Flow
+    // ----------------------------
+
+    // Request approval for editing a Sales Journal record
+    Route::post('/api/sales/request-edit', [SalesJournalController::class, 'requestEdit']);
+
+    // Get approval status for a specific record
+    Route::get('/api/sales/approval-status', [SalesJournalController::class, 'approvalStatus']);
+
+    // Release an active approval token after successful save
+    Route::post('/api/sales/release-edit', [SalesJournalController::class, 'releaseEdit']);
+    Route::post('/api/sales/save-main',   [SalesJournalController::class, 'storeMain']);
+    Route::post('/api/sales/update-main', [SalesJournalController::class, 'updateMain']); // 👈 add this
+    Route::post('/api/sales/update-main-no-approval', [SalesJournalController::class, 'updateMainNoApproval']
+    );
+
+
 
     // Cash Receipts
     Route::get('/api/cash-receipt/generate-cr-number', [CashReceiptController::class, 'generateCrNumber']);
@@ -555,6 +632,15 @@ Route::middleware(['web'])->group(function () {
     Route::get('/api/cash-receipt/unbalanced-exists', [CashReceiptController::class, 'unbalancedExists']);
     Route::get('/api/cash-receipt/unbalanced', [CashReceiptController::class, 'unbalanced']);
 
+// ----------------------------
+// Cash Receipt – Approval Flow
+// ----------------------------
+
+Route::post('/api/cash-receipt/update-main', [CashReceiptController::class, 'updateMain']);
+Route::post('/api/cash-receipt/update-main-no-approval', [CashReceiptController::class, 'updateMainNoApproval']);
+
+
+
     // Purchase Journal
     Route::get('/api/purchase/generate-cp-number', [PurchaseJournalController::class, 'generateCpNumber']);
     Route::post('/api/purchase/save-main', [PurchaseJournalController::class, 'storeMain']);
@@ -569,6 +655,7 @@ Route::middleware(['web'])->group(function () {
     // Dropdowns
     Route::get('/api/pj/vendors', [PurchaseJournalController::class, 'vendors']);
     Route::get('/api/pj/accounts', [PurchaseJournalController::class, 'accounts']);
+    Route::get('/api/pj/mills', [PurchaseJournalController::class, 'mills']);
 
     // Print/download
     Route::get('/api/purchase/form-pdf/{id}', [PurchaseJournalController::class, 'formPdf']);
@@ -578,6 +665,11 @@ Route::middleware(['web'])->group(function () {
     // Unbalanced helpers
     Route::get('/api/purchase/unbalanced-exists', [PurchaseJournalController::class, 'unbalancedExists']);
     Route::get('/api/purchase/unbalanced', [PurchaseJournalController::class, 'unbalanced']);
+    Route::post('/api/purchase/update-main', [PurchaseJournalController::class, 'updateMain']);
+Route::post('/api/purchase/update-main-no-approval', [PurchaseJournalController::class, 'updateMainNoApproval']);
+
+// ✅ ROUTE EXAMPLE (routes/web.php or routes/api.php depending on your current setup)
+Route::get('/api/purchase-journal/check-pdf/{id}', [PurchaseJournalController::class, 'checkPdf']);
 
     // Cash Disbursement
     Route::get('/api/cash-disbursement/generate-cd-number', [\App\Http\Controllers\CashDisbursementController::class, 'generateCdNumber']);
@@ -588,7 +680,7 @@ Route::middleware(['web'])->group(function () {
     Route::delete('/api/cash-disbursement/{id}', [\App\Http\Controllers\CashDisbursementController::class, 'destroy']);
     Route::get('/api/cash-disbursement/list', [\App\Http\Controllers\CashDisbursementController::class, 'list']);
     Route::get('/api/cash-disbursement/{id}', [\App\Http\Controllers\CashDisbursementController::class, 'show'])->whereNumber('id');
-    Route::post('/api/cash-disbursement/cancel', [\App\Http\Controllers\CashDisbursementController::class, 'updateCancel']);
+    //Route::post('/api/cash-disbursement/cancel', [\App\Http\Controllers\CashDisbursementController::class, 'updateCancel']);
 
     // Dropdowns
     Route::get('/api/cd/vendors', [\App\Http\Controllers\CashDisbursementController::class, 'vendors']);
@@ -603,6 +695,10 @@ Route::middleware(['web'])->group(function () {
     // Unbalanced helpers
     Route::get('/api/cash-disbursement/unbalanced-exists', [\App\Http\Controllers\CashDisbursementController::class, 'unbalancedExists']);
     Route::get('/api/cash-disbursement/unbalanced', [\App\Http\Controllers\CashDisbursementController::class, 'unbalanced']);
+Route::post('/api/cash-disbursement/update-main', [\App\Http\Controllers\CashDisbursementController::class, 'updateMain']);
+Route::post('/api/cash-disbursement/update-main-no-approval', [\App\Http\Controllers\CashDisbursementController::class, 'updateMainNoApproval']);
+
+
 });
 
 
@@ -634,6 +730,11 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 
     // show must come AFTER the literal routes above to avoid collisions
     Route::get('/ga/{id}', [\App\Http\Controllers\GeneralAccountingController::class, 'show'])->whereNumber('id');
+
+    Route::post('/ga/update-main', [\App\Http\Controllers\GeneralAccountingController::class, 'updateMain']);
+    Route::post('/ga/update-main-no-approval', [\App\Http\Controllers\GeneralAccountingController::class, 'updateMainNoApproval']);
+
+
 });
 
 // ... your existing group:

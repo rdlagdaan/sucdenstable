@@ -285,7 +285,6 @@ public function show(Request $request, $id)
 
 
 
-
 public function formPdf(\Illuminate\Http\Request $request, $id = null)
 {
     $id = $id ?? $request->query('id');
@@ -311,16 +310,41 @@ public function formPdf(\Illuminate\Http\Request $request, $id = null)
         else abort(500, 'TCPDF not installed. Run: composer require tecnickcom/tcpdf');
     }
 
-    // Map fields
-    $pbnNo      = $main->pbn_number ?? '';
-    $vendorID   = $main->vend_code ?? '';
-    $vendorName = $main->vendor_name ?? '';
-    $pbnDate    = $main->pbn_date ? \Carbon\Carbon::parse($main->pbn_date)->format('m/d/Y') : '';
-    $cropYear   = $main->crop_year ?? '';
+    // -------------------------
+    // Normalize strings (fix &amp;)
+    // -------------------------
+    $decode = function ($s) {
+        $s = (string)$s;
+        $s = html_entity_decode($s, ENT_QUOTES, 'UTF-8');
+        $s = trim(preg_replace('/\s+/', ' ', $s));
+        return $s;
+    };
 
-    // Prepare column content strings
-    $grandQty = 0.0; $grandGross = 0.0;
-    $colMill=''; $colQty=''; $colUC=''; $colCom=''; $colGross='';
+    $pbnNo      = $decode($main->pbn_number ?? '');
+    $vendorID   = $decode($main->vend_code ?? '');
+    $vendorName = $decode($main->vendor_name ?? '');
+    $pbnDate    = $main->pbn_date ? \Carbon\Carbon::parse($main->pbn_date)->format('m/d/Y') : '';
+    $pbnDate    = $decode($pbnDate);
+    $cropYear   = $decode($main->crop_year ?? '');
+
+    // Escape for HTML
+    $pbnNoH      = htmlspecialchars($pbnNo, ENT_QUOTES, 'UTF-8');
+    $vendorIDH   = htmlspecialchars($vendorID, ENT_QUOTES, 'UTF-8');
+    $vendorNameH = htmlspecialchars($vendorName, ENT_QUOTES, 'UTF-8');
+    $pbnDateH    = htmlspecialchars($pbnDate, ENT_QUOTES, 'UTF-8');
+    $cropYearH   = htmlspecialchars($cropYear, ENT_QUOTES, 'UTF-8');
+
+    // -------------------------
+    // Build column strings + totals (legacy-style HTML body)
+    // -------------------------
+    $grandQty = 0.0;
+    $grandGross = 0.0;
+
+    $colMill  = '';
+    $colQty   = '';
+    $colUC    = '';
+    $colCom   = '';
+    $colGross = '';
 
     foreach ($details as $d) {
         $qty = (float)($d->quantity ?? 0);
@@ -328,165 +352,166 @@ public function formPdf(\Illuminate\Http\Request $request, $id = null)
         $com = (float)($d->commission ?? 0);
         $gross = ($uc + $com) * $qty;
 
-        $grandQty  += $qty;
+        $grandQty   += $qty;
         $grandGross += $gross;
 
-        $mill = strtoupper($d->mill_code ?: ($d->mill ?? ''));
-        $colMill  .= " {$mill}\n";
-        $colQty   .= number_format($qty, 2) . "\n";
-        $colUC    .= number_format($uc, 2) . "\n";
-        $colCom   .= number_format($com, 2) . "\n";
-        $colGross .= number_format($gross, 2) . "\n";
+        $mill = strtoupper($decode($d->mill_code ?: ($d->mill ?? '')));
+        $millH = htmlspecialchars($mill, ENT_QUOTES, 'UTF-8');
+
+        $colMill  .= '<font size="10"> ' . $millH . "</font><br>\n";
+        $colQty   .= '<font size="10"> ' . number_format($qty, 2) . "</font><br>\n";
+        $colUC    .= '<font size="10"> ' . number_format($uc, 2)  . "</font><br>\n";
+        $colCom   .= '<font size="10"> ' . number_format($com, 2) . "</font><br>\n";
+        $colGross .= '<font size="10"> ' . number_format($gross, 2) . "</font><br>\n";
     }
+
     $grandQtyF   = number_format($grandQty, 2);
     $grandGrossF = number_format($grandGross, 2);
 
-    // --- Build PDF ---
+    // -------------------------
+    // TCPDF setup
+    // -------------------------
     $logoPath = public_path('sucdenLogo.jpg');
+
     $pdf = new class('P', PDF_UNIT, 'LETTER', true, 'UTF-8', false) extends \TCPDF {
         public string $logoPath = '';
         public function Header() {
             if ($this->logoPath && is_file($this->logoPath)) {
-                $this->Image($this->logoPath, 15, 12, 42, '', (strtolower(pathinfo($this->logoPath, PATHINFO_EXTENSION))==='png'?'PNG':'JPG'));
+                $this->Image(
+                    $this->logoPath,
+                    15, 10, 50,
+                    '',
+                    (strtolower(pathinfo($this->logoPath, PATHINFO_EXTENSION)) === 'png' ? 'PNG' : 'JPG')
+                );
             }
         }
         public function Footer() {}
     };
     $pdf->logoPath = $logoPath;
 
-    // Margins and manual layout (mm)
+    // Margins (close to legacy)
     $left=12; $top=16; $right=12; $bottom=12;
     $pdf->SetMargins($left, $top, $right);
     $pdf->SetHeaderMargin(4);
     $pdf->SetFooterMargin(0);
+
+    // Keep consistent one-page layout like your current implementation
     $pdf->SetAutoPageBreak(false, $bottom);
 
     $pdf->AddPage('P', 'LETTER');
-    $pageW = $pdf->getPageWidth();
-    $pageH = $pdf->getPageHeight();
-    $innerW = $pageW - $left - $right;
+    $pdf->SetFont('helvetica', '', 7);
 
-    // Title
-    $pdf->Ln(14);
-    $pdf->SetFont('helvetica','B',12);
-    $pdf->Cell(0, 6, 'PURCHASE BOOK NOTE', 0, 1, 'R');
-    $pdf->SetFont('helvetica','',10);
-    $pdf->writeHTML(
-        '<div style="text-align:right;"><font size="10">PBN No. </font>'.
-        '<font size="12"><b><u><a href="#">'.htmlspecialchars($pbnNo,ENT_QUOTES,'UTF-8').'</a></u></b></font></div>',
-        true,false,false,false,''
-    );
+    // -------------------------
+    // IMPORTANT: one single outer table for:
+    // grey header + column header + body + totals + signature
+    // so the border between grey area and column header is ONE line (legacy)
+    // -------------------------
+    $tbl = <<<EOD
+<br><br>
 
-    // Info band (HTML is fine)
-    $infoHtml = <<<EOD
-<table border="1" cellpadding="2" cellspacing="0" width="100%">
-  <tr bgcolor="#E6E6E6">
-    <td width="10%"><font size="9">Trader:</font></td>
-    <td width="38%"><font size="9"><u>{$vendorID}</u></font></td>
-    <td width="14%"><font size="9">PBN Date:</font></td>
-    <td width="16%"><font size="9"><u>{$pbnDate}</u></font></td>
-    <td width="22%"></td>
-  </tr>
-  <tr bgcolor="#E6E6E6">
-    <td><font size="9">Supplier:</font></td>
-    <td><font size="9"><u><b>{$vendorName}</b></u></font></td>
-    <td><font size="9">Crop Year:</font></td>
-    <td><font size="9"><u>{$cropYear}</u></font></td>
-    <td></td>
-  </tr>
-</table>
-EOD;
-    $pdf->writeHTML($infoHtml, true, false, false, false, '');
-
-    // ===== Geometry so grid sticks to signature band =====
-    $yAfterInfo    = $pdf->GetY();
-    $usableBottomY = $pageH - $bottom;
-
-    $SIGNATURE_H     = 18.0; // signature band height
-    $GAP_ABOVE_SIGN  = 3.0;  // space between grid and signatures
-    $GAP_AFTER_INFO  = 1.0;  // space after info band
-
-    $gridTopY      = $yAfterInfo + $GAP_AFTER_INFO;
-    $gridBottomY   = $usableBottomY - $SIGNATURE_H - $GAP_ABOVE_SIGN;
-    $gridBoxH      = $gridBottomY - $gridTopY;     // final exact height for the WHOLE grid (header+body+total)
-
-    // Row heights (mm)
-    $HDR_H   = 10.0;
-    $TOTAL_H = 10.0;
-    $BODY_H  = max(60.0, $gridBoxH - $HDR_H - $TOTAL_H); // will stretch to fill
-
-    // Column widths (percent of inner width)
-    $wMill = 0.33 * $innerW;
-    $wQty  = 0.18 * $innerW;
-    $wUC   = 0.15 * $innerW;
-    $wCom  = 0.15 * $innerW;
-    $wGross= $innerW - ($wMill+$wQty+$wUC+$wCom);
-
-    // Column X positions
-    $xMill = $left;
-    $xQty  = $xMill + $wMill;
-    $xUC   = $xQty  + $wQty;
-    $xCom  = $xUC   + $wUC;
-    $xGross= $xCom  + $wCom;
-
-    // ---- Draw grid header row with borders ----
-    $pdf->SetFont('helvetica','B',9);
-    $pdf->SetXY($left, $gridTopY);
-    $pdf->Cell($wMill,  $HDR_H, 'MillMark',     1, 0, 'C');
-    $pdf->Cell($wQty,   $HDR_H, 'Qty in LKG',   1, 0, 'C');
-    $pdf->Cell($wUC,    $HDR_H, 'Price/LKG',    1, 0, 'C');
-    $pdf->Cell($wCom,   $HDR_H, 'Commission',   1, 0, 'C');
-    $pdf->Cell($wGross, $HDR_H, 'Gross Amount', 1, 1, 'C');
-
-    // ---- Draw body rectangle to an exact height + vertical lines ----
-    $bodyTopY = $gridTopY + $HDR_H;
-    $pdf->Rect($left, $bodyTopY, $innerW, $BODY_H); // outer body rectangle
-    // vertical splits inside the body rect
-    $pdf->Line($xQty,   $bodyTopY, $xQty,   $bodyTopY + $BODY_H);
-    $pdf->Line($xUC,    $bodyTopY, $xUC,    $bodyTopY + $BODY_H);
-    $pdf->Line($xCom,   $bodyTopY, $xCom,   $bodyTopY + $BODY_H);
-    $pdf->Line($xGross, $bodyTopY, $xGross, $bodyTopY + $BODY_H);
-
-    // ---- Write body text (no borders) inside the rectangle ----
-    $pdf->SetFont('helvetica','',9);
-    // small inner padding
-    $pad = 1.5;
-
-    // Mill
-    $pdf->SetXY($xMill + $pad, $bodyTopY + $pad);
-    $pdf->MultiCell($wMill - 2*$pad, $BODY_H - 2*$pad, $colMill, 0, 'L', false, 1);
-    // Qty (right)
-    $pdf->SetXY($xQty + $pad, $bodyTopY + $pad);
-    $pdf->MultiCell($wQty - 2*$pad, $BODY_H - 2*$pad, $colQty, 0, 'R', false, 1);
-    // Price
-    $pdf->SetXY($xUC + $pad, $bodyTopY + $pad);
-    $pdf->MultiCell($wUC - 2*$pad, $BODY_H - 2*$pad, $colUC, 0, 'R', false, 1);
-    // Commission
-    $pdf->SetXY($xCom + $pad, $bodyTopY + $pad);
-    $pdf->MultiCell($wCom - 2*$pad, $BODY_H - 2*$pad, $colCom, 0, 'R', false, 1);
-    // Gross
-    $pdf->SetXY($xGross + $pad, $bodyTopY + $pad);
-    $pdf->MultiCell($wGross - 2*$pad, $BODY_H - 2*$pad, $colGross, 0, 'R', false, 1);
-
-    // ---- Totals row (exactly under the body) ----
-    $totTopY = $bodyTopY + $BODY_H;
-    $pdf->SetFont('helvetica','B',9);
-    $pdf->SetXY($left, $totTopY);
-    $pdf->Cell($wMill + $wQty + $wUC, $TOTAL_H, 'TOTAL', 1, 0, 'L');
-    $pdf->Cell($wCom,   $TOTAL_H, $grandQtyF,   1, 0, 'R');
-    $pdf->Cell($wGross, $TOTAL_H, $grandGrossF, 1, 1, 'R');
-
-    // ---- Signature band at fixed bottom ----
-    $pdf->SetY($usableBottomY - $SIGNATURE_H);
-    $signHtml = <<<EOD
-<table border="1" cellpadding="4" cellspacing="0" width="100%">
+<table border="0" cellpadding="1" cellspacing="2" nobr="true" width="100%">
   <tr>
-    <td width="50%" align="center">___________ Posted By: ___________</td>
-    <td width="50%" align="center">___________ Prepared By: ___________</td>
+    <td align="right">
+      <div><font size="14"><b>PURCHASE BOOK NOTE</b></font></div>
+      <div>
+        <font size="14">PBN No. </font>
+        <font size="18" color="blue"><b><u>{$pbnNoH}</u></b></font>
+      </div>
+    </td>
   </tr>
 </table>
+<br>
+
+<table border="1" cellpadding="1" cellspacing="1" nobr="true" width="100%">
+
+  <!-- Grey header band (same outer table) -->
+  <tr>
+    <td colspan="5" bgcolor="lightgrey">
+      <table border="0" cellpadding="1" cellspacing="2" width="100%">
+        <tr>
+          <td width="15%" height="25"><font size="10">Trader: </font></td>
+          <td width="34%" height="25"><font size="10"><u>{$vendorIDH}</u></font></td>
+          <td width="4%"  height="25"></td>
+          <td width="15%" height="25"></td>
+          <td width="32%" height="25"></td>
+        </tr>
+
+        <tr>
+          <td width="15%" height="25"><font size="10">Supplier: </font></td>
+          <td width="45%" height="25"><font size="10"><u><b>{$vendorNameH}</b></u></font></td>
+          <td width="10%" height="25"></td>
+          <td width="15%" height="25"><font size="10">PBN Date: </font></td>
+          <td width="15%" height="25"><font size="10"><u>{$pbnDateH}</u></font></td>
+        </tr>
+
+        <tr>
+          <td height="25"><font size="10">Crop Year: </font></td>
+          <td height="25"><font size="10"><u>{$cropYearH}</u></font></td>
+          <td height="25"></td>
+          <td height="25"></td>
+          <td height="25"></td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- Column header row (same table, so it shares border with grey band like legacy) -->
+  <tr align="center" valign="middle">
+    <td width="33%" height="25"><font size="10">MillMark</font></td>
+    <td width="18%" height="25"><font size="10">Qty in LKG</font></td>
+    <td width="15%" height="25"><font size="10">Price/LKG</font></td>
+    <td width="15%" height="25"><font size="10">Commission</font></td>
+    <td width="19%" height="25"><font size="10">Gross Amount</font></td>
+  </tr>
+
+  <!-- Body row -->
+  <tr>
+    <td width="33%" height="450">{$colMill}</td>
+    <td width="18%" height="450" align="right">{$colQty}</td>
+    <td width="15%" height="450" align="right">{$colUC}</td>
+    <td width="15%" height="450" align="right">{$colCom}</td>
+    <td width="19%" height="450" align="right">{$colGross}</td>
+  </tr>
+
+  <!-- Totals row (mapped correctly under Qty and Gross) -->
+  <tr>
+    <td width="33%" height="25"><font size="10">TOTAL</font></td>
+    <td width="18%" height="25" align="right"><font size="10">{$grandQtyF}</font></td>
+    <td width="15%" height="25"></td>
+    <td width="15%" height="25"></td>
+    <td width="19%" height="25" align="right"><font size="10">{$grandGrossF}</font></td>
+  </tr>
+
+  <!-- Signature row -->
+  <tr>
+    <td colspan="5">
+      <table width="100%" border="0" cellpadding="0" cellspacing="0">
+        <tr>
+          <td width="18%"></td>
+          <td width="30%" align="center" valign="middle">
+            <br><br><br><br>
+            <font size="10">_____________________</font>
+            <br>
+            <font size="10">Posted By:</font>
+          </td>
+          <td width="6%"></td>
+          <td width="30%" align="center" valign="middle">
+            <br><br><br><br>
+            <font size="10">_____________________</font>
+            <br>
+            <font size="10">Prepared By:</font>
+          </td>
+          <td width="18%"></td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+</table>
 EOD;
-    $pdf->writeHTML($signHtml, true, false, false, false, '');
+
+    // Render
+    $pdf->writeHTML($tbl, true, false, false, false, '');
 
     // Output inline
     $content = $pdf->Output('pbnForm.pdf', 'S');
@@ -495,18 +520,6 @@ EOD;
         ->header('Content-Disposition', 'inline; filename="pbnForm.pdf"')
         ->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
 }
-
-
-/**
- * Small number formatter for local use.
- * If you prefer, move this to a shared helper.
- */
-private function numFmt($n): string
-{
-    return number_format((float)$n, 2);
-}
-
-
 
 
 public function formExcel(Request $request, $id = null)

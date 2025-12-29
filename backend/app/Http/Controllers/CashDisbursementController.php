@@ -165,6 +165,12 @@ class CashDisbursementController extends Controller
             'user_id'        => ['nullable','integer'],
         ]);
 
+$txId = (int) $payload['transaction_id'];
+$companyId = CashDisbursement::where('id', $txId)->value('company_id');
+
+$this->requireNotCancelled($txId);
+$this->requireApprovedEdit($txId, $companyId ? (int)$companyId : null);
+
         $debit  = (float)($payload['debit']  ?? 0);
         $credit = (float)($payload['credit'] ?? 0);
         if ($debit > 0 && $credit > 0) {
@@ -183,7 +189,6 @@ class CashDisbursementController extends Controller
             ->exists();
         if ($dup) return response()->json(['message'=>'Duplicate account code for this transaction.'], 422);
 
-        $companyId = CashDisbursement::where('id',$payload['transaction_id'])->value('company_id');
 
         $detail = CashDisbursementDetail::create([
             'transaction_id' => $payload['transaction_id'],
@@ -211,6 +216,12 @@ class CashDisbursementController extends Controller
             'debit'          => ['nullable','numeric'],
             'credit'         => ['nullable','numeric'],
         ]);
+
+$txId = (int) $payload['transaction_id'];
+$companyId = CashDisbursement::where('id', $txId)->value('company_id');
+
+$this->requireNotCancelled($txId);
+$this->requireApprovedEdit($txId, $companyId ? (int)$companyId : null);
 
         $detail = CashDisbursementDetail::find($payload['id']);
         if (!$detail) return response()->json(['message'=>'Detail not found.'], 404);
@@ -251,6 +262,12 @@ class CashDisbursementController extends Controller
             'transaction_id' => ['required','integer','exists:cash_disbursement,id'],
         ]);
 
+$txId = (int) $payload['transaction_id'];
+$companyId = CashDisbursement::where('id', $txId)->value('company_id');
+
+$this->requireNotCancelled($txId);
+$this->requireApprovedEdit($txId, $companyId ? (int)$companyId : null);
+
         $row = CashDisbursementDetail::find($payload['id']);
         if ($row && ($row->workstation_id === 'BANK')) {
             return response()->json(['message'=>'Cannot delete the bank line.'], 422);
@@ -265,13 +282,11 @@ class CashDisbursementController extends Controller
     }
 
     // === Delete a whole transaction (optional but handy) ===
-    public function destroy($id)
-    {
-        $tx = CashDisbursement::findOrFail($id);
-        CashDisbursementDetail::where('transaction_id',$tx->id)->delete();
-        $tx->delete();
-        return response()->json(['ok'=>true]);
-    }
+public function destroy($id)
+{
+    abort(403, 'Delete must be done via Approval workflow.');
+}
+
 
     // === Show header + details ===
     public function show($id, Request $req)
@@ -419,16 +434,11 @@ public function list(Request $req)
     }
 
     // === Cancel/Uncancel ===
-    public function updateCancel(Request $req)
-    {
-        $data = $req->validate([
-            'id'   => ['required','integer','exists:cash_disbursement,id'],
-            'flag' => ['required','in:0,1'],
-        ]);
-        $val = $data['flag'] == '1' ? 'y' : 'n';
-        CashDisbursement::where('id',$data['id'])->update(['is_cancel'=>$val]);
-        return response()->json(['ok'=>true,'is_cancel'=>$val]);
-    }
+public function updateCancel(Request $req)
+{
+    abort(403, 'Cancel/Uncancel must be done via Approval workflow.');
+}
+
 
     /** Convert helpers (0..999 → words) */
     private function chunkToWords(int $n): string {
@@ -814,9 +824,14 @@ public function formExcel(Request $req, $id)
             ->first(['acct_code']);
         if (!$bankAcct) return;
 
-        $bankRow = CashDisbursementDetail::where('transaction_id',$transactionId)
-            ->where('acct_code',$bankAcct->acct_code)
-            ->first();
+$bankRow = CashDisbursementDetail::where('transaction_id', $transactionId)
+    ->where('workstation_id', 'BANK')
+    ->first();
+
+if ($bankRow && $bankRow->acct_code !== $bankAcct->acct_code) {
+    $bankRow->update(['acct_code' => $bankAcct->acct_code]);
+}
+
 
         if (!$bankRow) {
             $bankRow = CashDisbursementDetail::create([
@@ -844,6 +859,231 @@ public function formExcel(Request $req, $id)
 
         $bankRow->update(['debit' => 0, 'credit' => $newBankCredit]);
     }
+
+
+/**
+ * Require that transaction is not cancelled.
+ */
+protected function requireNotCancelled(int $transactionId): void
+{
+    $flag = CashDisbursement::where('id', $transactionId)->value('is_cancel');
+    if ($flag === 'y') {
+        abort(403, 'This transaction is CANCELLED and cannot be edited.');
+    }
+}
+
+/**
+ * Require an ACTIVE approved edit window in approvals table.
+ * Matches your Cash Receipts approval enforcement style.
+ */
+/**
+ * Require an ACTIVE approved edit window in approvals table.
+ * Case-insensitive action/module match to avoid EDIT vs edit issues.
+ */
+/**
+ * Require an ACTIVE approved edit window in approvals table.
+ * Case-insensitive on action ('edit' vs 'EDIT').
+ */
+protected function requireApprovedEdit(int $transactionId, ?int $companyId = null): void
+{
+    $now = now();
+
+    $q = DB::table('approvals')
+        ->where('module', 'cash_disbursement')
+        ->where('record_id', $transactionId)
+        ->whereRaw('LOWER(action) = ?', ['edit'])   // ✅ case-insensitive
+        ->where('status', 'approved')
+        ->whereNull('consumed_at')
+        ->whereNotNull('expires_at')
+        ->where('expires_at', '>', $now);
+
+    if (!empty($companyId)) {
+        $q->where('company_id', $companyId);
+    }
+
+    $ok = $q->exists();
+
+    // optional fallback (legacy rows without company_id)
+    if (!$ok && !empty($companyId)) {
+        $ok = DB::table('approvals')
+            ->where('module', 'cash_disbursement')
+            ->where('record_id', $transactionId)
+            ->whereRaw('LOWER(action) = ?', ['edit']) // ✅ case-insensitive
+            ->where('status', 'approved')
+            ->whereNull('consumed_at')
+            ->whereNotNull('expires_at')
+            ->where('expires_at', '>', $now)
+            ->exists();
+    }
+
+    if (!$ok) {
+        abort(403, 'Edit approval is required or has expired.');
+    }
+}
+
+
+public function updateMain(Request $req)
+{
+    $data = $req->validate([
+        'id'             => ['required','integer','exists:cash_disbursement,id'],
+        'vend_id'        => ['required','string','max:50'],
+        'disburse_date'  => ['required','date'],
+        'pay_method'     => ['required','string','max:15'],
+        'bank_id'        => ['required','string','max:15'],
+        'check_ref_no'   => ['required','string','max:25'],
+        'explanation'    => ['nullable','string','max:1000'],
+        'amount_in_words'=> ['nullable','string','max:255'],
+        'company_id'     => ['nullable','integer'],
+        'user_id'        => ['nullable','integer'],
+    ]);
+
+    $tx = CashDisbursement::findOrFail($data['id']);
+    $companyId = $data['company_id'] ?? $tx->company_id;
+
+    // enforce rules
+    $this->requireNotCancelled((int) $tx->id);
+    $this->requireApprovedEdit((int) $tx->id, $companyId ? (int) $companyId : null);
+
+    $oldBankId = (string) ($tx->bank_id ?? '');
+
+    // update header
+    $tx->update([
+        'vend_id'        => $data['vend_id'],
+        'disburse_date'  => $data['disburse_date'],
+        'pay_method'     => $data['pay_method'],
+        'bank_id'        => $data['bank_id'],
+        'check_ref_no'   => $data['check_ref_no'],
+        'explanation'    => $data['explanation'] ?? '',
+        'amount_in_words'=> $data['amount_in_words'] ?? $tx->amount_in_words,
+        'company_id'     => $companyId,
+        'user_id'        => $data['user_id'] ?? $tx->user_id,
+    ]);
+
+    // If bank changed, ensure BANK row acct_code aligns to new bank_id mapping
+    if ($oldBankId !== (string) $data['bank_id']) {
+        $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
+            ->where('active_flag', 1)
+            ->first(['acct_code']);
+
+        if ($bankAcct) {
+            $bankRow = CashDisbursementDetail::where('transaction_id', $tx->id)
+                ->where('workstation_id', 'BANK')
+                ->first();
+
+            if ($bankRow) {
+                $bankRow->update(['acct_code' => $bankAcct->acct_code]);
+            } else {
+                CashDisbursementDetail::create([
+                    'transaction_id' => $tx->id,
+                    'acct_code'      => $bankAcct->acct_code,
+                    'debit'          => 0,
+                    'credit'         => 0,
+                    'workstation_id' => 'BANK',
+                    'company_id'     => $companyId,
+                    'user_id'        => $tx->user_id ?? null,
+                ]);
+            }
+        }
+    }
+
+    // recompute bank + totals (ALWAYS define $totals before returning)
+    $this->adjustBankCredit((int) $tx->id);
+    $totals = $this->recalcTotals((int) $tx->id);
+
+    // re-read header after recalcTotals updates disburse_amount/sums/is_balanced
+    $tx->refresh();
+
+    return response()->json([
+        'ok'     => true,
+        'id'     => $tx->id,
+        'cd_no'  => $tx->cd_no,
+        'main'   => $tx,      // optional but useful for frontend
+        'totals' => $totals,
+    ]);
+}
+
+
+public function updateMainNoApproval(Request $req)
+{
+    $data = $req->validate([
+        'id'             => ['required','integer','exists:cash_disbursement,id'],
+        'vend_id'        => ['required','string','max:50'],
+        'disburse_date'  => ['required','date'],
+        'pay_method'     => ['required','string','max:15'],
+        'bank_id'        => ['required','string','max:15'],
+        'check_ref_no'   => ['required','string','max:25'],
+        'explanation'    => ['nullable','string','max:1000'],
+        'amount_in_words'=> ['nullable','string','max:255'],
+        'company_id'     => ['required','integer'],
+        'user_id'        => ['nullable','integer'],
+    ]);
+
+    $tx = CashDisbursement::findOrFail($data['id']);
+    $companyId = (int) $data['company_id'];
+
+    // ✅ use the SAME cancel guard your working updateMain uses
+    // (If you only have requireNotCancelled(), keep that.)
+    $this->requireNotCancelled((int) $tx->id);
+
+    $oldBankId = (string) ($tx->bank_id ?? '');
+
+    // ✅ update header (same fields as updateMain, but no approval requirement)
+    $tx->update([
+        'vend_id'        => $data['vend_id'],
+        'disburse_date'  => $data['disburse_date'],
+        'pay_method'     => $data['pay_method'],
+        'bank_id'        => $data['bank_id'],
+        'check_ref_no'   => $data['check_ref_no'],
+        'explanation'    => $data['explanation'] ?? '',
+        'amount_in_words'=> $data['amount_in_words'] ?? $tx->amount_in_words,
+        'company_id'     => $companyId,
+        'user_id'        => $data['user_id'] ?? $tx->user_id,
+    ]);
+
+    // ✅ IMPORTANT: if bank changed, align the BANK row acct_code (same logic as updateMain)
+    if ($oldBankId !== (string) $data['bank_id']) {
+        $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
+            ->where('active_flag', 1)
+            ->first(['acct_code']);
+
+        if ($bankAcct) {
+            $bankRow = CashDisbursementDetail::where('transaction_id', $tx->id)
+                ->where('workstation_id', 'BANK')
+                ->first();
+
+            if ($bankRow) {
+                $bankRow->update(['acct_code' => $bankAcct->acct_code]);
+            } else {
+                CashDisbursementDetail::create([
+                    'transaction_id' => $tx->id,
+                    'acct_code'      => $bankAcct->acct_code,
+                    'debit'          => 0,
+                    'credit'         => 0,
+                    'workstation_id' => 'BANK',
+                    'company_id'     => $companyId,
+                    'user_id'        => $tx->user_id ?? null,
+                ]);
+            }
+        }
+    }
+
+    // ✅ recompute BANK + totals exactly like updateMain
+    $this->adjustBankCredit((int) $tx->id);
+    $totals = $this->recalcTotals((int) $tx->id);
+
+    $tx->refresh();
+
+    return response()->json([
+        'ok'     => true,
+        'id'     => $tx->id,
+        'cd_no'  => $tx->cd_no,
+        'main'   => $tx,
+        'totals' => $totals,
+    ]);
+}
+
+
+
 
     /**
      * Recalc totals and update header:

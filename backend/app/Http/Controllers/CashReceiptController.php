@@ -160,6 +160,154 @@ class CashReceiptController extends Controller
         ]);
     }
 
+
+public function updateMain(Request $req)
+{
+    $data = $req->validate([
+        'id'                => ['required','integer','exists:cash_receipts,id'],
+        'cust_id'           => ['required','string','max:50'],
+        'receipt_date'      => ['required','date'],
+        'pay_method'        => ['required','string','max:15'],
+        'bank_id'           => ['required','string','max:15'],
+        'collection_receipt'=> ['required','string','max:25'],
+        'details'           => ['nullable','string','max:1000'],
+        'amount_in_words'   => ['nullable','string','max:255'],
+        'company_id'        => ['required','integer'],
+    ]);
+
+    $id = (int) $data['id'];
+
+    $this->requireNotCancelledOrDeleted($id);
+    $this->requireApprovedEdit($req, $id);
+
+    $main = CashReceipts::findOrFail($id);
+
+    // Update header fields
+    $main->update([
+        'cust_id'            => $data['cust_id'],
+        'receipt_date'       => $data['receipt_date'],
+        'pay_method'         => $data['pay_method'],
+        'bank_id'            => $data['bank_id'],
+        'collection_receipt' => $data['collection_receipt'],
+        'details'            => $data['details'] ?? '',
+        'amount_in_words'    => $data['amount_in_words'] ?? '',
+    ]);
+
+    // If bank changed, BANK row must follow the new bank's acct_code
+    $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
+        ->where('active_flag', 1)
+        ->first(['acct_code']);
+
+    if ($bankAcct) {
+        $bankRow = CashReceiptDetails::where('transaction_id', $id)
+            ->where('workstation_id', 'BANK')
+            ->first();
+
+        if ($bankRow) {
+            $bankRow->update([
+                'acct_code' => $bankAcct->acct_code,
+                'credit'    => 0,
+            ]);
+        } else {
+            CashReceiptDetails::create([
+                'transaction_id' => $id,
+                'acct_code'      => $bankAcct->acct_code,
+                'debit'          => 0,
+                'credit'         => 0,
+                'workstation_id' => 'BANK',
+                'company_id'     => $data['company_id'],
+            ]);
+        }
+
+        // Recompute BANK debit + totals after bank adjustment
+        $this->adjustBankDebit($id);
+        $totals = $this->recalcTotals($id);
+    } else {
+        $totals = $this->recalcTotals($id);
+    }
+
+    return response()->json([
+        'ok'     => true,
+        'id'     => $id,
+        'totals' => $totals,
+    ]);
+}
+
+// 🔓 Save Main (NO approval) — header-only update
+public function updateMainNoApproval(Request $req)
+{
+    $data = $req->validate([
+        'id'                => ['required','integer','exists:cash_receipts,id'],
+        'cust_id'           => ['required','string','max:50'],
+        'receipt_date'      => ['required','date'],
+        'pay_method'        => ['required','string','max:15'],
+        'bank_id'           => ['required','string','max:15'],
+        'collection_receipt'=> ['required','string','max:25'],
+        'details'           => ['nullable','string','max:1000'],
+        'amount_in_words'   => ['nullable','string','max:255'],
+        'company_id'        => ['required','integer'],
+    ]);
+
+    $id = (int)$data['id'];
+
+    // ✅ SAFETY: do not allow changes when cancelled/deleted
+    $this->requireNotCancelledOrDeleted($id);
+
+    $main = CashReceipts::findOrFail($id);
+
+    // ✅ HEADER-ONLY UPDATE (no totals touch, no detail touch)
+    $main->update([
+        'cust_id'            => $data['cust_id'],
+        'receipt_date'       => $data['receipt_date'],
+        'pay_method'         => $data['pay_method'],
+        'bank_id'            => $data['bank_id'],
+        'collection_receipt' => $data['collection_receipt'],
+        'details'            => $data['details'] ?? '',
+        'amount_in_words'    => $data['amount_in_words'] ?? '',
+    ]);
+
+    // ✅ If bank changed, keep BANK row acct_code in sync (same as updateMain)
+    $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
+        ->where('active_flag', 1)
+        ->first(['acct_code']);
+
+    if ($bankAcct) {
+        $bankRow = CashReceiptDetails::where('transaction_id', $id)
+            ->where('workstation_id', 'BANK')
+            ->first();
+
+        if ($bankRow) {
+            $bankRow->update([
+                'acct_code' => $bankAcct->acct_code,
+                'credit'    => 0,
+            ]);
+        } else {
+            CashReceiptDetails::create([
+                'transaction_id' => $id,
+                'acct_code'      => $bankAcct->acct_code,
+                'debit'          => 0,
+                'credit'         => 0,
+                'workstation_id' => 'BANK',
+                'company_id'     => $data['company_id'],
+            ]);
+        }
+
+        // Keep BANK debit correct after bank change (safe even if details unchanged)
+        $this->adjustBankDebit($id);
+        $totals = $this->recalcTotals($id);
+    } else {
+        $totals = $this->recalcTotals($id);
+    }
+
+    return response()->json([
+        'ok'     => true,
+        'id'     => $id,
+        'totals' => $totals,
+    ]);
+}
+
+
+
     // === 3) Insert a detail row ===
     public function saveDetail(Request $req)
     {
@@ -171,6 +319,9 @@ class CashReceiptController extends Controller
             'workstation_id' => ['nullable','string','max:25'],
             'user_id'        => ['nullable','integer'],
         ]);
+        
+$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
+$this->requireApprovedEdit($req, (int)$payload['transaction_id']);
 
         $debit  = (float)($payload['debit']  ?? 0);
         $credit = (float)($payload['credit'] ?? 0);
@@ -223,6 +374,9 @@ class CashReceiptController extends Controller
             'credit'         => ['nullable','numeric'],
         ]);
 
+$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
+$this->requireApprovedEdit($req, (int)$payload['transaction_id']);
+
         $detail = CashReceiptDetails::find($payload['id']);
         if (!$detail) return response()->json(['message' => 'Detail not found.'], 404);
 
@@ -261,6 +415,9 @@ class CashReceiptController extends Controller
             'id'             => ['required','integer','exists:cash_receipt_details,id'],
             'transaction_id' => ['required','integer','exists:cash_receipts,id'],
         ]);
+
+$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
+$this->requireApprovedEdit($req, (int)$payload['transaction_id']);
 
         $row = CashReceiptDetails::find($payload['id']);
         if ($row && ($row->workstation_id === 'BANK')) {
@@ -308,6 +465,7 @@ class CashReceiptController extends Controller
 
         $rows = CashReceipts::from('cash_receipts as r')
             ->when($companyId, fn ($qr) => $qr->where('r.company_id', $companyId))
+            ->whereIn('r.is_cancel', ['n', 'c'])
             ->leftJoin('customer_list as c', function ($j) use ($companyId) {
                 $j->on('c.cust_id', '=', 'r.cust_id');
                 if ($companyId) $j->where('c.company_id', $companyId);
@@ -400,16 +558,27 @@ class CashReceiptController extends Controller
     }
 
     // === 9) Cancel / Uncancel ===
-    public function updateCancel(Request $req)
-    {
-        $data = $req->validate([
-            'id'   => ['required','integer','exists:cash_receipts,id'],
-            'flag' => ['required','in:0,1'],
-        ]);
-        $val = $data['flag'] == '1' ? 'y' : 'n';
-        CashReceipts::where('id',$data['id'])->update(['is_cancel'=>$val]);
-        return response()->json(['ok'=>true,'is_cancel'=>$val]);
-    }
+public function updateCancel(Request $req)
+{
+    $data = $req->validate([
+        'id'   => ['required','integer','exists:cash_receipts,id'],
+        'flag' => ['required','in:0,1'],
+    ]);
+
+    // legacy endpoint: use c/n
+    $val = $data['flag'] === '1' ? 'c' : 'n';
+
+    CashReceipts::where('id', (int)$data['id'])->update(['is_cancel' => $val]);
+
+    return response()->json(['ok' => true, 'is_cancel' => $val]);
+}
+
+
+
+
+
+
+
 
     /** Convert 0..999 into words (english) */
     private function chunkToWords(int $n): string {
@@ -474,9 +643,10 @@ class CashReceiptController extends Controller
             ->where('r.id', $id)
             ->first();
 
-        if (!$header || $header->is_cancel === 'y') {
-            abort(404, 'Receipt Voucher not found or cancelled');
-        }
+if (!$header || in_array($header->is_cancel, ['c','d'], true)) {
+    abort(404, 'Receipt Voucher not found or cancelled');
+}
+
 
         $details = DB::table('cash_receipt_details as d')
             ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
@@ -632,9 +802,10 @@ EOD;
             ->where('r.id', $id)
             ->first();
 
-        if (!$header || $header->is_cancel === 'y') {
-            abort(404, 'Receipt Voucher not found or cancelled');
-        }
+if (!$header || in_array($header->is_cancel, ['c','d'], true)) {
+    abort(404, 'Receipt Voucher not found or cancelled');
+}
+
 
         $details = DB::table('cash_receipt_details as d')
             ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
@@ -807,6 +978,43 @@ EOD;
         $newBankDebit = max(0, $sumCredit - $sumDebitExBank);
         $bankRow->update(['debit' => $newBankDebit, 'credit' => 0]);
     }
+
+
+/**
+ * Require an ACTIVE approved EDIT approval window for this cash receipt.
+ * Blocks direct API calls that try to bypass approvals.
+ */
+private function requireApprovedEdit(Request $req, int $transactionId): void
+{
+    $companyId = $req->input('company_id') ?? $req->query('company_id');
+
+    $row = DB::table('approvals')
+        ->where('module', 'cash_receipts')
+        ->where('record_id', $transactionId)
+        ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
+        ->where('action', 'edit')
+        ->where('status', 'approved')
+        ->whereNull('consumed_at')
+        ->whereNotNull('expires_at')
+        ->where('expires_at', '>', now())
+        ->orderByDesc('id')
+        ->first();
+
+    if (!$row) {
+        abort(403, 'Edit requires an active approval.');
+    }
+}
+
+/**
+ * Helper to prevent edits on cancelled/deleted records.
+ */
+private function requireNotCancelledOrDeleted(int $transactionId): void
+{
+    $flag = CashReceipts::where('id', $transactionId)->value('is_cancel');
+    if (in_array($flag, ['c', 'd'], true)) {
+        abort(409, 'Transaction is cancelled/deleted and cannot be edited.');
+    }
+}
 
     protected function recalcTotals(int $transactionId): array
     {

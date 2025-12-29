@@ -72,6 +72,8 @@ function pesoWords(amount: number) {
 const fmtMoney = (n: number) =>
   (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+const msToMin = (ms: number) => Math.max(0, Math.floor(ms / 60000));
+
 /* ---------------- types ---------------- */
 type DetailRow = {
   id?: number;
@@ -95,6 +97,16 @@ type DisbursementListRow = {
   is_cancel?: 'y' | 'n';
 };
 
+type ApprovalStatus = {
+  exists: boolean;
+  id?: number;
+  status?: 'pending' | 'approved' | 'rejected' | 'expired' | string;
+  reason?: string | null;
+  expires_at?: string | null;
+  approved_active?: boolean;
+  action?: string | null;
+};
+
 /* ---------------- component ---------------- */
 
 export default function CashDisbursementForm() {
@@ -112,8 +124,8 @@ export default function CashDisbursementForm() {
   const [payMethodId, setPayMethodId] = useState('');
   const [explanation, setExplanation] = useState('');
   const [checkRefNo, setCheckRefNo] = useState('');
-  const [_locked, setLocked] = useState(false);       // header lock
-  const [gridLocked, setGridLocked] = useState(true); // grid lock (separate)
+  const [_locked, setLocked] = useState(false);       // legacy (we will still set it)
+  const [_gridLocked, setGridLocked] = useState(true); // grid lock (separate)
   const [isCancelled, setIsCancelled] = useState(false);
 
   const isSaved = useMemo(() => mainId != null, [mainId]);
@@ -128,7 +140,9 @@ export default function CashDisbursementForm() {
 
   const [vendSearch, setVendSearch] = useState('');
   const [bankSearch, setBankSearch] = useState('');
-  const [paySearch,  setPaySearch]  = useState('');
+  const [paySearch, setPaySearch] = useState('');
+
+
 
   // search transaction
   const [searchId, setSearchId] = useState('');
@@ -180,6 +194,238 @@ export default function CashDisbursementForm() {
 
   // amount words follow header amount
   useEffect(() => { setAmountWords(pesoWords(disburseAmount)); }, [disburseAmount]);
+
+  /* ---------------- approval (EDIT/CANCEL/DELETE/UNCANCEL) ---------------- */
+  const MODULE = 'cash_disbursement'; // must match what backend will use later
+
+  const [apprEdit, setApprEdit] = useState<ApprovalStatus>({ exists: false });
+  const [apprCancel, setApprCancel] = useState<ApprovalStatus>({ exists: false });
+  const [apprDelete, setApprDelete] = useState<ApprovalStatus>({ exists: false });
+  const [apprUncancel, setApprUncancel] = useState<ApprovalStatus>({ exists: false });
+
+const fetchApproval = useCallback(
+  async (recordId: number, action: string): Promise<ApprovalStatus> => {
+    if (!recordId) return { exists: false };
+    try {
+      const { data } = await napi.get('/approvals/status', {
+        params: {
+          module: MODULE,
+          record_id: recordId,          // ✅ use argument, NOT mainId state
+          company_id: companyId ?? '',
+          action,
+        },
+      });
+      return (data || { exists: false }) as ApprovalStatus;
+    } catch {
+      return { exists: false };
+    }
+  },
+  [companyId]
+);
+
+const refreshApprovals = useCallback(
+  async (recordId?: number | null) => {
+    const rid = recordId ?? mainId;
+
+    if (!rid) {
+      setApprEdit({ exists: false });
+      setApprCancel({ exists: false });
+      setApprDelete({ exists: false });
+      setApprUncancel({ exists: false });
+      return;
+    }
+
+    const [e, c, d, u] = await Promise.all([
+      fetchApproval(rid, 'edit'),
+      fetchApproval(rid, 'CANCEL'),
+      fetchApproval(rid, 'DELETE'),
+      fetchApproval(rid, 'UNCANCEL'),
+    ]);
+
+    setApprEdit(e);
+    setApprCancel(c);
+    setApprDelete(d);
+    setApprUncancel(u);
+  },
+  [mainId, fetchApproval]
+);
+
+  const approvalText = (a: ApprovalStatus) => {
+    if (!a?.exists) return 'none';
+    const st = String(a.status || '').toLowerCase();
+    if (st === 'pending') return 'pending';
+    if (st === 'rejected') return 'rejected';
+    if (st === 'expired') return 'expired';
+    if (st === 'approved') {
+      if (a.approved_active && a.expires_at) {
+        const mins = msToMin(new Date(a.expires_at).getTime() - Date.now());
+        return `approved (active – ${mins} min left)`;
+      }
+      return 'approved';
+    }
+    return st || 'unknown';
+  };
+
+  const isEditApprovedActive = !!apprEdit?.approved_active;
+  const isBalanced = useMemo(() => {
+    const sumD = Number((tableData || []).reduce((a, r) => a + Number(r.debit || 0), 0));
+    const sumC = Number((tableData || []).reduce((a, r) => a + Number(r.credit || 0), 0));
+    return Math.abs(sumD - sumC) < 0.005;
+  }, [tableData]);
+
+  const totalDebit = useMemo(() => (tableData || []).reduce((a, r) => a + Number(r.debit || 0), 0), [tableData]);
+  const totalCredit = useMemo(() => (tableData || []).reduce((a, r) => a + Number(r.credit || 0), 0), [tableData]);
+
+  const canEditNow = isSaved && !isCancelled && isEditApprovedActive;
+
+  // enforce locks whenever state changes
+  useEffect(() => {
+    const shouldLock = !(canEditNow);
+    setLocked(shouldLock);
+    setGridLocked(shouldLock);
+    hotRef.current?.hotInstance?.updateSettings?.({ readOnly: shouldLock });
+  }, [canEditNow]);
+
+  const requestApprovalWithReason = async (action: 'edit' | 'CANCEL' | 'DELETE' | 'UNCANCEL', title: string) => {
+    if (!mainId) return toast.info('Save or select a disbursement first.');
+
+    const res = await Swal.fire({
+      title,
+      input: 'textarea',
+      inputLabel: 'Reason (required)',
+      inputPlaceholder: 'Enter reason...',
+      inputAttributes: { 'aria-label': 'Reason' },
+      showCancelButton: true,
+      confirmButtonText: action === 'edit' ? 'OK' : 'Request',
+      preConfirm: (val) => {
+        const v = String(val || '').trim();
+        if (!v) {
+          Swal.showValidationMessage('Reason is required');
+          return;
+        }
+        return v;
+      },
+    });
+
+    if (!res.isConfirmed) return;
+
+    const reason = String(res.value || '').trim();
+
+    try {
+      await napi.post('/approvals/request-edit', {
+        module: MODULE,
+        record_id: mainId,
+        company_id: companyId,
+        action,
+        reason,
+      });
+
+      toast.success('Approval request submitted.');
+      await refreshApprovals();
+
+      // waiting mode: lock everything
+      setLocked(true);
+      setGridLocked(true);
+      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Failed to submit approval request.');
+    }
+  };
+
+const handleSaveChanges = async () => {
+  if (!mainId) return toast.info('Save or select a disbursement first.');
+  if (isCancelled) return toast.error('Cannot save changes on cancelled transaction.');
+
+  try {
+    const { data } = await napi.post('/cash-disbursement/update-main', {
+      id: mainId,
+      vend_id: vendId,
+      disburse_date: disburseDate,
+      pay_method: payMethodId,
+      bank_id: bankId,
+      check_ref_no: checkRefNo,
+      explanation,
+      amount_in_words: pesoWords(disburseAmount).replace(/^\*\*\*\s|\s\*\*\*$/g, ''),
+      company_id: companyId,
+      user_id: user?.id,
+    });
+
+    // ✅ if backend really saved, these MUST be the new values
+    if (data?.main) {
+      const m = data.main;
+      setVendId(String(m.vend_id || ''));
+      setDisburseDate((m.disburse_date || '').slice(0, 10));
+      setBankId(String(m.bank_id || ''));
+      setPayMethodId(String(m.pay_method || ''));
+      setCheckRefNo(m.check_ref_no || '');
+      setExplanation(m.explanation || '');
+    }
+
+    await napi.post('/approvals/release', {
+      module: MODULE,
+      record_id: mainId,
+      company_id: companyId,
+      action: 'edit',
+    });
+
+    // ✅ still reload, but now you already confirmed what DB returned
+    await loadDisbursement(mainId);
+
+    setLocked(true);
+    setGridLocked(true);
+    hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+
+    toast.success('Changes saved.');
+    await refreshApprovals(mainId);
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to save changes.');
+  }
+};
+
+
+const handleSaveMainNoApproval = async () => {
+  if (!mainId) return toast.info('Save or select a disbursement first.');
+  if (isCancelled) return toast.error('Cancelled transaction cannot be modified.');
+
+  const ok = await Swal.fire({
+    title: 'Save main header changes?',
+    icon: 'question',
+    showCancelButton: true,
+    confirmButtonText: 'Save Main',
+  });
+  if (!ok.isConfirmed) return;
+
+  try {
+    await napi.post('/cash-disbursement/update-main-no-approval', {
+      id: mainId,
+      vend_id: vendId,
+      disburse_date: disburseDate,
+      pay_method: payMethodId,
+      bank_id: bankId,
+      check_ref_no: checkRefNo,
+      explanation,
+      amount_in_words: pesoWords(disburseAmount).replace(/^\*\*\*\s|\s\*\*\*$/g, ''),
+      company_id: companyId,
+      user_id: user?.id,
+    });
+
+    // reload to confirm server saved
+    await loadDisbursement(mainId);
+
+    // force view mode (details still approval-locked)
+    setLocked(true);
+    setGridLocked(true);
+    hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+
+    toast.success('Main saved.');
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to save main.');
+  }
+};
+
+
+
+
 
   /* --------- fetch dropdowns --------- */
   useEffect(() => {
@@ -242,6 +488,7 @@ export default function CashDisbursementForm() {
         params: { company_id: companyId },
       });
       const m = data.main ?? data;
+
       setMainId(m.id);
       setCdNo(m.cd_no || '');
       setVendId(String(m.vend_id || ''));
@@ -272,19 +519,24 @@ export default function CashDisbursementForm() {
       });
 
       setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
+
+      // lock by default until approvals say otherwise
       setLocked(true);
+      setGridLocked(true);
+      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+
+      await refreshApprovals(m.id);
+
       toast.success('Disbursement loaded.');
     } catch {
       toast.error('Unable to load the selected disbursement.');
     }
-  }, [companyId, vendors, findDesc, ensureAccountInSource]);
+  }, [companyId, vendors, findDesc, ensureAccountInSource, refreshApprovals]);
 
   const handleSelectTransaction = async (selId: string) => {
     if (!selId) return;
     setSearchId(selId);
     await loadDisbursement(selId);
-    setGridLocked(true);
-    hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
   };
 
   /* --------- main actions --------- */
@@ -316,68 +568,32 @@ export default function CashDisbursementForm() {
       setMainId(newId);
       setCdNo(res.data.cd_no || '');
       setLocked(true);
-      setGridLocked(false);
+      setGridLocked(true);
 
-      // Immediately reload so BANK row appears
+      // reload so BANK row appears + approval state is fetched
       await loadDisbursement(newId);
 
-      toast.success('Main saved. You can now input details.');
+      toast.success('Main saved.');
       fetchTransactions();
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Failed to save.');
     }
   };
 
-  const handleUpdateMain = () => {
-    setLocked(false);
-    setGridLocked(false);
-    toast.success('Editing enabled.');
-  };
-
+  /* --------- Cancel/Delete/Uncancel (approval-driven) --------- */
   const handleCancelTxn = async () => {
     if (!mainId) return;
-    const ok = await Swal.fire({ title: 'Cancel this disbursement?', icon: 'warning', showCancelButton: true, confirmButtonText: 'Cancel' });
-    if (!ok.isConfirmed) return;
-    try {
-      const { data } = await napi.post('/cash-disbursement/cancel', { id: mainId, flag: 1 });
-      setIsCancelled((data?.is_cancel || data?.is_cancelled) === 'y');
-      setLocked(true);
-      setGridLocked(true);
-      toast.success('Disbursement marked CANCELLED.');
-      fetchTransactions();
-    } catch {
-      toast.error('Failed to cancel disbursement.');
-    }
+    await requestApprovalWithReason('CANCEL', 'Request approval to CANCEL this disbursement?');
   };
 
   const handleUncancelTxn = async () => {
     if (!mainId) return;
-    const ok = await Swal.fire({ title: 'Uncancel this disbursement?', icon: 'question', showCancelButton: true, confirmButtonText: 'Uncancel' });
-    if (!ok.isConfirmed) return;
-    try {
-      const { data } = await napi.post('/cash-disbursement/cancel', { id: mainId, flag: 0 });
-      setIsCancelled((data?.is_cancel || data?.is_cancelled) !== 'y');
-      setLocked(true);
-      setGridLocked(false);
-      toast.success('Disbursement is now ACTIVE.');
-      fetchTransactions();
-    } catch {
-      toast.error('Failed to uncancel disbursement.');
-    }
+    await requestApprovalWithReason('UNCANCEL', 'Request approval to UNCANCEL this disbursement?');
   };
 
   const handleDeleteTxn = async () => {
     if (!mainId) return;
-    const ok = await Swal.fire({ title: 'Delete this disbursement?', text: 'This action is irreversible.', icon: 'error', showCancelButton: true, confirmButtonText: 'Delete' });
-    if (!ok.isConfirmed) return;
-    try {
-      await napi.delete(`/cash-disbursement/${mainId}`);
-      handleNew(); // reset
-      toast.success('Disbursement deleted.');
-      fetchTransactions();
-    } catch {
-      toast.error('Failed to delete disbursement.');
-    }
+    await requestApprovalWithReason('DELETE', 'Request approval to DELETE this disbursement?');
   };
 
   // totals + new
@@ -447,6 +663,11 @@ export default function CashDisbursementForm() {
     setLocked(false);
     setGridLocked(true);
 
+    setApprEdit({ exists: false });
+    setApprCancel({ exists: false });
+    setApprDelete({ exists: false });
+    setApprUncancel({ exists: false });
+
     setTableData([emptyRow()]);
     hotRef.current?.hotInstance?.loadData?.([emptyRow()]);
     toast.success('Ready for a new transaction.');
@@ -469,14 +690,15 @@ export default function CashDisbursementForm() {
     );
   };
 
-  const deleteDetail = async (payload: any) => {
+  /*const deleteDetail = async (payload: any) => {
     const { data } = await napi.post('/cash-disbursement/delete-detail', payload);
     refreshHeaderTotals(data?.totals);
     await loadDisbursement(payload.transaction_id);
-  };
+  };*/
 
   const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
     if (!mainId) return;
+    if (!canEditNow) return; // ✅ only autosave when edit approval is active
     if (!isRowValid(row)) return;
 
     const code = onlyCode(row.acct_code);
@@ -515,7 +737,7 @@ export default function CashDisbursementForm() {
 
   const ACCT_COL_INDEX = 0;
   const afterBeginEditingOpenAll = (_row: number, col: number) => {
-    if (gridLocked || col !== ACCT_COL_INDEX) return;
+    if (!canEditNow || col !== ACCT_COL_INDEX) return;
     const hot = hotRef.current?.hotInstance;
     const ed: any = hot?.getActiveEditor();
     if (ed?.cellProperties?.type === 'autocomplete') {
@@ -529,7 +751,7 @@ export default function CashDisbursementForm() {
   // LOCK the BANK row (workstation_id === 'BANK')
   const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
     const cellProps: Partial<Handsontable.CellProperties> = {};
-    if (gridLocked) {
+    if (!canEditNow) {
       cellProps.readOnly = true;
       return cellProps as Handsontable.CellProperties;
     }
@@ -548,27 +770,149 @@ export default function CashDisbursementForm() {
   const [pdfUrl, setPdfUrl] = useState<string | undefined>(undefined);
   const [showPdf, setShowPdf] = useState(false);
 
+  const canExport = isSaved && !isCancelled && isBalanced;
+
+  useEffect(() => {
+    if (!canExport) {
+      setPrintOpen(false);
+      setDownloadOpen(false);
+    }
+  }, [canExport]);
+
   const handleOpenPdf = () => {
     if (!mainId) return toast.info('Save or select a disbursement first.');
-    const url = `/api/cash-disbursement/form-pdf/${mainId}?company_id=${encodeURIComponent(companyId||'')}`;
+    if (!canExport) return toast.info('Cannot print: transaction is cancelled or unbalanced.');
+    const url = `/api/cash-disbursement/form-pdf/${mainId}?company_id=${encodeURIComponent(companyId || '')}`;
     setPdfUrl(url);
     setShowPdf(true);
   };
+
   const handleDownloadExcel = async () => {
     if (!mainId) return toast.info('Save or select a disbursement first.');
+    if (!canExport) return toast.info('Cannot download: transaction is cancelled or unbalanced.');
     const res = await napi.get(`/cash-disbursement/form-excel/${mainId}`, {
       responseType: 'blob',
-      params: { company_id: companyId||'' },
+      params: { company_id: companyId || '' },
     });
-    const name = res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1] || `DisbursementVoucher_${cdNo||mainId}.xlsx`;
+    const name = res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1] || `DisbursementVoucher_${cdNo || mainId}.xlsx`;
     const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   };
 
+  /* ---------------- UI ---------------- */
+
+  const balancedPill = (
+    <span className={`inline-flex items-center rounded px-3 py-1 text-xs font-semibold ${isBalanced ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>
+      {isBalanced ? 'Balanced' : 'Unbalanced'}
+    </span>
+  );
+
+  const approvalStrip = (
+    <div className="flex flex-wrap items-center gap-4 text-sm font-semibold text-gray-700">
+      <div>DV No: <span className="text-gray-900">{cdNo || '-'}</span></div>
+      <div>Total Debit: <span className="text-gray-900">{fmtMoney(totalDebit)}</span></div>
+      <div>Total Credit: <span className="text-gray-900">{fmtMoney(totalCredit)}</span></div>
+      <div>{balancedPill}</div>
+      <div>Approval: <span className="text-gray-900">{approvalText(apprEdit)}</span></div>
+    </div>
+  );
+
+  const editButton = (() => {
+    if (!isSaved) return null;
+    if (isCancelled) return null;
+
+    const st = String(apprEdit?.status || '').toLowerCase();
+    if (st === 'pending') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center gap-2 px-4 py-2 rounded bg-purple-200 text-purple-700 cursor-not-allowed"
+          title={apprEdit?.reason ? `Reason: ${apprEdit.reason}` : undefined}
+        >
+          <CheckCircleIcon className="h-5 w-5" />
+          Edit Request Pending
+        </button>
+      );
+    }
+
+    if (apprEdit?.approved_active) {
+      return (
+        <button
+          onClick={handleSaveChanges}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+        >
+          <CheckCircleIcon className="h-5 w-5" />
+          Save Changes
+        </button>
+      );
+    }
+
+    return (
+      <button
+        onClick={() => requestApprovalWithReason('edit', 'Request Edit Approval')}
+        className="inline-flex items-center gap-2 px-4 py-2 rounded bg-purple-600 text-white hover:bg-purple-700"
+      >
+        <CheckCircleIcon className="h-5 w-5" />
+        Request to Edit
+      </button>
+    );
+  })();
+
+  const cancelButton = (() => {
+    if (!isSaved) return null;
+
+    if (!isCancelled) {
+      const st = String(apprCancel?.status || '').toLowerCase();
+      const pending = st === 'pending';
+      return (
+        <button
+          onClick={handleCancelTxn}
+          disabled={pending || isCancelled}
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded ${pending ? 'bg-amber-200 text-amber-800 cursor-not-allowed' : 'bg-amber-500 text-white hover:bg-amber-600'}`}
+          title={pending && apprCancel?.reason ? `Reason: ${apprCancel.reason}` : undefined}
+        >
+          <XMarkIcon className="h-5 w-5" />
+          {pending ? 'Cancel Request Pending' : 'Cancel'}
+        </button>
+      );
+    }
+
+    const stU = String(apprUncancel?.status || '').toLowerCase();
+    const pendingU = stU === 'pending';
+    return (
+      <button
+        onClick={handleUncancelTxn}
+        disabled={pendingU}
+        className={`inline-flex items-center gap-2 px-4 py-2 rounded ${pendingU ? 'bg-amber-200 text-amber-800 cursor-not-allowed' : 'bg-amber-600 text-white hover:bg-amber-700'}`}
+        title={pendingU && apprUncancel?.reason ? `Reason: ${apprUncancel.reason}` : undefined}
+      >
+        <ArrowUturnLeftIcon className="h-5 w-5" />
+        {pendingU ? 'Uncancel Request Pending' : 'Uncancel'}
+      </button>
+    );
+  })();
+
+  const deleteButton = (() => {
+    if (!isSaved) return null;
+    const st = String(apprDelete?.status || '').toLowerCase();
+    const pending = st === 'pending';
+    return (
+      <button
+        onClick={handleDeleteTxn}
+        disabled={pending}
+        className={`inline-flex items-center gap-2 px-4 py-2 rounded ${pending ? 'bg-red-200 text-red-800 cursor-not-allowed' : 'bg-red-600 text-white hover:bg-red-700'}`}
+        title={pending && apprDelete?.reason ? `Reason: ${apprDelete.reason}` : undefined}
+      >
+        <TrashIcon className="h-5 w-5" />
+        {pending ? 'Delete Request Pending' : 'Delete'}
+      </button>
+    );
+  })();
+
   return (
-    <div className="space-y-4 p-6">
+    <div className="min-h-screen pb-40 space-y-4 p-6">
       <ToastContainer position="top-right" autoClose={3000} />
 
       {/* HEADER */}
@@ -585,8 +929,8 @@ export default function CashDisbursementForm() {
               items={txDropdownItems}
               search={txSearch}
               onSearchChange={setTxSearch}
-              headers={['ID','DV #','Vendor','Date','Amount','Check/Ref #']}
-              columnWidths={['60px','90px','250px','110px','110px','110px']}
+              headers={['ID', 'DV #', 'Vendor', 'Date', 'Amount', 'Check/Ref #']}
+              columnWidths={['60px', '90px', '250px', '110px', '110px', '110px']}
               dropdownPositionStyle={{ width: '750px' }}
               inputClassName="p-2 text-sm bg-white"
             />
@@ -605,10 +949,12 @@ export default function CashDisbursementForm() {
               items={vendors}
               search={vendSearch}
               onSearchChange={setVendSearch}
-              headers={['Code','Description']}
-              columnWidths={['140px','520px']}
+              headers={['Code', 'Description']}
+              columnWidths={['140px', '520px']}
               dropdownPositionStyle={{ width: '700px' }}
               inputClassName="p-2 text-sm bg-white"
+              // lock vendor unless edit approved
+              // (when not saved yet, allow selection)
             />
           </div>
 
@@ -618,7 +964,7 @@ export default function CashDisbursementForm() {
             <input
               type="date"
               value={disburseDate}
-              disabled={isSaved}
+              disabled={isCancelled}
               onChange={(e) => setDisburseDate(e.target.value)}
               className="w-full border p-2 bg-blue-100 text-blue-900"
             />
@@ -630,11 +976,11 @@ export default function CashDisbursementForm() {
               label="Bank Name"
               value={bankId}
               onChange={setBankId}
-              items={banks.map(b => ({ code: String(b.bank_id ?? b.code), description: b.bank_name ?? b.description }))}
+              items={banks.map(b => ({ code: String((b as any).bank_id ?? b.code), description: (b as any).bank_name ?? b.description }))}
               search={bankSearch}
               onSearchChange={setBankSearch}
-              headers={['Code','Bank']}
-              columnWidths={['100px','350px']}
+              headers={['Code', 'Bank']}
+              columnWidths={['100px', '350px']}
               dropdownPositionStyle={{ width: '500px' }}
               inputClassName="p-2 text-sm bg-white"
             />
@@ -646,11 +992,11 @@ export default function CashDisbursementForm() {
               label="Payment Method"
               value={payMethodId}
               onChange={setPayMethodId}
-              items={payMethods.map(p => ({ code: String(p.pay_method_id ?? p.code), description: p.pay_method ?? p.description }))}
+              items={payMethods.map(p => ({ code: String((p as any).pay_method_id ?? p.code), description: (p as any).pay_method ?? p.description }))}
               search={paySearch}
               onSearchChange={setPaySearch}
-              headers={['Code','Method']}
-              columnWidths={['80px','200px']}
+              headers={['Code', 'Method']}
+              columnWidths={['80px', '200px']}
               dropdownPositionStyle={{ width: '280px' }}
               inputClassName="p-2 text-sm bg-white"
             />
@@ -661,7 +1007,7 @@ export default function CashDisbursementForm() {
             <label className="block mb-1">Explanation</label>
             <input
               value={explanation}
-              disabled={isSaved && isCancelled}
+              disabled={isCancelled}
               onChange={(e) => setExplanation(e.target.value)}
               className="w-full border p-2 bg-blue-100 text-blue-900"
             />
@@ -672,7 +1018,7 @@ export default function CashDisbursementForm() {
             <label className="block mb-1">Check / Ref #</label>
             <input
               value={checkRefNo}
-              disabled={isSaved && isCancelled}
+              disabled={isCancelled}
               onChange={(e) => setCheckRefNo(e.target.value)}
               className="w-full border p-2 bg-blue-100 text-blue-900"
             />
@@ -703,8 +1049,20 @@ export default function CashDisbursementForm() {
           )}
         </div>
 
+        {/* Status strip (DV No / Totals / Balanced / Approval) */}
+        {isSaved && (
+          <div className="mt-2">
+            {approvalStrip}
+            {String(apprEdit?.status || '').toLowerCase() === 'pending' && apprEdit?.reason && (
+              <div className="mt-1 text-sm text-amber-700 font-semibold">
+                Edit approval is pending — Reason: {apprEdit.reason}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Actions */}
-        <div className="flex gap-2 mt-3">
+        <div className="flex flex-wrap gap-2 mt-3 items-center">
           {!isSaved ? (
             <button onClick={handleSaveMain} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">
               <CheckCircleIcon className="h-5 w-5" />
@@ -712,32 +1070,45 @@ export default function CashDisbursementForm() {
             </button>
           ) : (
             <>
-              {!isCancelled && (
-                <button onClick={handleUpdateMain} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700">
-                  <CheckCircleIcon className="h-5 w-5" />
-                  Update
-                </button>
-              )}
-              {!isCancelled ? (
-                <button onClick={handleCancelTxn} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-amber-500 text-white hover:bg-amber-600">
-                  <XMarkIcon className="h-5 w-5" />
-                  Cancel
-                </button>
-              ) : (
-                <button onClick={handleUncancelTxn} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-amber-600 text-white hover:bg-amber-700">
-                  <ArrowUturnLeftIcon className="h-5 w-5" />
-                  Uncancel
-                </button>
-              )}
-              <button onClick={handleDeleteTxn} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-red-600 text-white hover:bg-red-700">
-                <TrashIcon className="h-5 w-5" />
-                Delete
-              </button>
+              {editButton}
+              {cancelButton}
+              {deleteButton}
+
+{/* ✅ Save Main — works without approvals; disappears only when cancelled */}
+{!isCancelled && (
+  <button
+    type="button"
+    onClick={handleSaveMainNoApproval}
+    className="inline-flex items-center gap-2 px-4 py-2 rounded text-white bg-slate-600 hover:bg-slate-700"
+  >
+    Save Main
+  </button>
+)}
+
+
+
             </>
           )}
         </div>
 
-        {isCancelled && <div className="text-red-600 font-bold mt-2">CANCELLED</div>}
+        {isCancelled && (
+          <>
+            <div className="text-red-600 font-bold mt-2">CANCELLED</div>
+            <div className="text-red-600 font-semibold mt-1">
+              This transaction is CANCELLED. It cannot be edited, printed, or downloaded.
+            </div>
+          </>
+        )}
+
+        {!isCancelled && isSaved && !isBalanced && (
+          <div className="text-red-600 font-semibold mt-2">
+            This transaction is UNBALANCED. Please ensure Debit = Credit before printing or downloading.
+          </div>
+        )}
+
+
+
+
       </div>
 
       {/* DETAILS */}
@@ -749,8 +1120,8 @@ export default function CashDisbursementForm() {
             className="hot-enhanced hot-zebra"
             ref={hotRef}
             data={tableData}
-            readOnly={gridLocked}
-            colHeaders={['Account Code','Account Description','Debit','Credit']}
+            readOnly={!canEditNow}
+            colHeaders={['Account Code', 'Account Description', 'Debit', 'Credit']}
             columns={[
               {
                 data: 'acct_code',
@@ -764,21 +1135,23 @@ export default function CashDisbursementForm() {
                 strict: true,
                 allowInvalid: false,
                 visibleRows: 12,
-                readOnly: gridLocked,
+                readOnly: !canEditNow,
                 renderer: (inst, td, row, col, prop, value, cellProps) => {
                   const display = onlyCode(String(value ?? ''));
                   Handsontable.renderers.TextRenderer(inst, td, row, col, prop, display, cellProps);
                 },
               },
               { data: 'acct_desc', readOnly: true },
-              { data: 'debit',  type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked },
-              { data: 'credit', type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked },
+              { data: 'debit', type: 'numeric', numericFormat: { pattern: '0,0.00' }, readOnly: !canEditNow },
+              { data: 'credit', type: 'numeric', numericFormat: { pattern: '0,0.00' }, readOnly: !canEditNow },
             ]}
             cells={bankRowCells}
             afterBeginEditing={afterBeginEditingOpenAll}
             afterChange={(changes, source) => {
               const hot = hotRef.current?.hotInstance;
-              if (!changes || !hot || isCancelled) return;
+              if (!changes || !hot) return;
+              if (!canEditNow) return;
+              if (isCancelled) return;
 
               if (source === 'edit') {
                 changes.forEach(([rowIndex, prop, _oldVal, newVal]) => {
@@ -817,30 +1190,59 @@ export default function CashDisbursementForm() {
             }}
             contextMenu={{
               items: {
-                remove_row: {
-                  name: '🗑️ Remove row',
-                  callback: async (_key, selection) => {
-                    const hot = hotRef.current?.hotInstance;
-                    const rowIndex = selection[0].start.row;
-                    const src = (hot?.getSourceData() as DetailRow[]) || [];
-                    const row = src[rowIndex];
+remove_row: {
+  name: '🗑️ Remove row',
+  callback: async (_key, selection) => {
+    if (!canEditNow) return;
 
-                    if (row?.workstation_id === 'BANK') {
-                      toast.info('Bank line cannot be deleted.');
-                      return;
-                    }
+    const hot = hotRef.current?.hotInstance;
+    const rowIndex = selection?.[0]?.start?.row ?? -1;
+    if (!hot || rowIndex < 0) return;
 
-                    if (!row?.id) { src.splice(rowIndex,1); setTableData([...src]); return; }
+    const src = (hot.getSourceData() as DetailRow[]) || [];
+    const row = src[rowIndex];
 
-                    const ok = await Swal.fire({ title: 'Delete this line?', icon: 'warning', showCancelButton: true });
-                    if (!ok.isConfirmed) return;
+    // BANK line cannot be deleted
+    if (row?.workstation_id === 'BANK') {
+      toast.info('Bank line cannot be deleted.');
+      return;
+    }
 
-                    await deleteDetail({ id: row.id, transaction_id: mainId });
-                    src.splice(rowIndex, 1);
-                    setTableData([...src]);
-                    toast.success('Row deleted.');
-                  },
-                },
+    // If it's not persisted yet, just remove locally (safe)
+    if (!row?.id) {
+      src.splice(rowIndex, 1);
+
+      // keep trailing empty row
+      if (!src.find(r => !r.acct_code)) src.push(emptyRow());
+
+      setTableData([...src]);
+      return;
+    }
+
+    const ok = await Swal.fire({
+      title: 'Delete this line?',
+      icon: 'warning',
+      showCancelButton: true,
+    });
+    if (!ok.isConfirmed) return;
+
+    try {
+      // ✅ Server delete triggers adjustBankCredit + recalcTotals in backend
+      await napi.post('/cash-disbursement/delete-detail', {
+        id: row.id,
+        transaction_id: mainId,
+      });
+
+      // ✅ SINGLE source of truth: reload from server so BANK auto-adjusts
+      await loadDisbursement(mainId!);
+
+      toast.success('Row deleted.');
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Delete failed.');
+    }
+  },
+},
+
               },
             }}
             manualColumnResize
@@ -857,33 +1259,30 @@ export default function CashDisbursementForm() {
         {/* DOWNLOAD */}
         <div
           className="relative inline-block"
-          onMouseEnter={() => setDownloadOpen(true)}
+          onMouseEnter={() => { if (canExport) setDownloadOpen(true); }}
           onMouseLeave={() => setDownloadOpen(false)}
         >
           <button
             type="button"
-            disabled={!isSaved}
+            disabled={!canExport}
             className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
-              isSaved ? 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50' : 'bg-gray-100 text-gray-400 border-gray-200'
+              canExport ? 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
             }`}
           >
-            <ArrowDownTrayIcon className={`h-5 w-5 ${isSaved ? 'text-blue-600' : 'text-gray-400'}`} />
+            <ArrowDownTrayIcon className={`h-5 w-5 ${canExport ? 'text-blue-600' : 'text-gray-400'}`} />
             <span>Download</span>
             <ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
 
-          {downloadOpen && (
+          {canExport && downloadOpen && (
             <div className="absolute left-0 top-full z-50">
               <div className="mt-1 w-64 rounded-md border bg-white shadow-lg py-1">
                 <button
                   type="button"
                   onClick={handleDownloadExcel}
-                  disabled={!isSaved}
-                  className={`flex w-full items-center gap-3 px-3 py-2 text-sm ${
-                    isSaved ? 'text-gray-800 hover:bg-blue-50' : 'text-gray-400 cursor-not-allowed'
-                  }`}
+                  className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-blue-50"
                 >
-                  <DocumentArrowDownIcon className={`h-5 w-5 ${isSaved ? 'text-blue-600' : 'text-gray-400'}`} />
+                  <DocumentArrowDownIcon className="h-5 w-5 text-blue-600" />
                   <span className="truncate">Disbursement Voucher – Excel</span>
                   <span className="ml-auto text-[10px] font-semibold">XLSX</span>
                 </button>
@@ -895,13 +1294,22 @@ export default function CashDisbursementForm() {
         {/* PRINT */}
         <div
           className="relative inline-block"
-          onMouseEnter={() => setPrintOpen(true)}
+          onMouseEnter={() => { if (canExport) setPrintOpen(true); }}
           onMouseLeave={() => setPrintOpen(false)}
         >
-          <button type="button" className="inline-flex items-center gap-2 rounded border px-3 py-2 bg-white text-gray-700 hover:bg-gray-50">
-            <PrinterIcon className="h-5 w-5" /><span>Print</span><ChevronDownIcon className="h-4 w-4 opacity-70" />
+          <button
+            type="button"
+            disabled={!canExport}
+            className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
+              canExport ? 'bg-white text-gray-700 hover:bg-gray-50' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+            }`}
+          >
+            <PrinterIcon className="h-5 w-5" />
+            <span>Print</span>
+            <ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
-          {printOpen && (
+
+          {canExport && printOpen && (
             <div className="absolute left-0 top-full z-50">
               <div className="mt-1 w-64 rounded-md border bg-white shadow-lg py-1">
                 <button
@@ -934,9 +1342,9 @@ export default function CashDisbursementForm() {
       {showPdf && (
         <div className="fixed inset-0 z-[10000] bg-black/50 flex items-center justify-center">
           <div className="bg-white rounded-lg shadow-xl w-[90vw] h-[85vh] relative">
-            <button onClick={()=>setShowPdf(false)} className="absolute top-2 right-2 rounded-full px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200" aria-label="Close">✕</button>
+            <button onClick={() => setShowPdf(false)} className="absolute top-2 right-2 rounded-full px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200" aria-label="Close">✕</button>
             <div className="h-full w-full pt-8">
-              <iframe title="Disbursement Voucher PDF" src={pdfUrl} className="w-full h-full" style={{border:'none'}}/>
+              <iframe title="Disbursement Voucher PDF" src={pdfUrl} className="w-full h-full" style={{ border: 'none' }} />
             </div>
           </div>
         </div>

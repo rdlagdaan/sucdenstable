@@ -12,7 +12,6 @@ class GeneralAccountingDetail extends Model
 
     protected $fillable = [
         'transaction_id',
-        'general_accounting_id', 
         'acct_code',
         'debit',
         'credit',
