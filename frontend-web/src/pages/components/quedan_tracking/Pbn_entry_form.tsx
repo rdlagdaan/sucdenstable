@@ -272,6 +272,9 @@ export default function PurchaseBookNote() {
   // ---- Trailing blank rows helpers (add below isRowComplete) ----
   const TRAILING_BUFFER_ROWS = 4;
 
+  const gridLocked = posted === true; // lock when posted
+
+
   const emptyRow = (): PbnDetailRow => ({
     mill: '',
     quantity: 0,
@@ -704,6 +707,16 @@ const handleDownloadPbnExcel = async () => {
 };
 
 
+const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
+  // return only overrides; HOT merges this with defaults
+  if (posted && (col === 0 || col === 1 || col === 2 || col === 3)) {
+    return { readOnly: true };
+  }
+  return {};
+};
+
+
+
   return (
     <div className="min-h-screen pb-40 space-y-4 p-6">
       <ToastContainer position="top-right" autoClose={3000} />
@@ -776,6 +789,8 @@ const handleDownloadPbnExcel = async () => {
           <HotTable
             ref={hotRef}
             data={tableData}
+            readOnly={posted}            // global lock (good baseline)
+            cells={cellProps}  
             colHeaders={['Mill', 'Quantity', 'Unit Cost', 'Commission', 'Cost', 'Total Commission', 'Total Cost']}
             columns={[
               {
@@ -793,7 +808,8 @@ const handleDownloadPbnExcel = async () => {
                 filter: true,
                 allowInvalid: false,
                 visibleRows: 10,              // show 8 items
-                trimDropdown: false          // optionally allow wider dropdown
+                trimDropdown: false,          // optionally allow wider dropdown
+                readOnly: gridLocked,
               },
               { data: 'quantity', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
               { data: 'unit_cost', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
@@ -810,6 +826,15 @@ const handleDownloadPbnExcel = async () => {
             }}
 
             beforeKeyDown={(e: KeyboardEvent) => {
+
+              if (gridLocked) {
+                // block Delete/Backspace edits when posted
+                if (e.key === 'Delete' || e.key === 'Backspace') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  return;
+                }
+              }
               // If the autocomplete input is focused, let it own navigation keys
               const editor = document.querySelector('.handsontableEditor.autocompleteEditor');
               const active = document.activeElement;
@@ -858,6 +883,8 @@ const handleDownloadPbnExcel = async () => {
             }}
 
             afterChange={(changes, source) => {
+              if (posted) return;
+              if (gridLocked) return; 
               if (!changes || source !== 'edit') return;
 
               const newData = [...tableData];

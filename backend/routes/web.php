@@ -563,7 +563,9 @@ Route::get('/api/receiving/pricing-context', [ReceivingController::class, 'prici
 Route::get('/api/receiving/mills', [ReceivingController::class, 'millList']);
 Route::get('/api/receiving/receiving-report-pdf/{receiptNo}', [\App\Http\Controllers\ReceivingController::class, 'receivingReportPdf']);
 Route::get('/api/receiving/quedan-listing-pdf/{receiptNo}', [ReceivingController::class, 'quedanListingPdf']);
-
+Route::get('/api/receiving/quedan-listing-inssto-pdf/{receiptNo}', [ReceivingController::class, 'quedanListingInsStoPdf']);
+Route::get('/api/receiving/quedan-listing-excel/{receiptNo}', [ReceivingController::class, 'quedanListingExcel']);
+Route::get('/api/receiving/quedan-listing-insurance-storage-excel/{receiptNo?}', [ReceivingController::class, 'quedanListingInsuranceStorageExcel']);
     // Sales Journal
     Route::get('/api/sales/generate-cs-number', [SalesJournalController::class, 'generateCsNumber']);
     Route::post('/api/sales/save-main', [SalesJournalController::class, 'storeMain']);

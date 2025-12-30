@@ -18,6 +18,11 @@ use Illuminate\Support\Facades\Log;
 
 use TCPDF;
 use Illuminate\Support\Facades\Auth;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Border;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
 
 
 class ReceivingController extends Controller
@@ -1723,6 +1728,754 @@ public function quedanListingPdf(Request $req, string $receiptNo)
         ->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         ->header('Pragma', 'no-cache');
 }
+
+
+
+
+// =========================
+// Quedan Listing Insurance/Storage - PDF
+// =========================
+public function quedanListingInsStoPdf(Request $req, string $receiptNo)
+{
+    $companyId = (int) ($req->query('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    // 1) Load receiving entry (scoped)
+    $entry = ReceivingEntry::query()
+        ->where('company_id', $companyId)
+        ->where('receipt_no', $receiptNo)
+        ->firstOrFail();
+
+    // 2) Load PBN context (scoped)
+    $pbn = PbnEntry::query()
+        ->where('company_id', $companyId)
+        ->where('pbn_number', $entry->pbn_number)
+        ->first();
+
+    $sugarType   = strtoupper((string)($pbn?->sugar_type ?? ''));
+    $cropYearRaw = (string)($pbn?->crop_year ?? '');
+
+    // legacy-like crop year display (CY2022-2023)
+    $cropYearDisplay = $cropYearRaw;
+    if ($cropYearDisplay !== '' && strpos($cropYearDisplay, '-') === false) {
+        if (preg_match('/^\d{4}$/', $cropYearDisplay)) {
+            $cropYearDisplay = $cropYearDisplay . '-' . ((int)$cropYearDisplay + 1);
+        }
+    }
+
+    // 3) Load receiving details (quedan lines)
+    $rows = ReceivingDetail::query()
+        ->where('receiving_entry_id', $entry->id)
+        ->where('receipt_no', $entry->receipt_no)
+        ->orderBy('row', 'asc')
+        ->get();
+
+    // 4) Resolve mill prefix + millmark (same approach as regular listing)
+    $millName = (string)($entry->mill ?? '');
+    $millRow = MillList::query()
+        ->where('company_id', $companyId)
+        ->where('mill_name', $millName)
+        ->first();
+
+    $prefix   = (string)($millRow->prefix ?? '');
+    $millMark = $prefix !== '' ? $prefix : $millName;
+
+    // 5) Header company text (legacy)
+    if ($companyId === 2) {
+        $shipper = 'AMEROP PHILIPPINES, INC.';
+        $buyer   = 'AMEROP AMERICAS CORP';
+    } else {
+        $shipper = 'SUCDEN PHILIPPINES, INC.';
+        $buyer   = 'SUCDEN AMERICAS CORP';
+    }
+
+    $currentDate = date('M d, Y');
+
+    // 6) Resolve rates by crop_year (matches your existing logic)
+    $rate = $this->resolveMillRateByCropYear($millName, $companyId, (string)$cropYearRaw);
+    $insuranceRate = $entry->no_insurance ? 0.0 : (float)($rate['insurance_rate'] ?? 0);
+    $storageRate   = $entry->no_storage   ? 0.0 : (float)($rate['storage_rate'] ?? 0);
+    $daysFree      = (int)  ($rate['days_free'] ?? 0);
+
+    // legacy uses receiptDate vs row.weekEnding
+    $receiptDateISO = $entry->receipt_date ? date('Y-m-d', strtotime((string)$entry->receipt_date)) : null;
+
+    // 7) TCPDF setup (same as regular listing)
+    if (!class_exists('\TCPDF', false)) {
+        $tcpdfPath = base_path('vendor/tecnickcom/tcpdf/tcpdf.php');
+        if (file_exists($tcpdfPath)) require_once $tcpdfPath;
+        else abort(500, 'TCPDF not installed. Run: composer require tecnickcom/tcpdf');
+    }
+
+    $pdf = new \TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
+    $pdf->SetPrintHeader(false);
+    $pdf->SetPrintFooter(false);
+    $pdf->SetMargins(3, 5, 3);
+    $pdf->SetAutoPageBreak(true, 10);
+    $pdf->AddPage('P', 'LETTER');
+    $pdf->SetFont('helvetica', '', 7);
+
+    // ---- helpers ----
+    $formatDateMDY = function ($v) {
+        if (!$v) return '';
+        try { return date('m/d/Y', strtotime((string)$v)); } catch (\Throwable $e) { return ''; }
+    };
+
+    // ✅ IMPORTANT: legacy Ins/Storage uses: prefix-000001 (NO sugarType)
+    $formatQuedanNoInsSto = function ($raw) use ($prefix) {
+        $raw = trim((string)$raw);
+
+        // If already formatted "BISCOM-000001" or "XX-000001", keep it
+        if (preg_match('/^[A-Z0-9]+-\d{1,}$/', $raw)) {
+            return $raw;
+        }
+
+        $digits = preg_replace('/\D+/', '', $raw);
+        if ($digits === '') $digits = '0';
+        $num = (int)$digits;
+
+        // legacy pad to 6
+        $pad = str_pad((string)$num, 6, '0', STR_PAD_LEFT);
+        return $prefix . '-' . $pad;
+    };
+
+    $monthsCeilLegacy = function (?string $receiptISO, ?string $weekEndingMDY): int {
+        if (!$receiptISO || !$weekEndingMDY) return 0;
+        $r = strtotime($receiptISO);
+        $w = strtotime($weekEndingMDY);
+        if (!$r || !$w) return 0;
+        $days = (new \DateTime(date('Y-m-d', $r)))->diff(new \DateTime(date('Y-m-d', $w)))->days;
+        return (int) ceil($days / 30);
+    };
+
+    $monthsFloorStorageLegacy = function (?string $receiptISO, ?string $weekEndingMDY, int $daysFree): int {
+        if (!$receiptISO || !$weekEndingMDY) return 0;
+        $r = strtotime($receiptISO);
+        $w = strtotime($weekEndingMDY);
+        if (!$r || !$w) return 0;
+        $days = (new \DateTime(date('Y-m-d', $r)))->diff(new \DateTime(date('Y-m-d', $w)))->days;
+        $days -= $daysFree;
+        if ($days < 0) $days = 0;
+        return (int) floor($days / 30);
+    };
+
+    // 8) Build HTML with legacy paging logic (50 rows/page)
+    $renderHeader = function () use ($shipper, $buyer, $cropYearDisplay, $currentDate, $receiptNo) {
+        return '
+        <tr>
+          <td colspan="10"><font size="8">
+            Shipper:  '.htmlspecialchars($shipper, ENT_QUOTES, 'UTF-8').'<br>
+            Buyer:  '.htmlspecialchars($buyer, ENT_QUOTES, 'UTF-8').'<br>
+            Quedan Listings (CY'.htmlspecialchars($cropYearDisplay, ENT_QUOTES, 'UTF-8').')<br>
+            '.htmlspecialchars($currentDate, ENT_QUOTES, 'UTF-8').'<br>
+            RR No.:  '.htmlspecialchars($receiptNo, ENT_QUOTES, 'UTF-8').'<br>
+          </font></td>
+        </tr>
+        <tr align="center">
+          <td width="15%"><font size="8">MillMark</font></td>
+          <td width="10%"><font size="8">Quedan No.</font></td>
+          <td width="8%"><font size="8">Quantity</font></td>
+          <td width="8%"><font size="8">Liens</font></td>
+          <td width="8%"><font size="8">Insurance</font></td>
+          <td width="8%"><font size="8">Storage</font></td>
+          <td width="8%"><font size="7">Week Ending</font></td>
+          <td width="8%"><font size="8">Date Issued</font></td>
+          <td width="10%"><font size="8">TIN</font></td>
+          <td width="17%" align="left"><font size="8">PLANTER</font></td>
+        </tr>
+        ';
+    };
+
+    $tbl  = '<br><br>';
+    $tbl .= '<table border="0" cellpadding="0" cellspacing="1" nobr="true" width="100%">';
+    $tbl .= $renderHeader();
+
+    $grandQty   = 0.0;
+    $grandLiens = 0.0;
+
+    $pageQty    = 0.0;
+    $pageLiens  = 0.0;
+    $ctr        = 0;
+    $pcs        = 0;
+    $totalPcs   = 0;
+
+    foreach ($rows as $r) {
+        $qty   = (float)($r->quantity ?? 0);
+        $liens = (float)($r->liens ?? 0);
+
+        $weekEndingMDY = $formatDateMDY($r->week_ending);
+        $dateIssuedMDY = $formatDateMDY($r->date_issued);
+
+        // legacy calc uses receipt_date vs weekEnding
+        $monthsIns = $monthsCeilLegacy($receiptDateISO, $weekEndingMDY);
+        $monthsSto = $monthsFloorStorageLegacy($receiptDateISO, $weekEndingMDY, $daysFree);
+
+        $insurance = $qty * $insuranceRate * $monthsIns;
+        $storage   = $qty * $storageRate   * $monthsSto;
+
+        $quedanNo = $formatQuedanNoInsSto($r->quedan_no ?? '');
+
+        $planterTIN  = (string)($r->planter_tin ?? '');
+        $planterName = (string)($r->planter_name ?? '');
+
+        $ctr++;
+        $pcs = $ctr;
+        $totalPcs++;
+
+        $pageQty   += $qty;
+        $pageLiens += $liens;
+
+        $grandQty   += $qty;
+        $grandLiens += $liens;
+
+        $tbl .= '<tr>
+          <td align="center"><font size="8">'.htmlspecialchars($millMark).'</font></td>
+          <td align="center"><font size="8">'.htmlspecialchars($quedanNo).'</font></td>
+          <td align="right"><font size="8">'.number_format($qty, 2).'</font></td>
+          <td align="right"><font size="8">'.number_format($liens, 2).'</font></td>
+          <td align="right"><font size="8">'.number_format($insurance, 2).'</font></td>
+          <td align="right"><font size="8">'.number_format($storage, 2).'</font></td>
+          <td align="center"><font size="8">'.htmlspecialchars($weekEndingMDY).'</font></td>
+          <td align="center"><font size="8">'.htmlspecialchars($dateIssuedMDY).'</font></td>
+          <td align="center"><font size="8">'.htmlspecialchars($planterTIN).'</font></td>
+          <td align="left"><font size="7">'.htmlspecialchars($planterName).'</font></td>
+        </tr>';
+
+        // legacy: page total every 50 rows
+        if (($ctr % 50) === 0) {
+            $tbl .= '<tr>
+              <td align="right"><font size="8">PAGE TOTAL:</font></td>
+              <td align="right"><font size="8">'.(int)$pcs.' PCS.</font></td>
+              <td align="right"><font size="8">'.number_format($pageQty, 2).'</font></td>
+              <td align="right"><font size="8">'.number_format($pageLiens, 2).'</font></td>
+              <td align="right" colspan="6"></td>
+            </tr>';
+
+            $tbl .= '<br pagebreak="true"/>';
+
+            $tbl .= '<tr><td colspan="10"></td></tr>';
+            $tbl .= $renderHeader();
+
+            // reset page totals
+            $pageQty   = 0.0;
+            $pageLiens = 0.0;
+            $ctr = 0;
+        }
+    }
+
+    // final page total + grand total
+    $tbl .= '<tr>
+      <td align="right"><font size="8">PAGE TOTAL:</font></td>
+      <td align="right"><font size="8">'.(int)$pcs.' PCS.</font></td>
+      <td align="right"><font size="8">'.number_format($pageQty, 2).'</font></td>
+      <td align="right"><font size="8">'.number_format($pageLiens, 2).'</font></td>
+      <td align="right" colspan="6"></td>
+    </tr>';
+
+    $tbl .= '<tr>
+      <td align="right"><font size="8">GRAND TOTAL:</font></td>
+      <td align="right"><font size="8">'.(int)$totalPcs.' PCS.</font></td>
+      <td align="right"><font size="8">'.number_format($grandQty, 2).'</font></td>
+      <td align="right"><font size="8">'.number_format($grandLiens, 2).'</font></td>
+      <td align="right" colspan="6"></td>
+    </tr>';
+
+    $tbl .= '</table>';
+
+    $pdf->writeHTML($tbl, true, false, false, false, '');
+
+    $pdfBytes = $pdf->Output('', 'S');
+    $fileName = "quedan-listing-inssto-{$receiptNo}.pdf";
+
+    return response($pdfBytes, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="'.$fileName.'"')
+        ->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        ->header('Pragma', 'no-cache');
+}
+
+
+
+public function quedanListingExcel(Request $req, ?string $receiptNo = null)
+{
+    // ✅ supports both: /.../{receiptNo} and /...?receipt_no=...
+    $receiptNo = (string) ($receiptNo ?: $req->query('receipt_no') ?: '');
+    if ($receiptNo === '') {
+        return response()->json(['message' => 'Missing receipt_no'], 422);
+    }
+
+    $companyId = (int) ($req->query('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    // 1) Load receiving entry (scoped)
+    $entry = ReceivingEntry::query()
+        ->where('company_id', $companyId)
+        ->where('receipt_no', $receiptNo)
+        ->firstOrFail();
+
+    // 2) Load PBN context (scoped)
+    $pbn = PbnEntry::query()
+        ->where('company_id', $companyId)
+        ->where('pbn_number', $entry->pbn_number)
+        ->first();
+
+    $sugarType   = strtoupper((string)($pbn?->sugar_type ?? ''));
+    $cropYearRaw = (string)($pbn?->crop_year ?? '');
+
+    // legacy-like crop year display (CY2022-2023)
+    $cropYearDisplay = $cropYearRaw;
+    if ($cropYearDisplay !== '' && strpos($cropYearDisplay, '-') === false) {
+        if (preg_match('/^\d{4}$/', $cropYearDisplay)) {
+            $cropYearDisplay = $cropYearDisplay . '-' . ((int)$cropYearDisplay + 1);
+        }
+    }
+
+    // 3) Load receiving details (quedan lines)
+    $rows = ReceivingDetail::query()
+        ->where('receiving_entry_id', $entry->id)
+        ->where('receipt_no', $entry->receipt_no)
+        ->orderBy('row', 'asc')
+        ->get();
+
+    // 4) Resolve mill prefix + millmark (same as PDF)
+    $millName = (string)($entry->mill ?? '');
+    $millRow  = MillList::query()
+        ->where('company_id', $companyId)
+        ->where('mill_name', $millName)
+        ->first();
+
+    $prefix   = (string)($millRow->prefix ?? '');
+    $millMark = $prefix !== '' ? $prefix : $millName;
+
+    // 5) Header text by company_id (same as your PDF)
+    $shipper = ($companyId === 2) ? 'AMEROP PHILIPPINES, INC.' : 'SUCDEN PHILIPPINES, INC.';
+    $buyer   = ($companyId === 2) ? 'AMEROP AMERICAS CORP'     : 'SUCDEN AMERICAS CORP';
+    $currentDate = now()->format('M d, Y H:i');
+
+    // 6) Helpers
+    $formatDateMDY = function ($v) {
+        if (!$v) return '';
+        try { return date('m/d/Y', strtotime((string)$v)); } catch (\Throwable $e) { return ''; }
+    };
+
+    // Quedan Listing uses: sugarType + prefix + "-" + 6 digits
+    $formatQuedanNo = function ($raw) use ($sugarType, $prefix) {
+        $raw = trim((string)$raw);
+
+        // if already formatted like "B26-000123" keep it
+        if (preg_match('/^[A-Z].+-\d+$/', $raw)) {
+            return $raw;
+        }
+
+        $digits = preg_replace('/\D+/', '', $raw);
+        if ($digits === '') $digits = '0';
+        $num = (int)$digits;
+
+        $pad = str_pad((string)$num, 6, '0', STR_PAD_LEFT);
+        return $sugarType . $prefix . '-' . $pad;
+    };
+
+    // 7) Spreadsheet setup
+    $spreadsheet = new Spreadsheet();
+    $sheet = $spreadsheet->getActiveSheet();
+    $sheet->setTitle('Quedan Listing');
+
+    // Column widths (8 cols)
+    $sheet->getColumnDimension('A')->setWidth(15); // MillMark
+    $sheet->getColumnDimension('B')->setWidth(20); // Quedan No.
+    $sheet->getColumnDimension('C')->setWidth(15); // Quantity
+    $sheet->getColumnDimension('D')->setWidth(15); // Liens
+    $sheet->getColumnDimension('E')->setWidth(15); // Week Ending
+    $sheet->getColumnDimension('F')->setWidth(15); // Date Issued
+    $sheet->getColumnDimension('G')->setWidth(18); // TIN
+    $sheet->getColumnDimension('H')->setWidth(35); // Planter
+
+    $thinAll = function (string $range) use ($sheet) {
+        $sheet->getStyle($range)->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+    };
+
+    $writeTopHeader = function (int $startRow) use ($sheet, $shipper, $buyer, $cropYearDisplay, $currentDate, $receiptNo) {
+        $sheet->setCellValue("A{$startRow}", "Shipper: {$shipper}");
+        $sheet->mergeCells("A{$startRow}:H{$startRow}");
+        $sheet->getStyle("A{$startRow}")->getFont()->setBold(true)->setSize(10);
+
+        $sheet->setCellValue("A".($startRow+1), "Buyer: {$buyer}");
+        $sheet->mergeCells("A".($startRow+1).":H".($startRow+1));
+        $sheet->getStyle("A".($startRow+1))->getFont()->setBold(true)->setSize(10);
+
+        $sheet->setCellValue("A".($startRow+2), "Quedan Listings (CY{$cropYearDisplay})");
+        $sheet->mergeCells("A".($startRow+2).":H".($startRow+2));
+        $sheet->getStyle("A".($startRow+2))->getFont()->setBold(true)->setSize(10);
+
+        $sheet->setCellValue("A".($startRow+3), $currentDate);
+        $sheet->mergeCells("A".($startRow+3).":H".($startRow+3));
+        $sheet->getStyle("A".($startRow+3))->getFont()->setBold(true)->setSize(10);
+
+        $sheet->setCellValue("A".($startRow+4), "RR No.: {$receiptNo}");
+        $sheet->mergeCells("A".($startRow+4).":H".($startRow+4));
+        $sheet->getStyle("A".($startRow+4))->getFont()->setBold(true)->setSize(10);
+
+        return $startRow + 6; // leaves one blank row
+    };
+
+    $writeColumnHeader = function (int $row) use ($sheet, $thinAll) {
+        $sheet->setCellValue("A{$row}", 'MillMark');
+        $sheet->setCellValue("B{$row}", 'Quedan No.');
+        $sheet->setCellValue("C{$row}", 'Quantity');
+        $sheet->setCellValue("D{$row}", 'Liens');
+        $sheet->setCellValue("E{$row}", 'Week Ending');
+        $sheet->setCellValue("F{$row}", 'Date Issued');
+        $sheet->setCellValue("G{$row}", 'TIN');
+        $sheet->setCellValue("H{$row}", 'Planter');
+
+        $sheet->getStyle("A{$row}:H{$row}")->getFont()->setBold(true);
+        $sheet->getStyle("A{$row}:B{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        $sheet->getStyle("C{$row}:D{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        $sheet->getStyle("E{$row}:H{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+
+        $thinAll("A{$row}:H{$row}");
+        $sheet->freezePane("A".($row+1));
+        return $row + 1;
+    };
+
+    // 8) Write first header + headers row
+    $rowCursor = 1;
+    $rowCursor = $writeTopHeader($rowCursor);
+    $rowCursor = $writeColumnHeader($rowCursor);
+
+    // 9) Legacy paging counters (50 rows/page)
+    $pageCount  = 0;
+    $pcs        = 0;
+    $totalPcs   = 0;
+
+    $pageQty    = 0.0;
+    $pageLiens  = 0.0;
+    $grandQty   = 0.0;
+    $grandLiens = 0.0;
+
+    foreach ($rows as $r) {
+        $qty   = (float)($r->quantity ?? 0);
+        $liens = (float)($r->liens ?? 0);
+
+        $pageCount++; $pcs++; $totalPcs++;
+        $pageQty   += $qty;   $pageLiens += $liens;
+        $grandQty  += $qty;   $grandLiens += $liens;
+
+        $sheet->setCellValue("A{$rowCursor}", $millMark);
+        $sheet->setCellValueExplicit("B{$rowCursor}", $formatQuedanNo($r->quedan_no ?? ''), DataType::TYPE_STRING);
+        $sheet->setCellValue("C{$rowCursor}", $qty);
+        $sheet->setCellValue("D{$rowCursor}", $liens);
+        $sheet->setCellValue("E{$rowCursor}", $formatDateMDY($r->week_ending));
+        $sheet->setCellValue("F{$rowCursor}", $formatDateMDY($r->date_issued));
+        $sheet->setCellValueExplicit("G{$rowCursor}", (string)($r->planter_tin ?? ''), DataType::TYPE_STRING);
+        $sheet->setCellValue("H{$rowCursor}", (string)($r->planter_name ?? ''));
+
+        $sheet->getStyle("C{$rowCursor}:D{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        $rowCursor++;
+
+        // Every 50 rows -> PAGE TOTAL + repeat headers (legacy)
+        if (($pageCount % 50) === 0) {
+            $sheet->setCellValue("A{$rowCursor}", 'PAGE TOTAL:');
+            $sheet->setCellValue("B{$rowCursor}", "{$pcs} PCS.");
+            $sheet->setCellValue("C{$rowCursor}", $pageQty);
+            $sheet->setCellValue("D{$rowCursor}", $pageLiens);
+
+            $sheet->getStyle("A{$rowCursor}:D{$rowCursor}")->getFont()->setBold(true)->setSize(11);
+            $sheet->getStyle("A{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+            $sheet->getStyle("B{$rowCursor}:D{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+
+            $rowCursor++;
+
+            // spacer row
+            $sheet->mergeCells("A{$rowCursor}:H{$rowCursor}");
+            $rowCursor++;
+
+            // repeat header
+            $rowCursor = $writeTopHeader($rowCursor);
+            $rowCursor = $writeColumnHeader($rowCursor);
+
+            // reset page
+            $pageCount = 0;
+            $pcs = 0;
+            $pageQty = 0.0;
+            $pageLiens = 0.0;
+        }
+    }
+
+    // 10) final PAGE TOTAL
+    $sheet->setCellValue("A{$rowCursor}", 'PAGE TOTAL:');
+    $sheet->setCellValue("B{$rowCursor}", "{$pcs} PCS.");
+    $sheet->setCellValue("C{$rowCursor}", $pageQty);
+    $sheet->setCellValue("D{$rowCursor}", $pageLiens);
+    $sheet->getStyle("A{$rowCursor}:D{$rowCursor}")->getFont()->setBold(true)->setSize(11);
+    $sheet->getStyle("A{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+    $sheet->getStyle("B{$rowCursor}:D{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+    $rowCursor++;
+
+    // 11) GRAND TOTAL
+    $sheet->setCellValue("A{$rowCursor}", 'GRAND TOTAL:');
+    $sheet->setCellValue("B{$rowCursor}", "{$totalPcs} PCS.");
+    $sheet->setCellValue("C{$rowCursor}", $grandQty);
+    $sheet->setCellValue("D{$rowCursor}", $grandLiens);
+    $sheet->getStyle("A{$rowCursor}:D{$rowCursor}")->getFont()->setBold(true)->setSize(11);
+    $sheet->getStyle("A{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+    $sheet->getStyle("B{$rowCursor}:D{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+
+    // 12) Output as XLSX (fixes Excel open warning)
+    $filename = "Quedan_Listing_{$receiptNo}.xlsx";
+    $tmpDir = storage_path('app/tmp');
+    if (!is_dir($tmpDir)) { @mkdir($tmpDir, 0775, true); }
+    $path = $tmpDir . '/' . $filename;
+
+    $writer = new Xlsx($spreadsheet);
+    $writer->save($path);
+
+    return response()->download($path, $filename, [
+        'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma' => 'no-cache',
+    ])->deleteFileAfterSend(true);
+}
+
+
+public function quedanListingInsuranceStorageExcel(Request $req, ?string $receiptNo = null)
+{
+    $receiptNo = (string) ($receiptNo ?: $req->query('receipt_no') ?: '');
+    $receiptNo = trim($receiptNo); // ✅ important
+    if ($receiptNo === '') {
+        return response()->json(['message' => 'Missing receipt_no'], 422);
+    }
+
+    $companyId = (int) ($req->query('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    $entry = ReceivingEntry::query()
+        ->where('company_id', $companyId)
+        ->where('receipt_no', $receiptNo)
+        ->firstOrFail();
+
+    $pbn = PbnEntry::query()
+        ->where('company_id', $companyId)
+        ->where('pbn_number', $entry->pbn_number)
+        ->first();
+
+    $sugarType   = strtoupper((string)($pbn?->sugar_type ?? ''));
+    $cropYearRaw = (string)($pbn?->crop_year ?? '');
+
+    $cropYearDisplay = $cropYearRaw;
+    if ($cropYearDisplay !== '' && strpos($cropYearDisplay, '-') === false) {
+        if (preg_match('/^\d{4}$/', $cropYearDisplay)) {
+            $cropYearDisplay = $cropYearDisplay . '-' . ((int)$cropYearDisplay + 1);
+        }
+    }
+
+    $rows = ReceivingDetail::query()
+        ->where('receiving_entry_id', $entry->id)
+        ->where('receipt_no', $entry->receipt_no)
+        ->orderBy('row', 'asc')
+        ->get();
+
+    $millName = (string)($entry->mill ?? '');
+    $millRow  = MillList::query()
+        ->where('company_id', $companyId)
+        ->where('mill_name', $millName)
+        ->first();
+
+    $prefix   = (string)($millRow->prefix ?? '');
+    $millMark = $prefix !== '' ? $prefix : $millName;
+
+    $shipper = ($companyId === 2) ? 'AMEROP PHILIPPINES, INC.' : 'SUCDEN PHILIPPINES, INC.';
+    $buyer   = ($companyId === 2) ? 'AMEROP AMERICAS CORP'     : 'SUCDEN AMERICAS CORP';
+    $currentDate = now()->format('M d, Y H:i');
+
+    $formatDateMDY = function ($v) {
+        if (!$v) return '';
+        try { return date('m/d/Y', strtotime((string)$v)); } catch (\Throwable $e) { return ''; }
+    };
+
+    $formatQuedanNo = function ($raw) use ($sugarType, $prefix) {
+        $raw = trim((string)$raw);
+        if (preg_match('/^[A-Z].+-\d+$/', $raw)) return $raw;
+
+        $digits = preg_replace('/\D+/', '', $raw);
+        if ($digits === '') $digits = '0';
+        $num = (int)$digits;
+
+        return $sugarType . $prefix . '-' . str_pad((string)$num, 6, '0', STR_PAD_LEFT);
+    };
+
+    $spreadsheet = new Spreadsheet();
+    $sheet = $spreadsheet->getActiveSheet();
+    $sheet->setTitle('Quedan Listing');
+
+    // ✅ 11 columns now: A..K
+    $sheet->getColumnDimension('A')->setWidth(15); // MillMark
+    $sheet->getColumnDimension('B')->setWidth(20); // Quedan No.
+    $sheet->getColumnDimension('C')->setWidth(12); // Quantity
+    $sheet->getColumnDimension('D')->setWidth(12); // Liens
+    $sheet->getColumnDimension('E')->setWidth(14); // Week Ending
+    $sheet->getColumnDimension('F')->setWidth(14); // Date Issued
+    $sheet->getColumnDimension('G')->setWidth(18); // TIN
+    $sheet->getColumnDimension('H')->setWidth(35); // Planter
+    $sheet->getColumnDimension('I')->setWidth(12); // Storage
+    $sheet->getColumnDimension('J')->setWidth(12); // Insurance
+    $sheet->getColumnDimension('K')->setWidth(12); // Total AP
+
+    $thinAll = function (string $range) use ($sheet) {
+        $sheet->getStyle($range)->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+    };
+
+    $writeTopHeader = function (int $startRow) use ($sheet, $shipper, $buyer, $cropYearDisplay, $currentDate, $receiptNo) {
+        $sheet->setCellValue("A{$startRow}", "Shipper: {$shipper}");
+        $sheet->mergeCells("A{$startRow}:K{$startRow}");
+        $sheet->getStyle("A{$startRow}")->getFont()->setBold(true)->setSize(10);
+
+        $sheet->setCellValue("A".($startRow+1), "Buyer: {$buyer}");
+        $sheet->mergeCells("A".($startRow+1).":K".($startRow+1));
+        $sheet->getStyle("A".($startRow+1))->getFont()->setBold(true)->setSize(10);
+
+        $sheet->setCellValue("A".($startRow+2), "Quedan Listings (CY{$cropYearDisplay})");
+        $sheet->mergeCells("A".($startRow+2).":K".($startRow+2));
+        $sheet->getStyle("A".($startRow+2))->getFont()->setBold(true)->setSize(10);
+
+        $sheet->setCellValue("A".($startRow+3), $currentDate);
+        $sheet->mergeCells("A".($startRow+3).":K".($startRow+3));
+        $sheet->getStyle("A".($startRow+3))->getFont()->setBold(true)->setSize(10);
+
+        $sheet->setCellValue("A".($startRow+4), "RR No.: {$receiptNo}");
+        $sheet->mergeCells("A".($startRow+4).":K".($startRow+4));
+        $sheet->getStyle("A".($startRow+4))->getFont()->setBold(true)->setSize(10);
+
+        return $startRow + 6;
+    };
+
+    $writeColumnHeader = function (int $row) use ($sheet, $thinAll) {
+        $sheet->setCellValue("A{$row}", 'MillMark');
+        $sheet->setCellValue("B{$row}", 'Quedan No.');
+        $sheet->setCellValue("C{$row}", 'Quantity');
+        $sheet->setCellValue("D{$row}", 'Liens');
+        $sheet->setCellValue("E{$row}", 'Week Ending');
+        $sheet->setCellValue("F{$row}", 'Date Issued');
+        $sheet->setCellValue("G{$row}", 'TIN');
+        $sheet->setCellValue("H{$row}", 'Planter');
+        $sheet->setCellValue("I{$row}", 'Storage');
+        $sheet->setCellValue("J{$row}", 'Insurance');
+        $sheet->setCellValue("K{$row}", 'Total AP');
+
+        $sheet->getStyle("A{$row}:K{$row}")->getFont()->setBold(true);
+        $sheet->getStyle("A{$row}:B{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        $sheet->getStyle("C{$row}:D{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        $sheet->getStyle("E{$row}:H{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        $sheet->getStyle("I{$row}:K{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+
+        $thinAll("A{$row}:K{$row}");
+        $sheet->freezePane("A".($row+1));
+        return $row + 1;
+    };
+
+    $rowCursor = 1;
+    $rowCursor = $writeTopHeader($rowCursor);
+    $rowCursor = $writeColumnHeader($rowCursor);
+
+    // paging counters
+    $pageCount = 0; $pcs = 0; $totalPcs = 0;
+    $pageQty = 0; $pageLiens = 0; $pageSto = 0; $pageIns = 0; $pageAp = 0;
+    $grandQty = 0; $grandLiens = 0; $grandSto = 0; $grandIns = 0; $grandAp = 0;
+
+    foreach ($rows as $r) {
+        $qty = (float)($r->quantity ?? 0);
+        $li  = (float)($r->liens ?? 0);
+        $sto = (float)($r->storage ?? 0);
+        $ins = (float)($r->insurance ?? 0);
+        $ap  = (float)($r->total_ap ?? 0);
+
+        $pageCount++; $pcs++; $totalPcs++;
+        $pageQty += $qty; $pageLiens += $li; $pageSto += $sto; $pageIns += $ins; $pageAp += $ap;
+        $grandQty += $qty; $grandLiens += $li; $grandSto += $sto; $grandIns += $ins; $grandAp += $ap;
+
+        $sheet->setCellValue("A{$rowCursor}", $millMark);
+        $sheet->setCellValueExplicit("B{$rowCursor}", $formatQuedanNo($r->quedan_no ?? ''), DataType::TYPE_STRING);
+        $sheet->setCellValue("C{$rowCursor}", $qty);
+        $sheet->setCellValue("D{$rowCursor}", $li);
+        $sheet->setCellValue("E{$rowCursor}", $formatDateMDY($r->week_ending));
+        $sheet->setCellValue("F{$rowCursor}", $formatDateMDY($r->date_issued));
+        $sheet->setCellValueExplicit("G{$rowCursor}", (string)($r->planter_tin ?? ''), DataType::TYPE_STRING);
+        $sheet->setCellValue("H{$rowCursor}", (string)($r->planter_name ?? ''));
+        $sheet->setCellValue("I{$rowCursor}", $sto);
+        $sheet->setCellValue("J{$rowCursor}", $ins);
+        $sheet->setCellValue("K{$rowCursor}", $ap);
+
+        $sheet->getStyle("C{$rowCursor}:D{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        $sheet->getStyle("I{$rowCursor}:K{$rowCursor}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+
+        $rowCursor++;
+
+        if (($pageCount % 50) === 0) {
+            $sheet->setCellValue("A{$rowCursor}", 'PAGE TOTAL:');
+            $sheet->setCellValue("B{$rowCursor}", "{$pcs} PCS.");
+            $sheet->setCellValue("C{$rowCursor}", $pageQty);
+            $sheet->setCellValue("D{$rowCursor}", $pageLiens);
+            $sheet->setCellValue("I{$rowCursor}", $pageSto);
+            $sheet->setCellValue("J{$rowCursor}", $pageIns);
+            $sheet->setCellValue("K{$rowCursor}", $pageAp);
+
+            $sheet->getStyle("A{$rowCursor}:K{$rowCursor}")->getFont()->setBold(true)->setSize(11);
+            $rowCursor++;
+
+            $sheet->mergeCells("A{$rowCursor}:K{$rowCursor}");
+            $rowCursor++;
+
+            $rowCursor = $writeTopHeader($rowCursor);
+            $rowCursor = $writeColumnHeader($rowCursor);
+
+            $pageCount = 0; $pcs = 0;
+            $pageQty = 0; $pageLiens = 0; $pageSto = 0; $pageIns = 0; $pageAp = 0;
+        }
+    }
+
+    // final PAGE TOTAL
+    $sheet->setCellValue("A{$rowCursor}", 'PAGE TOTAL:');
+    $sheet->setCellValue("B{$rowCursor}", "{$pcs} PCS.");
+    $sheet->setCellValue("C{$rowCursor}", $pageQty);
+    $sheet->setCellValue("D{$rowCursor}", $pageLiens);
+    $sheet->setCellValue("I{$rowCursor}", $pageSto);
+    $sheet->setCellValue("J{$rowCursor}", $pageIns);
+    $sheet->setCellValue("K{$rowCursor}", $pageAp);
+    $sheet->getStyle("A{$rowCursor}:K{$rowCursor}")->getFont()->setBold(true)->setSize(11);
+    $rowCursor++;
+
+    // GRAND TOTAL
+    $sheet->setCellValue("A{$rowCursor}", 'GRAND TOTAL:');
+    $sheet->setCellValue("B{$rowCursor}", "{$totalPcs} PCS.");
+    $sheet->setCellValue("C{$rowCursor}", $grandQty);
+    $sheet->setCellValue("D{$rowCursor}", $grandLiens);
+    $sheet->setCellValue("I{$rowCursor}", $grandSto);
+    $sheet->setCellValue("J{$rowCursor}", $grandIns);
+    $sheet->setCellValue("K{$rowCursor}", $grandAp);
+    $sheet->getStyle("A{$rowCursor}:K{$rowCursor}")->getFont()->setBold(true)->setSize(11);
+
+    $filename = "Quedan_Listing_InsSto_{$receiptNo}.xlsx";
+    $tmpDir = storage_path('app/tmp');
+    if (!is_dir($tmpDir)) { @mkdir($tmpDir, 0775, true); }
+    $path = $tmpDir . '/' . $filename;
+
+    $writer = new Xlsx($spreadsheet);
+    $writer->save($path);
+
+    return response()->download($path, $filename, [
+        'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma' => 'no-cache',
+    ])->deleteFileAfterSend(true);
+}
+
+
 
 
 

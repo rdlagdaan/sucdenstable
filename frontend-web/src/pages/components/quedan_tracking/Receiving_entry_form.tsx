@@ -616,78 +616,120 @@ function useOutsideClick(
   }, [refs, onOutside, enabled]);
 }
 
-const downloadBlob = (blob: Blob, filename: string) => {
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.URL.revokeObjectURL(url);
-};
+
 
 /** ✅ IMPORTANT: these MUST be above exportEndpoints (because exportEndpoints uses addQuery) */
-const apiBase =
-  (napi as any)?.defaults?.baseURL?.replace(/\/$/, '') || '';
+/*const apiBase =
+  (napi as any)?.defaults?.baseURL?.replace(/\/$/, '') || '';*/
 
-const buildApiUrl = (pathWithLeadingSlash: string) => {
+
+/*const buildApiUrl = (pathWithLeadingSlash: string) => {
   if (!pathWithLeadingSlash.startsWith('/')) return pathWithLeadingSlash;
   if (apiBase) return `${apiBase}${pathWithLeadingSlash}`;
   return pathWithLeadingSlash;
-};
+};*/
 
-const addQuery = (path: string, params: Record<string, any>) => {
+/*const addQuery = (path: string, params: Record<string, any>) => {
   const u = new URL(buildApiUrl(path), window.location.origin);
   Object.entries(params).forEach(([k, v]) => {
     if (v === undefined || v === null || v === '') return;
     u.searchParams.set(k, String(v));
   });
   return u.toString();
-};
+};*/
+
+
+
+
 
 // ✅ NOTE: Replace these endpoints with your real backend routes.
 // I’m wiring them in a clean centralized way so you only edit here.
 const exportEndpoints = useMemo(() => {
-  if (!selectedRR) {
+  const rr = (selectedRR || '').trim();   // ✅ ADD THIS LINE HERE
+
+  if (!rr) {
     return {
       dl_quedan_excel: '',
       dl_quedan_inssto_excel: '',
-      pr_quedan_pdf: '',
-      pr_quedan_inssto_pdf: '',
-      pr_receiving_report_pdf: '',
     };
   }
 
-  const common = { company_id: companyId, receipt_no: selectedRR, _: Date.now() };
-
   return {
-    // ✅ Downloads
-    dl_quedan_excel: addQuery('/receiving/quedan-listing-excel', common),
-    dl_quedan_inssto_excel: addQuery('/receiving/quedan-listing-insurance-storage-excel', common),
-
-    // ✅ Prints
-    pr_quedan_pdf: addQuery('/receiving/quedan-listing-pdf', common),
-    pr_quedan_inssto_pdf: addQuery('/receiving/quedan-listing-insurance-storage-pdf', common),
-
-    // ✅ Receiving Report PDF
-    pr_receiving_report_pdf: addQuery(
-      `/receiving/receiving-report-pdf/${encodeURIComponent(selectedRR)}`,
-      { company_id: companyId, _: Date.now() }
-    ),
+    dl_quedan_excel: `/receiving/quedan-listing-excel/${encodeURIComponent(rr)}`,
+    dl_quedan_inssto_excel: `/receiving/quedan-listing-insurance-storage-excel/${encodeURIComponent(rr)}`,
   };
-}, [selectedRR, companyId]);
+}, [selectedRR]);
 
-const doExcelDownload = async (url: string, filename: string) => {
-  if (!selectedRR || !url) return;
+
+
+
+
+/*const getHeader = (headers: any, key: string) => {
+  if (!headers) return '';
+  const foundKey = Object.keys(headers).find((k) => k.toLowerCase() === key.toLowerCase());
+  return foundKey ? String(headers[foundKey] ?? '') : '';
+};
+
+const filenameFromContentDisposition = (cd: string) => {
+  // supports: filename="abc.xlsx" OR filename*=UTF-8''abc.xlsx
+  if (!cd) return '';
+  const m1 = cd.match(/filename\*=\s*UTF-8''([^;]+)/i);
+  if (m1?.[1]) return decodeURIComponent(m1[1].replace(/["']/g, '').trim());
+  const m2 = cd.match(/filename=\s*("?)([^";]+)\1/i);
+  return m2?.[2]?.trim() || '';
+};*/
+
+
+
+const downloadExcelLikePbn = async (path: string, params: Record<string, any>, filename: string) => {
+  if (!path) return;
+
   try {
-    const resp = await napi.get(url, { responseType: 'blob' as any });
-    downloadBlob(resp.data, filename);
+    const resp = await napi.get(path, {
+      params,
+      responseType: 'arraybuffer',
+      withCredentials: true,
+      headers: { Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+      // IMPORTANT: allow handling of non-200 responses as well
+      validateStatus: () => true,
+    });
+
+    const bytes = new Uint8Array(resp.data || []);
+    const isZip = bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b; // "PK"
+
+    // If server returned error HTML/JSON, show it
+    if (!isZip) {
+      const text = new TextDecoder('utf-8').decode(bytes);
+      console.error('Excel download returned NON-XLSX:', {
+        status: resp.status,
+        contentType: resp.headers?.['content-type'],
+        preview: text.slice(0, 800),
+      });
+
+      toast.error(`Download failed (HTTP ${resp.status})`);
+      toast.info(text.slice(0, 200));
+      return;
+    }
+
+    const blob = new Blob([resp.data], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(href);
   } catch (e: any) {
-    console.error(e);
-    toast.error(e?.response?.data?.message || 'Download failed (check export endpoint).');
+    console.error('Excel download hard error:', e);
+    toast.error('Failed to download Excel (request error). See console.');
   }
 };
+
+
 
 
 
@@ -1351,7 +1393,24 @@ const openQuedanListingInsStoPdfModal = async () => {
   }
 };
 
+const closeRrPdfModal = () => {
+  setShowRrPdf(false);
+  if (rrPdfUrl) {
+    URL.revokeObjectURL(rrPdfUrl);
+    setRrPdfUrl('');
+  }
+};
 
+useEffect(() => {
+  if (!showRrPdf) return;
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') closeRrPdfModal();
+  };
+
+  window.addEventListener('keydown', onKey);
+  return () => window.removeEventListener('keydown', onKey);
+}, [showRrPdf, closeRrPdfModal]);
 
 
   // ----------------- UI -----------------
@@ -1916,29 +1975,33 @@ if (prop === 'quedan_no') {
 
 {/* Actions (legacy-style Download + Print dropdowns) */}
 <div className="flex items-center gap-2">
-  <ActionDropdown
-    disabled={!selectedRR}
-    icon={<ArrowDownTrayIcon className="h-5 w-5" />}
-    label="Download"
-    items={[
-      {
-        label: 'Quedan Listing - Excel',
-        onClick: () =>
-          doExcelDownload(
-            exportEndpoints.dl_quedan_excel,
-            `Quedan_Listing_${selectedRR}.xlsx`
-          ),
-      },
-      {
-        label: 'Quedan Listing (Insurance/Storage) - Excel',
-        onClick: () =>
-          doExcelDownload(
-            exportEndpoints.dl_quedan_inssto_excel,
-            `Quedan_Listing_Insurance_Storage_${selectedRR}.xlsx`
-          ),
-      },
-    ]}
-  />
+<ActionDropdown
+  disabled={!selectedRR}
+  icon={<ArrowDownTrayIcon className="h-5 w-5" />}
+  label="Download"
+  items={[
+{
+  label: 'Quedan Listing - Excel',
+  onClick: () =>
+    downloadExcelLikePbn(
+      exportEndpoints.dl_quedan_excel,
+      { company_id: companyId, receipt_no: selectedRR, _: Date.now() },
+      `Quedan_Listing_${selectedRR}.xlsx`
+    ),
+},
+{
+  label: 'Quedan Listing (Insurance/Storage) - Excel',
+  onClick: () =>
+    downloadExcelLikePbn(
+      exportEndpoints.dl_quedan_inssto_excel,
+      { company_id: companyId, receipt_no: selectedRR, _: Date.now() },
+      `Quedan_Listing_Insurance_Storage_${selectedRR}.xlsx`
+    ),
+},
+
+  ]}
+/>
+
 
 <ActionDropdown
   disabled={!selectedRR}
@@ -2049,29 +2112,28 @@ if (prop === 'quedan_no') {
 )}
 
 {showRrPdf && (
-  <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-    <div className="bg-white rounded-lg shadow-lg w-[92vw] h-[92vh] overflow-hidden relative">
+  <div
+    className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+    onMouseDown={closeRrPdfModal}
+  >
+    <div
+      className="bg-white rounded-lg shadow-lg w-[92vw] h-[92vh] overflow-hidden relative"
+      onMouseDown={(e) => e.stopPropagation()}
+    >
       <button
         className="absolute top-3 right-3 px-3 py-1 rounded border bg-white hover:bg-slate-50 z-10"
-        onClick={() => {
-          setShowRrPdf(false);
-          if (rrPdfUrl) URL.revokeObjectURL(rrPdfUrl);
-          setRrPdfUrl('');
-        }}
+        onClick={closeRrPdfModal}
       >
         ✕
       </button>
 
       <div className="h-full pt-0">
-        <iframe
-          title="Receiving Report PDF"
-          src={rrPdfUrl}
-          className="w-full h-full"
-        />
+        <iframe title="Receiving Report PDF" src={rrPdfUrl} className="w-full h-full" />
       </div>
     </div>
   </div>
 )}
+
 
 
     </div>
