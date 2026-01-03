@@ -264,7 +264,10 @@ const companyId = useMemo<number>(() => {
 
       pollRef.current = window.setInterval(async () => {
         try {
-          const { data: s } = await napi.get<JobState>(`trial-balance/report/${t}/status`);
+const { data: s } = await napi.get<JobState>(
+  `trial-balance/report/${t}/status`,
+  { params: { company_id: companyId } }
+);
           setJob(s);
           if (s.status === "done" || s.status === "failed" || s.status === "missing") {
             if (pollRef.current) {
@@ -329,10 +332,16 @@ const companyId = useMemo<number>(() => {
     if (!ticket || !job) return;
     try {
       if (job.format === "pdf") {
-        const res = await napi.get(`trial-balance/report/${ticket}/view`, { responseType: "blob" });
+const res = await napi.get(
+  `trial-balance/report/${ticket}/view`,
+  { responseType: "blob", params: { company_id: companyId } }
+);
         openBlob(res.data);
       } else {
-        const res = await napi.get(`trial-balance/report/${ticket}/download`, { responseType: "blob" });
+const res = await napi.get(
+  `trial-balance/report/${ticket}/download`,
+  { responseType: "blob", params: { company_id: companyId } }
+);
         saveBlob(res.data, getDownloadName());
       }
     } catch (err: any) {
@@ -343,7 +352,10 @@ const companyId = useMemo<number>(() => {
   const downloadFile = async () => {
     if (!ticket || !job) return;
     try {
-      const res = await napi.get(`trial-balance/report/${ticket}/download`, { responseType: "blob" });
+const res = await napi.get(
+  `trial-balance/report/${ticket}/download`,
+  { responseType: "blob", params: { company_id: companyId } }
+);
       saveBlob(res.data, getDownloadName());
     } catch (err: any) {
       setActionError(err?.message ?? "Unable to download file.");

@@ -246,9 +246,11 @@ public function storeMain(Request $req)
             return response()->json(['message' => 'Debit or credit is required.'], 422);
         }
 
-        $exists = AccountCode::where('acct_code', $payload['acct_code'])
-            ->where('active_flag', 1)
-            ->exists();
+$exists = AccountCode::where('acct_code', $payload['acct_code'])
+    ->where('company_id', (int) $payload['company_id'])
+    ->where('active_flag', 1)
+    ->exists();
+
         if (!$exists) return response()->json(['message' => 'Invalid or inactive account.'], 422);
 
         $dup = CashPurchaseDetail::where('transaction_id',$payload['transaction_id'])
@@ -296,6 +298,28 @@ public function storeMain(Request $req)
             if ($d > 0 && $c > 0) return response()->json(['message'=>'Provide either debit OR credit.'], 422);
         }
 
+
+if (array_key_exists('acct_code', $apply) && $apply['acct_code'] !== $detail->acct_code) {
+    $exists = AccountCode::where('acct_code', $apply['acct_code'])
+        ->where('company_id', $companyId)
+        ->where('active_flag', 1)
+        ->exists();
+
+    if (!$exists) {
+        return response()->json(['message' => 'Invalid or inactive account.'], 422);
+    }
+
+    $dup = CashPurchaseDetail::where('transaction_id', $payload['transaction_id'])
+        ->where('acct_code', $apply['acct_code'])
+        ->exists();
+
+    if ($dup) {
+        return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
+    }
+}
+
+
+
         $detail->update($apply);
 
         $totals = $this->recalcTotals($payload['transaction_id']);
@@ -323,14 +347,38 @@ public function storeMain(Request $req)
     }
 
     // Optional main delete
-    public function destroy($id)
-    {
-        $main = CashPurchase::find($id);
-        if (!$main) return response()->json(['message'=>'Not found'], 404);
-        CashPurchaseDetail::where('transaction_id',$id)->delete();
-        $main->delete();
-        return response()->json(['ok'=>true]);
+public function destroy(Request $req, $id)
+{
+    $companyId = (int) ($req->input('company_id') ?? $req->query('company_id') ?? 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'company_id is required.'], 422);
     }
+
+    $main = CashPurchase::where('id', (int)$id)
+        ->where('company_id', $companyId)
+        ->first();
+
+    if (!$main) {
+        return response()->json(['message' => 'Not found'], 404);
+    }
+
+    // Optional: block if cancelled/deleted (your baseline)
+    $this->requireNotCancelledOrDeleted((int)$main->id, $companyId);
+
+    // Optional: require approval if you want delete to be protected
+    // $this->requireApprovedEdit((int)$main->id, $companyId);
+
+    DB::transaction(function () use ($main, $companyId) {
+        CashPurchaseDetail::where('transaction_id', (int)$main->id)
+            ->where('company_id', $companyId)
+            ->delete();
+
+        $main->delete();
+    });
+
+    return response()->json(['ok' => true]);
+}
+
 
     // 6) Show main+details (Search Transaction)
     public function show($id, Request $req)
@@ -340,17 +388,23 @@ public function storeMain(Request $req)
         $main = CashPurchase::when($companyId, fn($q)=>$q->where('company_id',$companyId))
             ->findOrFail($id);
 
-        $details = CashPurchaseDetail::where('transaction_id',$main->id)
-            ->leftJoin('account_code','cash_purchase_details.acct_code','=','account_code.acct_code')
-            ->orderBy('cash_purchase_details.id')
-            ->get([
-                'cash_purchase_details.id',
-                'cash_purchase_details.transaction_id',
-                'cash_purchase_details.acct_code',
-                DB::raw('COALESCE(account_code.acct_desc, \'\') as acct_desc'),
-                'cash_purchase_details.debit',
-                'cash_purchase_details.credit',
-            ]);
+$details = CashPurchaseDetail::from('cash_purchase_details as d')
+    ->where('d.transaction_id', $main->id) // existing
+    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId)) // ✅ ADD HERE
+    ->leftJoin('account_code as a', function ($j) use ($companyId) {
+        $j->on('d.acct_code', '=', 'a.acct_code');
+        if ($companyId) $j->where('a.company_id', $companyId); // optional but recommended
+    })
+    ->orderBy('d.id')
+    ->get([
+        'd.id',
+        'd.transaction_id',
+        'd.acct_code',
+        DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
+        'd.debit',
+        'd.credit',
+    ]);
+
 
         return response()->json(['main'=>$main,'details'=>$details]);
     }
@@ -522,35 +576,54 @@ public function updateCancel(Request $req)
         'flag' => ['required','in:0,1'],
     ]);
     $val = $data['flag'] === '1' ? 'Y' : 'N';   // <-- UPPERCASE
-    CashPurchase::where('id',$data['id'])->update(['is_cancel' => $val]);
+$companyId = (int) ($req->input('company_id') ?? $req->query('company_id'));
+
+CashPurchase::where('id', (int)$data['id'])
+    ->when($companyId, fn($q)=>$q->where('company_id',$companyId))
+    ->update(['is_cancel' => $val]);
     return response()->json(['ok'=>true,'is_cancel'=>$val]);
 }
 
     // 10) Print/Download PDF (unchanged)
 public function formPdf(Request $request, $id)
 {
-    $header = DB::table('cash_purchase as cp')
-        ->leftJoin('vendor_list as v', 'cp.vend_id', '=', 'v.vend_code') // correct mapping
-        ->select(
-            'cp.id','cp.cp_no','cp.vend_id','cp.purchase_amount',
-            'cp.explanation','cp.is_cancel',
-            DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
-            'v.vend_name','cp.workstation_id','cp.user_id','cp.created_at'
-        )
-        ->where('cp.id', $id)
-        ->first();
+ 
+ 
+$companyId = $request->query('company_id');
+
+$header = DB::table('cash_purchase as cp')
+    ->leftJoin('vendor_list as v', function ($j) use ($companyId) {
+        $j->on('cp.vend_id', '=', 'v.vend_code');
+        if ($companyId) $j->where('v.company_id', '=', $companyId);
+    })
+    ->select(
+        'cp.id','cp.cp_no','cp.vend_id','cp.purchase_amount',
+        'cp.explanation','cp.is_cancel',
+        DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
+        DB::raw("COALESCE(v.vend_name,'') as vend_name"),
+        'cp.workstation_id','cp.user_id','cp.created_at'
+    )
+    ->where('cp.id', $id)
+    ->when($companyId, fn($q)=>$q->where('cp.company_id',$companyId))
+    ->first();
+
 
     if (!$header || strtoupper((string)$header->is_cancel) === 'Y') {
         abort(404, 'Purchase Voucher not found or cancelled');
     }
 
-    $details = DB::table('cash_purchase_details as d')
-        ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
-        ->where('d.transaction_id', $id)
-        ->orderBy('d.workstation_id','desc')
-        ->orderBy('d.credit','desc')
-        ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
-        ->get();
+$details = DB::table('cash_purchase_details as d')
+    ->join('account_code as a', function ($j) use ($companyId) {
+        $j->on('d.acct_code', '=', 'a.acct_code');
+        if ($companyId) $j->where('a.company_id', '=', $companyId);
+    })
+    ->where('d.transaction_id', $id)
+    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+    ->orderBy('d.workstation_id','desc')
+    ->orderBy('d.credit','desc')
+    ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
+    ->get();
+
 
     $totalDebit  = (float)$details->sum('debit');
     $totalCredit = (float)$details->sum('credit');
@@ -842,17 +915,26 @@ protected function numberToWords(int $num): string
 
 public function formExcel(Request $request, $id)
 {
+
+$companyId = $request->query('company_id');
+
     // 1) Header (same join logic as PDF — note vend_id ↔ vend_code)
-    $header = DB::table('cash_purchase as cp')
-        ->leftJoin('vendor_list as v', 'cp.vend_id', '=', 'v.vend_code')
-        ->select(
-            'cp.id','cp.cp_no','cp.vend_id','cp.purchase_amount',
-            'cp.explanation','cp.is_cancel',
-            DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
-            'v.vend_name','cp.created_at'
-        )
-        ->where('cp.id', $id)
-        ->first();
+$header = DB::table('cash_purchase as cp')
+    ->leftJoin('vendor_list as v', function ($j) use ($companyId) {
+        $j->on('cp.vend_id', '=', 'v.vend_code');
+        if ($companyId) $j->where('v.company_id', '=', $companyId);
+    })
+    ->select(
+        'cp.id','cp.cp_no','cp.vend_id','cp.purchase_amount',
+        'cp.explanation','cp.is_cancel',
+        DB::raw("to_char(cp.purchase_date, 'MM/DD/YYYY') as purchase_date"),
+        DB::raw("COALESCE(v.vend_name,'') as vend_name"),
+        'cp.created_at'
+    )
+    ->where('cp.id', $id)
+    ->when($companyId, fn($q)=>$q->where('cp.company_id',$companyId))
+    ->first();
+
 
     if (!$header) {
         return response()->json(['message' => 'Purchase voucher not found'], 404);
@@ -866,6 +948,8 @@ public function formExcel(Request $request, $id)
     $details = DB::table('cash_purchase_details as d')
         ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
         ->where('d.transaction_id', $id)
+        ->when($companyId, fn($q) => $q->where('d.company_id', $companyId)) // ✅ ADD HERE
+
         ->orderBy('d.id')
         ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
         ->get();

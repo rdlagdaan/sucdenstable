@@ -11,6 +11,8 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Schema;
+
 use Throwable;
 
 class BuildAccountsReceivableJournal implements ShouldQueue
@@ -19,15 +21,15 @@ class BuildAccountsReceivableJournal implements ShouldQueue
 
     public int $timeout = 900;
 
-    public function __construct(
-        public string $ticket,
-        public string $startDate,
-        public string $endDate,
-        public string $format,       // 'pdf' | 'xls'
-        public ?int $companyId,
-        public ?int $userId,
-        public ?string $query = null
-    ) {}
+public function __construct(
+    public string $ticket,
+    public string $startDate,
+    public string $endDate,
+    public string $format,
+    public int $companyId,
+    public ?string $query = null
+) {}
+
 
     private function key(): string { return "arj:{$this->ticket}"; }
 
@@ -37,124 +39,171 @@ class BuildAccountsReceivableJournal implements ShouldQueue
         Cache::put($this->key(), array_merge($current, $patch), now()->addHours(2));
     }
 
-    private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
-    {
-        $disk = Storage::disk('local');
-        $files = collect($disk->files('reports'))
-            ->filter(fn($p) => str_starts_with(basename($p), 'accounts_receivable_journal_'))
-            ->when($sameFormatOnly, function ($c) use ($keepFile) {
-                $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
-                return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
-            })
-            ->sortByDesc(fn($p) => $disk->lastModified($p))
-            ->slice($keep);
-        $files->each(fn($p) => $disk->delete($p));
-    }
+private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
+{
+    $disk = Storage::disk('local');
 
-    public function handle(): void
-    {
-        $this->patchState([
-            'status'     => 'running',
-            'progress'   => 1,
-            'format'     => $this->format,
-            'file'       => null,
-            'error'      => null,
-            'range'      => [$this->startDate, $this->endDate],
-            'query'      => $this->query,
-            'user_id'    => $this->userId,
-            'company_id' => $this->companyId,
-        ]);
+    $cid = (int) ($this->companyId ?? 0);
+$prefix = "accounts_receivable_journal_c{$cid}_";
 
-        try {
-            $total = DB::table('cash_sales as r')
-                ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
-                ->when($this->query, function ($q) {
-                    $s = "%{$this->query}%";
-                    $q->where(function ($w) use ($s) {
-                        $w->where('r.cs_no','ilike',$s)
-                          ->orWhere('r.booking_no','ilike',$s)
-                          ->orWhere('r.explanation','ilike',$s)
-                          ->orWhere('r.cust_id','ilike',$s)
-                          ->orWhere('r.bank_id','ilike',$s)
-                          ->orWhere('r.si_no','ilike',$s);
-                    });
-                })
-                ->whereBetween('r.sales_date', [$this->startDate, $this->endDate])
-                ->count();
 
-            $step = function (int $done) use ($total) {
-                $pct = $total ? min(99, 1 + (int)floor(($done / max(1,$total)) * 98)) : 50;
-                $this->patchState(['progress' => $pct]);
-            };
+    $files = collect($disk->files('reports'))
+        ->filter(fn($p) => str_starts_with(basename($p), $prefix))
+        ->when($sameFormatOnly, function ($c) use ($keepFile) {
+            $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
+            return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
+        })
+        ->sortByDesc(fn($p) => $disk->lastModified($p))
+        ->slice($keep);
 
-            $dir  = 'reports';
-            $disk = Storage::disk('local');
-            if (!$disk->exists($dir)) $disk->makeDirectory($dir);
+    $files->each(fn($p) => $disk->delete($p));
+}
 
-            $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
-            $path  = $this->format === 'pdf'
-                ? "$dir/accounts_receivable_journal_{ $stamp }.pdf"
-                : "$dir/accounts_receivable_journal_{ $stamp }.xls";
-            $path  = str_replace(' ', '', $path); // safety
 
-            if ($this->format === 'pdf') $this->buildPdf($path, $step);
-            else                         $this->buildExcel($path, $step);
+public function handle(): void
+{
+    $this->patchState([
+        'status'     => 'running',
+        'progress'   => 1,
+        'format'     => $this->format,
+        'file'       => null,
+        'error'      => null,
+        'range'      => [$this->startDate, $this->endDate],
+        'query'      => $this->query,
+        'company_id' => $this->companyId,
+    ]);
 
-            $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);
-
-            $this->patchState(['status'=>'done','progress'=>100,'file'=>$path]);
-        } catch (Throwable $e) {
-            $this->patchState(['status'=>'error','error'=>$e->getMessage()]);
-            throw $e;
+    try {
+        // ✅ Hard requirement: company_id must exist (no unscoped reports)
+        $cid = (int) ($this->companyId ?? 0);
+        if ($cid <= 0) {
+            throw new \RuntimeException('Missing company_id. Refusing to generate unscoped report.');
         }
+
+        $total = DB::table('cash_sales as r')
+            ->where('r.company_id', $cid)
+            ->when($this->query, function ($q) {
+                $s = "%{$this->query}%";
+                $q->where(function ($w) use ($s) {
+                    $w->where('r.cs_no','ilike',$s)
+                      ->orWhere('r.booking_no','ilike',$s)
+                      ->orWhere('r.explanation','ilike',$s)
+                      ->orWhere('r.cust_id','ilike',$s)
+                      ->orWhere('r.bank_id','ilike',$s)
+                      ->orWhere('r.si_no','ilike',$s);
+                });
+            })
+            ->whereBetween('r.sales_date', [$this->startDate, $this->endDate])
+            ->count();
+
+        $step = function (int $done) use ($total) {
+            $pct = $total ? min(99, 1 + (int)floor(($done / max(1,$total)) * 98)) : 50;
+            $this->patchState(['progress' => $pct]);
+        };
+
+        $dir  = 'reports';
+        $disk = Storage::disk('local');
+        if (!$disk->exists($dir)) $disk->makeDirectory($dir);
+
+        $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
+        $ext   = $this->format === 'pdf' ? 'pdf' : 'xls';
+
+        // ✅ Put company/user into filename so cleanup is tenant-safe
+$path = "{$dir}/accounts_receivable_journal_c{$cid}_{$stamp}.{$ext}";
+
+        if ($this->format === 'pdf') $this->buildPdf($path, $step);
+        else                         $this->buildExcel($path, $step);
+
+        // ✅ cleanup only within same company+user+format
+        $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);
+
+        $this->patchState(['status'=>'done','progress'=>100,'file'=>$path]);
+    } catch (Throwable $e) {
+        $this->patchState(['status'=>'error','error'=>$e->getMessage()]);
+        throw $e;
     }
+}
+
 
     /** -------- Writers -------- */
 
-    private function baseQuery()
-    {
-        return DB::table('cash_sales as r')
-            ->selectRaw("
-                r.id,
-                to_char(r.sales_date,'MM/DD/YYYY') as sales_date,
-                r.cs_no,
-                r.si_no,
-                r.cust_id,
-                r.booking_no,
-                r.explanation,
-                b.acct_desc as bank_name,
-                json_agg(json_build_object(
-                    'acct_code', d.acct_code,
-                    'acct_desc', a.acct_desc,
-                    'debit', d.debit,
-                    'credit', d.credit
-                ) ORDER BY d.id) as lines
-            ")
-            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
-            // CAST to avoid varchar/bigint operator error
-            ->join('cash_sales_details as d', function ($j) {
-                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-            })
-            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code');
+private function baseQuery()
+{
+    $cid = (int) ($this->companyId ?? 0);
+
+    // Detect whether tables support company scoping
+    $detailsHasCompany = Schema::hasColumn('cash_sales_details', 'company_id');
+    $acctHasCompany    = Schema::hasColumn('account_code', 'company_id');
+
+    $q = DB::table('cash_sales as r')
+        ->selectRaw("
+            r.id,
+            to_char(r.sales_date,'MM/DD/YYYY') as sales_date,
+            r.cs_no,
+            r.si_no,
+            r.cust_id,
+            r.booking_no,
+            r.explanation,
+            b.acct_desc as bank_name,
+            json_agg(json_build_object(
+                'acct_code', d.acct_code,
+                'acct_desc', a.acct_desc,
+                'debit', d.debit,
+                'credit', d.credit
+            ) ORDER BY d.id) as lines
+        ");
+
+    // Bank account_code join (optionally company scoped)
+    $q->leftJoin('account_code as b', function ($j) use ($acctHasCompany, $cid) {
+        $j->on('b.acct_code', '=', 'r.bank_id');
+        if ($acctHasCompany && $cid > 0) {
+            $j->where('b.company_id', '=', $cid);
+        }
+    });
+
+    // Details join: ✅ add company_id guard if possible
+    $q->join('cash_sales_details as d', function ($j) use ($detailsHasCompany) {
+        $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+        if ($detailsHasCompany) {
+            $j->on('d.company_id', '=', 'r.company_id');
+        }
+    });
+
+    // Line account_code join (optionally company scoped)
+    $q->leftJoin('account_code as a', function ($j) use ($acctHasCompany, $cid) {
+        $j->on('a.acct_code', '=', 'd.acct_code');
+        if ($acctHasCompany && $cid > 0) {
+            $j->where('a.company_id', '=', $cid);
+        }
+    });
+
+    return $q;
+}
+
+private function applyFilters($q)
+{
+    $cid = (int) ($this->companyId ?? 0);
+    if ($cid <= 0) {
+        throw new \RuntimeException('Missing company_id. Refusing to run unscoped query.');
     }
 
-    private function applyFilters($q)
-    {
-        $q->when($this->companyId, fn($x)=>$x->where('r.company_id',$this->companyId))
-          ->when($this->query, function ($x) {
-              $s = "%{$this->query}%";
-              $x->where(function ($w) use ($s) {
-                  $w->where('r.cs_no','ilike',$s)
-                    ->orWhere('r.booking_no','ilike',$s)
-                    ->orWhere('r.explanation','ilike',$s)
-                    ->orWhere('r.cust_id','ilike',$s)
-                    ->orWhere('r.bank_id','ilike',$s)
-                    ->orWhere('r.si_no','ilike',$s);
-              });
-          })
-          ->whereBetween('r.sales_date', [$this->startDate, $this->endDate]);
-        return $q;
-    }
+    $q->where('r.company_id', $cid)
+      ->when($this->query, function ($x) {
+          $s = "%{$this->query}%";
+          $x->where(function ($w) use ($s) {
+              $w->where('r.cs_no','ilike',$s)
+                ->orWhere('r.booking_no','ilike',$s)
+                ->orWhere('r.explanation','ilike',$s)
+                ->orWhere('r.cust_id','ilike',$s)
+                ->orWhere('r.bank_id','ilike',$s)
+                ->orWhere('r.si_no','ilike',$s);
+          });
+      })
+      ->whereBetween('r.sales_date', [$this->startDate, $this->endDate]);
+
+    return $q;
+}
+
 
     private function buildPdf(string $file, callable $progress): void
     {

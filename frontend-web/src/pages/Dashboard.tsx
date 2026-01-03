@@ -16,6 +16,7 @@ const Profile = lazy(() => import('./components/settings/Profile'));
 const Role = lazy(() => import('./components/settings/Role'));
 const Pbn_entry_form = lazy(() => import('./components/quedan_tracking/Pbn_entry_form'));
 const Pbn_posting = lazy(() => import('./components/quedan_tracking/Pbn_posting'));
+const Receiving_posting = lazy(() => import('./components/quedan_tracking/Receiving_posting'));
 
 
 const Receiving_entry_form = lazy(() => import('./components/quedan_tracking/Receiving_entry_form'));
@@ -61,6 +62,7 @@ const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>>
   roles: Role,
   pbn_entry_forms: Pbn_entry_form,
   pbn_posting: Pbn_posting,
+  receiving_posting: Receiving_posting,
 
   receiving_entry_forms: Receiving_entry_form,
   sales_journal_forms: Sales_journal_form,

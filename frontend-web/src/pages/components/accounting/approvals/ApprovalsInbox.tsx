@@ -37,6 +37,9 @@ const perPage = 20;
 
 const [totalPages, setTotalPages] = useState(1);
 
+const [_processPreviewOpen, setProcessPreviewOpen] = useState(false);
+const [_processPreview, setProcessPreview] = useState<any>(null);
+const [_processApprovalId, setProcessApprovalId] = useState<number | null>(null);
 
   const user = useMemo(() => {
     const s = localStorage.getItem('user');
@@ -88,54 +91,268 @@ useEffect(() => {
 }, [page, perPage, statusFilter, search]);
 
 
+/*useEffect(() => {
+  if (processPreviewOpen) {
+    confirmProcessApproval();
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [processPreviewOpen]);*/
+
+
 const handleApprove = async (row: ApprovalRow) => {
   const action = (row.action || '').toUpperCase();
+  const module = (row.subject_type || '').toLowerCase();
 
+  // ✅ Special case: RECEIVING PROCESS must show Purchase Journal preview first
+  if (module === 'receiving_entries' && action === 'PROCESS') {
+    try {
+const res = await napi.get(`/approvals/${row.id}`);
+
+const previewErr = res?.data?.context?.purchase_journal_preview_error;
+if (previewErr) {
+  await Swal.fire({
+    title: 'Purchase Journal preview error',
+    text: previewErr,
+    icon: 'error',
+  });
+  return;
+}
+
+
+const previewObj = res?.data?.context?.purchase_journal_preview;
+
+const lines =
+  previewObj?.lines ??
+  previewObj?.entries ??
+  previewObj?.details ??
+  null;
+
+if (!previewObj || !Array.isArray(lines)) {
+  await Swal.fire({
+    title: 'No Purchase Journal preview found',
+    text: 'Cannot display entries. Please check server logs (Approval show(): buildJournalPreview result).',
+    icon: 'error',
+  });
+  return;
+}
+
+// Normalize so confirmProcessApproval always uses preview.lines
+const normalizedPreview = {
+  ...previewObj,
+  lines,
+};
+
+setProcessApprovalId(row.id);
+setProcessPreview(normalizedPreview);
+
+// ✅ open modal immediately (no state-trigger mystery)
+await confirmProcessApproval(row.id, normalizedPreview);
+
+return;
+
+
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Failed to load Purchase Journal preview.');
+      return;
+    }
+  }
+
+  // ✅ EDIT
   if (action === '' || action === 'EDIT') {
-    // EDIT – ask for edit window in minutes
     const { value: minutes } = await Swal.fire({
       title: `Approve request #${row.id}?`,
       input: 'number',
       inputLabel: 'Set how many minutes this approval will remain valid.',
       inputAttributes: { min: '1', max: '240', step: '1' },
-      inputValue: 60,          // 👈 no row.edit_window_minutes
+      inputValue: 60,
       showCancelButton: true,
     });
 
-    if (minutes === undefined) return; // cancelled
+    if (minutes === undefined) return;
+
     const mins = Math.max(1, Math.min(240, Number(minutes)));
-    await napi.post(`/approvals/${row.id}/approve`, {
-    edit_window_minutes: mins,
-    });
-
 
     await napi.post(`/approvals/${row.id}/approve`, {
-      edit_window_minutes: Number(minutes), // 👈 match backend approve()
+      edit_window_minutes: mins,
     });
-  } else {
-    // CANCEL / DELETE (or any other one-shot action) – no time limit
-    const { isConfirmed } = await Swal.fire({
-      title: `Approve ${action.toLowerCase()} request #${row.id}?`,
-      text:
-        action === 'CANCEL'
-          ? 'This will cancel the transaction.'
-          : action === 'DELETE'
-          ? 'This will permanently delete the transaction.'
-          : 'This request has no edit window.',
-      icon: 'warning',
+
+    toast.success('Request approved.');
+    await load();
+    return;
+  }
+
+  // ✅ One-shot actions (POST, UNPOST, PROCESS (non-receiving), SOFT DELETE, etc.)
+  const { isConfirmed } = await Swal.fire({
+    title: `Approve ${action.toLowerCase()} request #${row.id}?`,
+    text: 'This request has no edit window.',
+    icon: 'warning',
+    showCancelButton: true,
+    confirmButtonText: 'Approve',
+  });
+
+  if (!isConfirmed) return;
+
+  await napi.post(`/approvals/${row.id}/approve`, {});
+  toast.success('Request approved.');
+  await load();
+};
+
+
+const confirmProcessApproval = async (approvalId: number, preview: any) => {
+  const lines = Array.isArray(preview?.lines) ? preview.lines : [];
+  const totals = preview?.totals || {};
+  const balanced = !!totals.balanced;
+
+  const defaultBookingNo = '';
+  //const _defaultExplanation = '';
+
+  // ✅ nicer, guided layout
+  const html = `
+    <div style="text-align:left; font-size:13px;">
+
+      <!-- Totals bar -->
+      <div style="
+        display:flex; align-items:center; justify-content:space-between;
+        padding:10px 12px; border:1px solid #e5e7eb; border-radius:8px;
+        background:#f9fafb; margin-bottom:12px;
+      ">
+        <div>
+          <div style="font-weight:600; margin-bottom:2px;">Totals</div>
+          <div style="color:#374151;">
+            Debit: <b>${totals.debit ?? ''}</b> &nbsp; | &nbsp;
+            Credit: <b>${totals.credit ?? ''}</b>
+          </div>
+        </div>
+
+        <div style="
+          padding:6px 10px; border-radius:999px; font-weight:700;
+          border:1px solid ${balanced ? '#86efac' : '#fca5a5'};
+          background:${balanced ? '#dcfce7' : '#fee2e2'};
+          color:${balanced ? '#166534' : '#991b1b'};
+        ">
+          ${balanced ? 'BALANCED' : 'NOT BALANCED'}
+        </div>
+      </div>
+
+      <!-- Inputs card -->
+      <div style="
+        border:1px solid #e5e7eb; border-radius:8px; padding:12px;
+        margin-bottom:12px; background:#fff;
+      ">
+        <div style="font-weight:700; margin-bottom:10px;">Processing Details</div>
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+          <div>
+            <label style="font-size:12px; color:#374151;">Booking No <span style="color:#6b7280">(optional)</span></label>
+            <input id="bk" class="swal2-input" value="${defaultBookingNo}"
+              placeholder="Booking no"
+              style="margin:6px 0 0 0; width:100%;" />
+          </div>
+          <div></div>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label style="font-size:12px; color:#374151;">
+            Explanation <span style="color:#ef4444">*</span>
+          </label>
+          <textarea id="exp" class="swal2-textarea"
+            placeholder="Write a short explanation for this PROCESS approval..."
+            style="margin:6px 0 0 0; height:95px; width:100%;"></textarea>
+        </div>
+
+        <div style="margin-top:8px; font-size:12px; color:#6b7280;">
+          This will create/update the Purchase Journal based on the preview entries below.
+        </div>
+      </div>
+
+      <!-- Entries table -->
+      <div style="border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;">
+        <div style="padding:10px 12px; background:#f9fafb; border-bottom:1px solid #e5e7eb; font-weight:700;">
+          Journal Entries (Review)
+        </div>
+
+        <div style="max-height:260px; overflow:auto;">
+          <table style="width:100%; border-collapse:collapse; font-size:12px">
+            <thead>
+              <tr style="background:#ffffff; position:sticky; top:0;">
+                <th style="border-bottom:1px solid #eee; padding:8px; text-align:left;">Acct</th>
+                <th style="border-bottom:1px solid #eee; padding:8px; text-align:left;">Description</th>
+                <th style="border-bottom:1px solid #eee; padding:8px; text-align:right;">Debit</th>
+                <th style="border-bottom:1px solid #eee; padding:8px; text-align:right;">Credit</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                lines.map((l:any, idx:number) => `
+                  <tr style="background:${idx % 2 === 0 ? '#ffffff' : '#fafafa'};">
+                    <td style="border-bottom:1px solid #f2f2f2; padding:8px;">${l.acct_code ?? ''}</td>
+                    <td style="border-bottom:1px solid #f2f2f2; padding:8px;">${l.acct_desc ?? ''}</td>
+                    <td style="border-bottom:1px solid #f2f2f2; padding:8px; text-align:right;">${l.debit ?? ''}</td>
+                    <td style="border-bottom:1px solid #f2f2f2; padding:8px; text-align:right;">${l.credit ?? ''}</td>
+                  </tr>
+                `).join('')
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  try {
+    const { isConfirmed, value: formValues } = await Swal.fire({
+      title: `Approve PROCESS #${approvalId}?`,
+      html,
+      width: 980,
       showCancelButton: true,
-      confirmButtonText: 'Approve',
+      confirmButtonText: balanced ? 'Approve' : 'Cannot Approve (Not Balanced)',
+      confirmButtonColor: balanced ? undefined : '#9ca3af',
+
+      preConfirm: () => {
+        const bk = (document.getElementById('bk') as HTMLInputElement)?.value?.trim() || '';
+        const exp = (document.getElementById('exp') as HTMLTextAreaElement)?.value?.trim() || '';
+
+        if (!balanced) return false;
+
+        if (!exp) {
+          Swal.showValidationMessage('Explanation is required.');
+          return false;
+        }
+
+        return {
+          booking_no: bk || null,
+          explanation: exp,
+        };
+      },
+
+      didOpen: () => {
+        const btn = Swal.getConfirmButton();
+        if (btn && !balanced) btn.setAttribute('disabled', 'true');
+
+        // ✅ autofocus explanation to guide user
+        setTimeout(() => {
+          const exp = document.getElementById('exp') as HTMLTextAreaElement | null;
+          exp?.focus();
+        }, 0);
+      },
     });
 
     if (!isConfirmed) return;
 
-    // no minutes sent for CANCEL / DELETE
-    await napi.post(`/approvals/${row.id}/approve`, {});
+    await napi.post(`/approvals/${approvalId}/approve`, formValues || {});
+    toast.success('Request approved.');
+    await load();
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to approve PROCESS.');
+  } finally {
+    // ✅ always cleanup so repeated opens work
+    setProcessPreview(null);
+    setProcessApprovalId(null);
+    setProcessPreviewOpen(false); // safe even if you stop using it
   }
-
-  toast.success('Request approved.');
-  await load();  // 👈 use existing load(), not refresh()
 };
+
+
 
 
 

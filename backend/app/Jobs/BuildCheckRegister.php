@@ -12,27 +12,28 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Schema;
+
 use Throwable;
 
 class BuildCheckRegister implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    /** Abort a long-running job instead of hanging forever. */
     public int $timeout = 900; // 15 minutes
 
     public function __construct(
         public string $ticket,
         public int $month,
         public int $year,
-        public string $format,      // 'pdf' | 'excel'
+        public string $format,      // 'pdf' | 'xls'  (normalized)
         public ?int $companyId,
         public ?int $userId
     ) {}
 
-    /** Consistent cache key (mirrors APJ/CRB style). */
     private function key(): string
     {
+        // controller uses "cr:$ticket"
         return "cr:{$this->ticket}";
     }
 
@@ -42,11 +43,36 @@ class BuildCheckRegister implements ShouldQueue
         Cache::put($this->key(), array_merge($cur, $patch), now()->addHours(2));
     }
 
-    private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
+    private function requireCompanyId(): int
     {
-        $disk = Storage::disk('local');
+        $cid = (int) ($this->companyId ?? 0);
+        if ($cid <= 0) {
+            throw new \RuntimeException('Missing company_id. Refusing to generate unscoped report.');
+        }
+        return $cid;
+    }
+
+    private function normalizeFormat(): string
+    {
+        $fmt = strtolower(trim((string)$this->format));
+        if ($fmt === 'excel' || $fmt === 'xlsx') $fmt = 'xls';
+        if (!in_array($fmt, ['pdf', 'xls'], true)) $fmt = 'pdf';
+        return $fmt;
+    }
+
+    private function filePrefix(int $cid): string
+    {
+        // ✅ tenant-safe prefix
+        return "check_register_c{$cid}_";
+    }
+
+    private function pruneOldReports(string $keepFile, int $cid, bool $sameFormatOnly = true, int $keep = 1): void
+    {
+        $disk   = Storage::disk('local');
+        $prefix = $this->filePrefix($cid);
+
         $files = collect($disk->files('reports'))
-            ->filter(fn($p) => str_starts_with(basename($p), 'check_register_'))
+            ->filter(fn($p) => str_starts_with(basename($p), $prefix))
             ->when($sameFormatOnly, function ($c) use ($keepFile) {
                 $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
                 return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
@@ -59,28 +85,30 @@ class BuildCheckRegister implements ShouldQueue
 
     public function handle(): void
     {
-        // move to running
+        $cid = $this->requireCompanyId();
+        $fmt = $this->normalizeFormat();
+
         $this->patchState([
-            'status'   => 'running',
-            'progress' => 1,
-            'file'     => null,
-            'error'    => null,
-            'period'   => [$this->month, $this->year],
-            'format'   => $this->format,
-            'user_id'  => $this->userId,
-            'company_id' => $this->companyId,
+            'status'     => 'running',
+            'progress'   => 1,
+            'file'       => null,
+            'error'      => null,
+            'period'     => [$this->month, $this->year],
+            'format'     => $fmt,
+            'user_id'    => $this->userId,
+            'company_id' => $cid,
         ]);
 
         try {
             $start = Carbon::create($this->year, $this->month, 1)->startOfDay()->toDateString();
             $end   = Carbon::create($this->year, $this->month, 1)->endOfMonth()->toDateString();
 
+            // ✅ count (tenant-scoped)
             $count = DB::table('cash_disbursement as r')
-                ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
+                ->where('r.company_id', $cid)
                 ->whereBetween('r.disburse_date', [$start, $end])
                 ->count();
 
-            // progress helper (cap at 99 until finalize)
             $step = function (int $done) use ($count) {
                 $pct = $count ? min(99, 1 + (int)floor(($done / max(1, $count)) * 98)) : 50;
                 $this->patchState(['progress' => $pct]);
@@ -88,28 +116,25 @@ class BuildCheckRegister implements ShouldQueue
 
             // ensure reports dir
             $disk = Storage::disk('local');
-            $dir = 'reports';
+            $dir  = 'reports';
             if (!$disk->exists($dir)) {
                 $disk->makeDirectory($dir);
             }
 
-            // unique filename avoids collisions/caching
+            // ✅ tenant-safe filename
             $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
-            $path  = ($this->format === 'pdf')
-                ? "$dir/check_register_{$stamp}.pdf"
-                : "$dir/check_register_{$stamp}.xls";
+            $ext   = ($fmt === 'pdf') ? 'pdf' : 'xls';
+            $path  = "{$dir}/{$this->filePrefix($cid)}{$stamp}.{$ext}";
 
-            // build file
-            if ($this->format === 'pdf') {
-                $this->buildPdf($path, $start, $end, $step);
+            if ($fmt === 'pdf') {
+                $this->buildPdf($path, $cid, $start, $end, $step);
             } else {
-                $this->buildExcel($path, $start, $end, $step);
+                $this->buildExcel($path, $cid, $start, $end, $step);
             }
 
-            // keep only newest for the same format
-            $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);
+            // ✅ prune only within this company prefix
+            $this->pruneOldReports($path, $cid, sameFormatOnly: true, keep: 1);
 
-            // done
             $this->patchState([
                 'status'   => 'done',
                 'progress' => 100,
@@ -117,8 +142,9 @@ class BuildCheckRegister implements ShouldQueue
             ]);
         } catch (Throwable $e) {
             $this->patchState([
-                'status' => 'error',
-                'error'  => $e->getMessage(),
+                'status'   => 'error',
+                'progress' => 100,
+                'error'    => $e->getMessage(),
             ]);
             throw $e;
         }
@@ -127,7 +153,7 @@ class BuildCheckRegister implements ShouldQueue
     /** ---------- Writers ---------- */
 
     /** Build PDF via TCPDF. */
-    private function buildPdf(string $file, string $start, string $end, callable $progress): void
+    private function buildPdf(string $file, int $cid, string $start, string $end, callable $progress): void
     {
         $pdf = new \TCPDF('L','mm','LETTER', true, 'UTF-8', false);
         $pdf->setPrintHeader(false);
@@ -138,8 +164,8 @@ class BuildCheckRegister implements ShouldQueue
         $pdf->setCellHeightRatio(1.0);
         $pdf->SetFont('helvetica', '', 8);
 
-        $monthDesc = \Illuminate\Support\Carbon::parse($start)->isoFormat('MMMM');
-        $yearDesc  = \Illuminate\Support\Carbon::parse($start)->year;
+        $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
+        $yearDesc  = Carbon::parse($start)->year;
 
         $addHeader = function() use ($pdf, $monthDesc, $yearDesc) {
             $pdf->AddPage();
@@ -163,9 +189,7 @@ class BuildCheckRegister implements ShouldQueue
 
         $addHeader();
 
-        $openRowsTable = function() {
-            return '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;line-height:1;"><tbody>';
-        };
+        $openRowsTable = fn() => '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;line-height:1;"><tbody>';
         $rowsHtml = $openRowsTable();
 
         $pageTotal  = 0.0;
@@ -183,11 +207,25 @@ class BuildCheckRegister implements ShouldQueue
                 b.bank_account_number,
                 COALESCE(v.vend_name, r.vend_id) as vend_name
             ")
-            ->leftJoin('bank as b','b.bank_id','=','r.bank_id')
-            ->leftJoin('vendor_list as v','v.vend_code','=','r.vend_id')
-            ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
+            ->leftJoin('bank as b', function ($j) use ($cid) {
+                $j->on('b.bank_id', '=', 'r.bank_id');
+                // If bank is tenant-scoped, prevent cross-company
+                if (Schema::hasColumn('bank', 'company_id')) {
+                    $j->where('b.company_id', '=', $cid);
+                }
+            })
+            ->leftJoin('vendor_list as v', function ($j) use ($cid) {
+                $j->on('v.vend_code', '=', 'r.vend_id');
+                // If vendor_list is tenant-scoped, prevent cross-company
+                if (Schema::hasColumn('vendor_list', 'company_id')) {
+                    $j->where('v.company_id', '=', $cid);
+                }
+            })
+            ->where('r.company_id', $cid)
             ->whereBetween('r.disburse_date', [$start, $end])
-            ->orderBy('r.disburse_date')->orderBy('r.cd_no')
+            // ✅ match legacy: sort by cDNo asc
+            ->orderBy('r.cd_no', 'asc')
+            ->orderBy('r.disburse_date', 'asc')
             ->chunk(300, function($chunk) use (&$rowsHtml, $openRowsTable, $addHeader, $pdf, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
                 foreach ($chunk as $row) {
                     $amt = (float)$row->disburse_amount;
@@ -235,7 +273,6 @@ class BuildCheckRegister implements ShouldQueue
                 }
             });
 
-        // flush remaining rows + totals
         $rowsHtml .= '</tbody></table>';
         $pdf->writeHTML($rowsHtml, true, false, false, false, '');
 
@@ -247,7 +284,6 @@ class BuildCheckRegister implements ShouldQueue
             true, false, false, false, ''
         );
 
-        // Footer
         $pdf->SetY(-16);
         $pdf->writeHTML(
             '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
@@ -264,20 +300,23 @@ class BuildCheckRegister implements ShouldQueue
     }
 
     /** Build Excel via PhpSpreadsheet. */
-    private function buildExcel(string $file, string $start, string $end, callable $progress): void
+    private function buildExcel(string $file, int $cid, string $start, string $end, callable $progress): void
     {
         $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
         $ws = $wb->getActiveSheet();
         $ws->setTitle('Check Register');
 
-        $monthDesc = \Illuminate\Support\Carbon::parse($start)->isoFormat('MMMM');
-        $yearDesc  = \Illuminate\Support\Carbon::parse($start)->year;
+        $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
+        $yearDesc  = Carbon::parse($start)->year;
 
         $r = 1;
         $ws->setCellValue("A{$r}", 'CHECK REGISTER'); $r++;
         $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
+
+        // Keep the same header layout your current sheet expects
         $ws->fromArray(['Date','Check Voucher','Bank Account','Vendor','','Particular','','Check Number','Amount'], null, "A{$r}");
-        $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true); $r++;
+        $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
+        $r++;
 
         foreach (range('A','I') as $col) $ws->getColumnDimension($col)->setWidth(18);
 
@@ -293,11 +332,23 @@ class BuildCheckRegister implements ShouldQueue
                 b.bank_account_number,
                 COALESCE(v.vend_name, r.vend_id) as vend_name
             ")
-            ->leftJoin('bank as b','b.bank_id','=','r.bank_id')
-            ->leftJoin('vendor_list as v','v.vend_code','=','r.vend_id')
-            ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
+            ->leftJoin('bank as b', function ($j) use ($cid) {
+                $j->on('b.bank_id', '=', 'r.bank_id');
+                if (Schema::hasColumn('bank', 'company_id')) {
+                    $j->where('b.company_id', '=', $cid);
+                }
+            })
+            ->leftJoin('vendor_list as v', function ($j) use ($cid) {
+                $j->on('v.vend_code', '=', 'r.vend_id');
+                if (Schema::hasColumn('vendor_list', 'company_id')) {
+                    $j->where('v.company_id', '=', $cid);
+                }
+            })
+            ->where('r.company_id', $cid)
             ->whereBetween('r.disburse_date', [$start, $end])
-            ->orderBy('r.disburse_date')->orderBy('r.cd_no')
+            // ✅ match legacy: sort by cDNo asc
+            ->orderBy('r.cd_no', 'asc')
+            ->orderBy('r.disburse_date', 'asc')
             ->chunk(300, function($chunk) use (&$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
                 foreach ($chunk as $row) {
                     $amt = (float)$row->disburse_amount;
@@ -322,8 +373,11 @@ class BuildCheckRegister implements ShouldQueue
                         $ws->setCellValue("I{$r}", $pageTotal);
                         $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
                         $r += 2;
-                        $linesOnPage = 0; $pageTotal = 0.0;
 
+                        $linesOnPage = 0;
+                        $pageTotal = 0.0;
+
+                        // repeat header like your current behavior
                         $ws->fromArray(['Date','Check Voucher','Bank Account','Vendor','','Particular','','Check Number','Amount'], null, "A{$r}");
                         $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
                         $r++;
@@ -333,7 +387,6 @@ class BuildCheckRegister implements ShouldQueue
                 }
             });
 
-        // final totals
         $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
         $ws->setCellValue("I{$r}", $pageTotal);
         $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00'); $r++;
@@ -344,10 +397,13 @@ class BuildCheckRegister implements ShouldQueue
 
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
         $stream = fopen('php://temp', 'r+');
-        $writer->save($stream); rewind($stream);
+        $writer->save($stream);
+        rewind($stream);
+
         Storage::disk('local')->put($file, stream_get_contents($stream));
+
         fclose($stream);
-        $wb->disconnectWorksheets(); // free memory
+        $wb->disconnectWorksheets();
         unset($writer);
     }
 }

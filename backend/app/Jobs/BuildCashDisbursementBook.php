@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 class BuildCashDisbursementBook implements ShouldQueue
@@ -36,23 +37,59 @@ class BuildCashDisbursementBook implements ShouldQueue
         Cache::put($this->key(), array_merge($cur, $patch), now()->addHours(2));
     }
 
+    /**
+     * Tenant-safe pruning: only within the same company+user prefix
+     */
+    private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
+    {
+        $disk = Storage::disk('local');
+
+        $cid = (int) ($this->companyId ?? 0);
+        $uid = (int) ($this->userId ?? 0);
+
+        // ✅ only delete within same tenant scope
+        $prefix = "cash_disbursement_book_c{$cid}_u{$uid}_";
+
+        $files = collect($disk->files('reports'))
+            ->filter(fn($p) => str_starts_with(basename($p), $prefix))
+            ->when($sameFormatOnly, function ($c) use ($keepFile) {
+                $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
+                return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
+            })
+            ->sortByDesc(fn($p) => $disk->lastModified($p))
+            ->slice($keep);
+
+        $files->each(fn($p) => $disk->delete($p));
+    }
+
     public function handle(): void
     {
         $this->patchState([
-            'status'   => 'running',
-            'progress' => 1,
-            'format'   => $this->format,
-            'file'     => null,
-            'error'    => null,
-            'range'    => [$this->startDate, $this->endDate],
-            'user_id'  => $this->userId,
+            'status'     => 'running',
+            'progress'   => 1,
+            'format'     => $this->format,
+            'file'       => null,
+            'error'      => null,
+            'range'      => [$this->startDate, $this->endDate],
+            'user_id'    => $this->userId,
             'company_id' => $this->companyId,
         ]);
 
+        // ✅ Option A: hard-require company scope
+        $cid = (int) ($this->companyId ?? 0);
+        if ($cid <= 0) {
+            $this->patchState([
+                'status'   => 'error',
+                'progress' => 100,
+                'error'    => 'Missing company scope (companyId=0).',
+            ]);
+            return;
+        }
+
         try {
-            // Pre-count for progress (same filters as data query)
+            // Pre-count for progress (SCOPED)
             $total = DB::table('cash_disbursement as r')
-                ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
+                ->where('r.company_id', $cid)
                 ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
                 ->count();
 
@@ -61,14 +98,16 @@ class BuildCashDisbursementBook implements ShouldQueue
                 $this->patchState(['progress' => $pct]);
             };
 
-            $dir = 'reports';
+            $dir  = 'reports';
             $disk = Storage::disk('local');
             if (!$disk->exists($dir)) $disk->makeDirectory($dir);
 
             $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
-            $path  = $this->format === 'pdf'
-                ? "$dir/cash_disbursement_book_{$stamp}.pdf"
-                : "$dir/cash_disbursement_book_{$stamp}.xls";
+            $ext   = $this->format === 'pdf' ? 'pdf' : 'xls';
+
+            // ✅ tenant-safe filename
+            $uid  = (int) ($this->userId ?? 0);
+            $path = "{$dir}/cash_disbursement_book_c{$cid}_u{$uid}_{$stamp}.{$ext}";
 
             if ($this->format === 'pdf') {
                 $this->buildPdf($path, $step);
@@ -84,30 +123,26 @@ class BuildCashDisbursementBook implements ShouldQueue
                 'file'     => $path,
             ]);
         } catch (Throwable $e) {
-            $this->patchState(['status' => 'error', 'error' => $e->getMessage()]);
+            $this->patchState([
+                'status'   => 'error',
+                'progress' => 100,
+                'error'    => $e->getMessage(),
+            ]);
             throw $e;
         }
-    }
-
-    private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
-    {
-        $disk = Storage::disk('local');
-        $files = collect($disk->files('reports'))
-            ->filter(fn($p) => str_starts_with(basename($p), 'cash_disbursement_book_'))
-            ->when($sameFormatOnly, function ($c) use ($keepFile) {
-                $ext = pathinfo($keepFile, PATHINFO_EXTENSION);
-                return $c->filter(fn($p) => pathinfo($p, PATHINFO_EXTENSION) === $ext);
-            })
-            ->sortByDesc(fn($p) => $disk->lastModified($p))
-            ->slice($keep);
-
-        $files->each(fn($p) => $disk->delete($p));
     }
 
     /** ---------- Writers ---------- */
 
     private function buildPdf(string $file, callable $progress): void
     {
+        $cid = (int) ($this->companyId ?? 0);
+
+        // detect optional company_id columns for safe joins
+        $acctHasCompany   = Schema::hasColumn('account_code', 'company_id');
+        $vendHasCompany   = Schema::hasColumn('vendor_list', 'company_id');
+        $bankAcctHasComp  = $acctHasCompany; // same table
+
         $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
         $pdf->setPrintHeader(false);
         $pdf->setPrintFooter(false);
@@ -146,19 +181,38 @@ class BuildCashDisbursementBook implements ShouldQueue
                 v.vend_name as vend_name,
                 json_agg(json_build_object(
                     'acct_code', d.acct_code,
-                    'acct_desc', a.acct_desc,
+                    'acct_desc', COALESCE(a.acct_desc,''),
                     'debit', d.debit,
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
-            // CAST in case d.transaction_id is VARCHAR
+            // ✅ Bank account join (company-scoped if possible)
+            ->leftJoin('account_code as b', function ($j) use ($cid, $bankAcctHasComp) {
+                $j->on('b.acct_code', '=', 'r.bank_id');
+                if ($bankAcctHasComp) {
+                    $j->where('b.company_id', '=', $cid);
+                }
+            })
+            // ✅ Details join (cast transaction_id)
             ->join('cash_disbursement_details as d', function ($j) {
                 $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
             })
-            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
-            ->leftJoin('vendor_list as v','v.vend_code','=','r.vend_id')
-            ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
+            // ✅ Line account join (company-scoped if possible)
+            ->leftJoin('account_code as a', function ($j) use ($cid, $acctHasCompany) {
+                $j->on('a.acct_code', '=', 'd.acct_code');
+                if ($acctHasCompany) {
+                    $j->where('a.company_id', '=', $cid);
+                }
+            })
+            // ✅ Vendor join (company-scoped if possible)
+            ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
+                $j->on('v.vend_code', '=', 'r.vend_id');
+                if ($vendHasCompany) {
+                    $j->where('v.company_id', '=', $cid);
+                }
+            })
+            // ✅ REQUIRED tenant scope
+            ->where('r.company_id', $cid)
             ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
             ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name')
             ->orderBy('r.id')
@@ -181,6 +235,7 @@ class BuildCashDisbursementBook implements ShouldQueue
                     foreach (json_decode($row->lines, true) as $ln) {
                         $itemDebit  += (float)($ln['debit'] ?? 0);
                         $itemCredit += (float)($ln['credit'] ?? 0);
+
                         $rowsHtml .= sprintf(
                             '<tr>
                                <td>&nbsp;&nbsp;&nbsp;%s</td>
@@ -226,6 +281,12 @@ class BuildCashDisbursementBook implements ShouldQueue
 
     private function buildExcel(string $file, callable $progress): void
     {
+        $cid = (int) ($this->companyId ?? 0);
+
+        // detect optional company_id columns for safe joins
+        $acctHasCompany = Schema::hasColumn('account_code', 'company_id');
+        $vendHasCompany = Schema::hasColumn('vendor_list', 'company_id');
+
         $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
         $ws = $wb->getActiveSheet();
         $ws->setTitle('Cash Disbursement Book');
@@ -242,6 +303,7 @@ class BuildCashDisbursementBook implements ShouldQueue
         foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(15);
 
         $done = 0;
+
         DB::table('cash_disbursement as r')
             ->selectRaw("
                 r.id,
@@ -253,18 +315,33 @@ class BuildCashDisbursementBook implements ShouldQueue
                 v.vend_name as vend_name,
                 json_agg(json_build_object(
                     'acct_code', d.acct_code,
-                    'acct_desc', a.acct_desc,
+                    'acct_desc', COALESCE(a.acct_desc,''),
                     'debit', d.debit,
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
+            ->leftJoin('account_code as b', function ($j) use ($cid, $acctHasCompany) {
+                $j->on('b.acct_code', '=', 'r.bank_id');
+                if ($acctHasCompany) {
+                    $j->where('b.company_id', '=', $cid);
+                }
+            })
             ->join('cash_disbursement_details as d', function ($j) {
                 $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
             })
-            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
-            ->leftJoin('vendor_list as v','v.vend_code','=','r.vend_id')
-            ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
+            ->leftJoin('account_code as a', function ($j) use ($cid, $acctHasCompany) {
+                $j->on('a.acct_code', '=', 'd.acct_code');
+                if ($acctHasCompany) {
+                    $j->where('a.company_id', '=', $cid);
+                }
+            })
+            ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
+                $j->on('v.vend_code', '=', 'r.vend_id');
+                if ($vendHasCompany) {
+                    $j->where('v.company_id', '=', $cid);
+                }
+            })
+            ->where('r.company_id', $cid)
             ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
             ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name')
             ->orderBy('r.id')
@@ -282,12 +359,14 @@ class BuildCashDisbursementBook implements ShouldQueue
                     $ws->setCellValue("B{$r}", $row->explanation); $r++;
 
                     $itemDebit=0; $itemCredit=0;
+
                     foreach (json_decode($row->lines,true) as $ln) {
                         $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
                         $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
                         $ws->setCellValue("F{$r}", (float)($ln['debit'] ?? 0));
                         $ws->setCellValue("G{$r}", (float)($ln['credit'] ?? 0));
                         $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+
                         $itemDebit  += (float)($ln['debit'] ?? 0);
                         $itemCredit += (float)($ln['credit'] ?? 0);
                         $r++;
@@ -305,9 +384,11 @@ class BuildCashDisbursementBook implements ShouldQueue
 
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
         $stream = fopen('php://temp', 'r+');
-        $writer->save($stream); rewind($stream);
+        $writer->save($stream);
+        rewind($stream);
         Storage::disk('local')->put($file, stream_get_contents($stream));
         fclose($stream);
+
         $wb->disconnectWorksheets();
         unset($writer);
     }

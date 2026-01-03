@@ -4,7 +4,7 @@ import napi from '../../../../utils/axiosnapi';
 type Status = {
   status: 'queued' | 'running' | 'done' | 'error';
   progress: number;
-  format: 'pdf' | 'excel';
+  format: 'pdf' | 'xls'; // ✅ normalized like other modules
   file?: string | null;
   error?: string | null;
 };
@@ -28,30 +28,54 @@ export default function CheckRegister() {
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
 
+  // ✅ companyId (same safe pattern as your other modules)
+  const user = (() => {
+    try {
+      const s = localStorage.getItem('user');
+      return s ? JSON.parse(s) : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const companyId =
+    Number(localStorage.getItem('company_id')) ||
+    Number(user?.company_id ?? user?.companyId ?? user?.company?.id) ||
+    0;
+
   useEffect(() => {
     let live = true;
     (async () => {
       try {
         setLoading(true);
+
+        // ✅ enforce company scope for months/years
         const [m, y] = await Promise.all([
-          napi.get('/check-register/months'),
-          napi.get('/check-register/years'),
+          napi.get(`/check-register/months?company_id=${companyId}`),
+          napi.get(`/check-register/years?company_id=${companyId}`),
         ]);
-        const mOpts = (Array.isArray(m.data) ? m.data : []).map((r: MonthRow) => ({
-          value: Number((r as any).month_num),
-          label: String((r as any).month_desc ?? ''),
-        })).filter(o => Number.isFinite(o.value) && o.label);
-        const yOpts = (Array.isArray(y.data) ? y.data : []).map((r: YearRow) => {
-          const val = typeof r === 'number' ? r : (r as any).year;
-          return { value: Number(val), label: String(val) };
-        }).filter(o => Number.isFinite(o.value));
+
+        const mOpts = (Array.isArray(m.data) ? m.data : [])
+          .map((r: MonthRow) => ({
+            value: Number((r as any).month_num),
+            label: String((r as any).month_desc ?? ''),
+          }))
+          .filter(o => Number.isFinite(o.value) && o.label);
+
+        const yOpts = (Array.isArray(y.data) ? y.data : [])
+          .map((r: YearRow) => {
+            const val = typeof r === 'number' ? r : (r as any).year;
+            return { value: Number(val), label: String(val) };
+          })
+          .filter(o => Number.isFinite(o.value));
 
         if (!live) return;
+
         setMonths(mOpts);
         setYears(yOpts);
 
         const now = new Date();
-        if (mOpts.some(o => o.value === now.getMonth()+1)) setMonth(now.getMonth()+1);
+        if (mOpts.some(o => o.value === now.getMonth() + 1)) setMonth(now.getMonth() + 1);
         if (yOpts.some(o => o.value === now.getFullYear())) setYear(now.getFullYear());
       } catch (e) {
         console.error(e);
@@ -61,19 +85,28 @@ export default function CheckRegister() {
       }
     })();
     return () => { live = false; };
-  }, []);
+  }, [companyId]);
 
-  async function begin(format: 'pdf' | 'excel') {
+  async function begin(requested: 'pdf' | 'excel') {
     if (busy || !month || !year) return;
     setBusy(true);
     try {
       const { data } = await napi.post('/check-register/report', {
         month: Number(month),
         year: Number(year),
-        format,
+        format: requested,     // BE will normalize excel->xls
+        company_id: companyId, // ✅ tenant scope
       });
+
       setTicket(data.ticket);
-      setStatus({ status: 'queued', progress: 1, format } as Status);
+
+      // ✅ local optimistic state uses normalized format
+      setStatus({
+        status: 'queued',
+        progress: 1,
+        format: requested === 'pdf' ? 'pdf' : 'xls',
+      });
+
       setShowModal(true);
     } catch (e) {
       console.error(e);
@@ -85,23 +118,32 @@ export default function CheckRegister() {
 
   useEffect(() => {
     if (!ticket) return;
+
     const poll = async () => {
       try {
-        const { data } = await napi.get(`/check-register/report/${ticket}/status`);
+        // ✅ tenant scope on status
+        const { data } = await napi.get<Status>(
+          `/check-register/report/${ticket}/status?company_id=${companyId}`
+        );
         setStatus(data);
+
         if (data.status === 'done' || data.status === 'error') {
           if (pollRef.current) window.clearInterval(pollRef.current);
           pollRef.current = null;
         }
-      } catch {/* ignore transient */ }
+      } catch {
+        /* ignore transient */
+      }
     };
+
     poll();
     pollRef.current = window.setInterval(poll, POLL_MS) as unknown as number;
+
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
       pollRef.current = null;
     };
-  }, [ticket]);
+  }, [ticket, companyId]);
 
   const friendly = () => {
     const m = months.find(x => x.value === month)?.label ?? month;
@@ -110,13 +152,15 @@ export default function CheckRegister() {
     return `CheckRegister_${m}_${y}.${ext}`;
   };
 
-  // ✅ Use axios (napi) with responseType:'blob' like your working APJ
   const download = async () => {
     if (!ticket || !status || status.status !== 'done') return;
     try {
-      const res = await napi.get(`/check-register/report/${ticket}/download`, {
-        responseType: 'blob',
-      });
+      // ✅ tenant scope on download
+      const res = await napi.get(
+        `/check-register/report/${ticket}/download?company_id=${companyId}`,
+        { responseType: 'blob' }
+      );
+
       const url = URL.createObjectURL(res.data);
       const a = document.createElement('a');
       a.href = url;
@@ -131,23 +175,21 @@ export default function CheckRegister() {
     }
   };
 
-  // ✅ Pre-open a blank tab to avoid popup blockers, then stream blob
-const viewPdf = async () => {
-  if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
+  const viewPdf = async () => {
+    if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
 
-  // Hit the same controller endpoint but through `napi` so baseURL=/api and cookies are included.
-  const res = await napi.get(`/check-register/report/${ticket}/view`, { responseType: 'blob' });
+    // ✅ tenant scope on view
+    const res = await napi.get(
+      `/check-register/report/${ticket}/view?company_id=${companyId}`,
+      { responseType: 'blob' }
+    );
 
-  // Force type to be safe, then open the blob in a new tab.
-  const ctype = (res.headers?.['content-type'] as string) || 'application/pdf';
-  const blob  = new Blob([res.data], { type: ctype });
-  const url   = URL.createObjectURL(blob);
+    const ctype = (res.headers?.['content-type'] as string) || 'application/pdf';
+    const blob  = new Blob([res.data], { type: ctype });
+    const url   = URL.createObjectURL(blob);
 
-  window.open(url, '_blank', 'noopener,noreferrer');
-};
-
-
-
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
 
   const onCloseModal = () => {
     if (pollRef.current) window.clearInterval(pollRef.current);
@@ -155,7 +197,11 @@ const viewPdf = async () => {
     setShowModal(false);
   };
 
-  const reset = () => { setTicket(null); setStatus(null); setShowModal(false); };
+  const reset = () => {
+    setTicket(null);
+    setStatus(null);
+    setShowModal(false);
+  };
 
   return (
     <div className="p-4 space-y-4">
@@ -176,9 +222,12 @@ const viewPdf = async () => {
                 onChange={(e) => setMonth(Number(e.target.value))}
               >
                 <option value="">— Select —</option>
-                {months.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                {months.map(m => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
               </select>
             </div>
+
             <div>
               <label className="block text-sm mb-1">Year</label>
               <select
@@ -187,7 +236,9 @@ const viewPdf = async () => {
                 onChange={(e) => setYear(Number(e.target.value))}
               >
                 <option value="">— Select —</option>
-                {years.map(y => <option key={y.value} value={y.value}>{y.label}</option>)}
+                {years.map(y => (
+                  <option key={y.value} value={y.value}>{y.label}</option>
+                ))}
               </select>
             </div>
           </div>
@@ -200,6 +251,7 @@ const viewPdf = async () => {
             >
               Generate
             </button>
+
             <button
               className={`px-4 py-2 rounded border ${busy ? 'opacity-50 cursor-not-allowed' : ''}`}
               onClick={() => begin('excel')}
@@ -226,7 +278,7 @@ const viewPdf = async () => {
             </div>
 
             <div className="mb-2 text-sm">
-              Period: <b>{months.find(m=>m.value===month)?.label ?? month}</b> {year}
+              Period: <b>{months.find(m => m.value === month)?.label ?? month}</b> {year}
             </div>
 
             <Progress value={status?.progress ?? 0} />
@@ -237,8 +289,10 @@ const viewPdf = async () => {
                 {status?.error && <div className="text-red-600 mt-1">{status.error}</div>}
                 {ticket && <div className="text-xs text-gray-500 mt-1">Ticket: {ticket}</div>}
               </div>
+
               <div className="flex gap-2">
                 <button className="px-3 py-2 border rounded" onClick={onCloseModal}>Close</button>
+
                 <button
                   className={`px-3 py-2 rounded ${status?.status === 'done' ? 'bg-blue-600 text-white' : 'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
                   disabled={status?.status !== 'done'}
@@ -246,6 +300,7 @@ const viewPdf = async () => {
                 >
                   Download
                 </button>
+
                 <button
                   className={`px-3 py-2 rounded ${status?.status === 'done' && status?.format === 'pdf' ? 'bg-indigo-600 text-white' : 'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
                   disabled={status?.status !== 'done' || status?.format !== 'pdf'}

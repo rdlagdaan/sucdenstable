@@ -24,7 +24,7 @@ class BuildAccountsPayableJournal implements ShouldQueue
         public string $startDate,
         public string $endDate,
         public string $format,     // 'pdf' | 'xls'
-        public ?int $companyId,
+public int $companyId,
         public ?int $userId,
         public ?string $query = null
     ) {}
@@ -51,10 +51,21 @@ class BuildAccountsPayableJournal implements ShouldQueue
             'company_id' => $this->companyId,
         ]);
 
+$cid = (int) $this->companyId;
+if ($cid <= 0) {
+    $this->patchState([
+        'status'   => 'error',
+        'progress' => 100,
+        'error'    => 'Missing company scope (companyId=0).',
+    ]);
+    return;
+}
+
+
         try {
             // Pre-count for progress
             $total = DB::table('cash_purchase as r')
-                ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
+->where('r.company_id', $cid)
                 ->whereBetween('r.purchase_date', [$this->startDate, $this->endDate])
                 ->when($this->query, function ($q) {
                     $q->where(function ($x) {
@@ -123,235 +134,375 @@ class BuildAccountsPayableJournal implements ShouldQueue
 
     /** ---------- Writers ---------- */
 
-    private function buildPdf(string $file, callable $progress): void
-    {
-        $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetMargins(10, 10, 10);
-        $pdf->SetAutoPageBreak(true, 12);
-        $pdf->setImageScale(1.25);
-        $pdf->SetFont('helvetica', '', 8);
-        $pdf->AddPage();
+private function buildPdf(string $file, callable $progress): void
+{
+    $cid = (int) $this->companyId;
 
-        $hdr = <<<HTML
-          <table width="100%" cellspacing="0" cellpadding="0">
-            <tr><td align="right"><b>SUCDEN PHILIPPINES, INC.</b><br/>
-              <span style="font-size:9px">TIN- 000-105-267-000</span><br/>
-              <span style="font-size:9px">Unit 2202 The Podium West Tower, 12 ADB Ave</span><br/>
-              <span style="font-size:9px">Ortigas Center Mandaluyong City</span></td></tr>
-            <tr><td><hr/></td></tr>
-          </table>
-          <h2>ACCOUNTS PAYABLE JOURNAL</h2>
-          <div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
-          <br/>
-          <table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
-        HTML;
-        $pdf->writeHTML($hdr, true, false, false, false, '');
+    // --- Custom PDF with legacy-like header/footer ---
+    $startDate = $this->startDate;
+    $endDate   = $this->endDate;
 
-        $done = 0;
-        $lineCount = 0;
+    $pdf = new class($startDate, $endDate) extends \TCPDF {
+        public function __construct(public string $startDate, public string $endDate)
+        {
+            parent::__construct('P', 'mm', 'LETTER', true, 'UTF-8', false);
+        }
 
-        DB::table('cash_purchase as r')
-            ->selectRaw("
-                r.id,
-                to_char(r.purchase_date,'MM/DD/YYYY') as purchase_date,
-                r.cp_no,
-                r.rr_no,
-                r.explanation,
-                m.mill_name as mill_name,
-                COALESCE(b.acct_desc, r.bank_id) as bank_name,
-                json_agg(json_build_object(
-                    'acct_code', d.acct_code,
-                    'acct_desc', a.acct_desc,
-                    'debit', d.debit,
-                    'credit', d.credit
-                ) ORDER BY d.id) as lines
-            ")
-            ->leftJoin('mill_list as m','m.mill_id','=','r.mill_id')
-            // If cash_purchase_details.transaction_id is VARCHAR, CAST to BIGINT (safe even if it's already numeric)
-            ->join('cash_purchase_details as d', function ($j) {
-                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-            })
-            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
-            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
-            ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
-            ->whereBetween('r.purchase_date', [$this->startDate, $this->endDate])
-            ->when($this->query, function ($q) {
-                $q->where(function ($x) {
-                    $like = '%'.$this->query.'%';
-                    $x->where('r.cp_no', 'ILIKE', $like)
-                      ->orWhere('r.booking_no', 'ILIKE', $like)
-                      ->orWhere('r.explanation', 'ILIKE', $like)
-                      ->orWhere('r.rr_no', 'ILIKE', $like)
-                      ->orWhere('r.bank_id', 'ILIKE', $like)
-                      ->orWhere('r.vend_id', 'ILIKE', $like)
-                      ->orWhere('r.mill_id', 'ILIKE', $like);
-                });
-            })
-            ->groupBy('r.id','r.purchase_date','r.cp_no','r.rr_no','r.explanation','m.mill_name','b.acct_desc')
-            ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
-                foreach ($chunk as $row) {
-                    $apId = 'ARCP-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+        public function Header()
+        {
+            $this->SetY(10);
+            $htmlHeader = ''
+                . '<table border="0" cellspacing="0" cellpadding="0" width="100%">'
+                . '  <tr><td align="right">'
+                . '    <font size="12"><b>SUCDEN PHILIPPINES, INC.</b></font><br/>'
+                . '    <font size="6">TIN- 000-105-267-000</font><br/>'
+                . '    <font size="6">Unit 2202 The Podium West Tower, 12 ADB Ave</font><br/>'
+                . '    <font size="6">Ortigas Center Mandaluyong City</font>'
+                . '  </td></tr>'
+                . '  <tr><td align="right"><hr/></td></tr>'
+                . '</table>';
 
-                    $block = <<<HTML
-                      <table width="100%" cellspacing="0" cellpadding="1">
-                        <tr><td>{$row->purchase_date}</td><td colspan="6">{$apId}</td></tr>
-                        <tr><td><b>PJ - {$row->cp_no}</b></td><td colspan="6">RR#: {$row->rr_no} &nbsp;&nbsp;&nbsp; {$row->bank_name}</td></tr>
-                        <tr><td colspan="7">{$row->mill_name} — {$row->explanation}</td></tr>
-                      </table>
-                    HTML;
-                    $pdf->writeHTML($block, true, false, false, false, '');
+            $this->writeHTML($htmlHeader, true, false, false, false, '');
+        }
 
-                    $itemDebit=0; $itemCredit=0;
-                    $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+        public function Footer()
+        {
+            $this->SetY(-20);
+            $this->SetFont('helvetica', 'I', 8);
 
-                    foreach (json_decode($row->lines, true) as $ln) {
-                        $itemDebit  += (float)($ln['debit'] ?? 0);
-                        $itemCredit += (float)($ln['credit'] ?? 0);
-                        $rowsHtml .= sprintf(
-                            '<tr>
-                               <td>&nbsp;&nbsp;&nbsp;%s</td>
-                               <td colspan="4">%s</td>
-                               <td align="right">%s</td>
-                               <td align="right">%s</td>
-                             </tr>',
-                            e($ln['acct_code'] ?? ''),
-                            e($ln['acct_desc'] ?? ''),
-                            number_format((float)($ln['debit'] ?? 0), 2),
-                            number_format((float)($ln['credit'] ?? 0), 2)
-                        );
+            $currentDate = date('M d, Y');
+            $currentTime = date('h:i:sa');
 
-                        $lineCount++;
-                        if ($lineCount >= 25) {
-                            $rowsHtml .= '</table>';
-                            $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-                            $pdf->AddPage();
-                            $lineCount = 0;
-                            $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
-                        }
-                    }
+            $htmlFooter = ''
+                . '<table border="0" width="100%">'
+                . '<tr>'
+                . '  <td><font size="8">Print Date:</font></td>'
+                . '  <td><font size="8">' . $currentDate . '</font></td>'
+                . '  <td></td>'
+                . '  <td></td>'
+                . '</tr>'
+                . '<tr>'
+                . '  <td><font size="8">Print Time:</font></td>'
+                . '  <td><font size="8">' . $currentTime . '</font></td>'
+                . '  <td></td>'
+                . '  <td align="right"><font size="8">' . $this->getAliasNumPage() . '/' . $this->getAliasNbPages() . '</font></td>'
+                . '</tr>'
+                . '</table>';
 
-                    $rowsHtml .= sprintf(
-                        '<tr><td></td><td colspan="4"></td>
-                           <td align="right"><b>%s</b></td>
-                           <td align="right"><b>%s</b></td>
-                         </tr>
-                         <tr><td colspan="7"><hr/></td></tr>
-                         <tr><td colspan="7"><br/></td></tr>',
-                        number_format($itemDebit,2),
-                        number_format($itemCredit,2)
-                    );
-                    $rowsHtml .= '</table>';
-                    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+            $this->writeHTML($htmlFooter, true, false, false, false, '');
+        }
+    };
 
-                    $done++; $progress($done);
+    $pdf->SetMargins(10, 35, 10);
+    $pdf->SetAutoPageBreak(true, 20);
+    $pdf->SetFont('helvetica', '', 7);
+    $pdf->AddPage('P', 'LETTER');
+
+    $tbl = <<<HTML
+<table border="0" cellpadding="0" cellspacing="0" nobr="true" width="100%">
+  <tr>
+    <td colspan="7" height="2">
+      <font size="15"><b>ACCOUNTS PAYABLE JOURNAL</b></font><br/>
+      <font size="10"><b>For the period covering {$this->startDate} -- {$this->endDate}</b></font><br/>
+    </td>
+  </tr>
+</table>
+
+<table border="0" cellpadding="0" cellspacing="0" nobr="true" width="100%">
+  <tr><td colspan="7" height="1"><hr/></td></tr>
+  <tr>
+    <td width="70%" colspan="5"></td>
+    <td width="15%" align="right"><font size="10">Debit</font></td>
+    <td width="15%" align="right"><font size="10">Credit</font></td>
+  </tr>
+  <tr><td colspan="7"></td></tr>
+HTML;
+
+    $done = 0;
+    $ctr  = 0;
+    $lctr = 0;
+
+    DB::table('cash_purchase as r')
+        ->selectRaw("
+            r.id,
+            to_char(r.purchase_date,'MM/DD/YYYY') as purchase_date,
+            r.cp_no,
+            r.rr_no,
+            r.explanation,
+
+            (
+                SELECT m2.mill_name
+                FROM mill_list m2
+                WHERE m2.company_id = r.company_id
+                  AND m2.mill_id = r.mill_id
+                ORDER BY m2.id DESC
+                LIMIT 1
+            ) as mill_name,
+
+            COALESCE(b.acct_desc, r.bank_id) as bank_name,
+
+            json_agg(json_build_object(
+                'acct_code', d.acct_code,
+                'acct_desc', COALESCE(a.acct_desc, ''),
+                'debit', d.debit,
+                'credit', d.credit
+            ) ORDER BY d.id) as lines
+        ")
+        ->join('cash_purchase_details as d', function ($j) {
+            $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+        })
+        ->leftJoin('account_code as a', function ($j) use ($cid) {
+            $j->on('a.acct_code', '=', 'd.acct_code')
+              ->where('a.company_id', '=', $cid);
+        })
+        ->leftJoin('account_code as b', function ($j) use ($cid) {
+            $j->on('b.acct_code', '=', 'r.bank_id')
+              ->where('b.company_id', '=', $cid);
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.purchase_date', [$this->startDate, $this->endDate])
+        ->groupBy(
+            'r.id',
+            'r.purchase_date',
+            'r.cp_no',
+            'r.rr_no',
+            'r.explanation',
+            'r.bank_id',
+            'b.acct_desc'
+        )
+        ->orderBy('r.id')
+        ->chunk(200, function ($chunk) use (&$done, $progress, &$tbl, &$ctr, &$lctr, $startDate, $endDate) {
+            foreach ($chunk as $row) {
+                $done++;
+                $progress($done);
+
+                $lines = json_decode($row->lines, true) ?: [];
+
+                $descLine = trim(implode(' - ', array_filter([
+                    $row->rr_no,
+                    $row->mill_name,
+                    $row->bank_name,
+                    $row->explanation
+                ])));
+
+                $tbl .= "
+<tr>
+  <td>{$row->purchase_date}</td>
+  <td colspan=\"6\">{$row->id}</td>
+</tr>
+<tr>
+  <td colspan=\"6\"><b>{$descLine}</b> <u>{$row->cp_no}</u></td>
+  <td></td>
+</tr>
+<tr>
+  <td colspan=\"7\">{$row->rr_no}</td>
+</tr>
+";
+
+                $td = 0; $tc = 0;
+
+                foreach ($lines as $ln) {
+                    $td += $ln['debit'];
+                    $tc += $ln['credit'];
+                    $ctr++;
+
+                    $tbl .= "
+<tr>
+  <td>{$ln['acct_code']}</td>
+  <td colspan=\"4\">{$ln['acct_desc']}</td>
+  <td align=\"right\">".number_format($ln['debit'],2)."</td>
+  <td align=\"right\">".number_format($ln['credit'],2)."</td>
+</tr>
+";
                 }
-            });
 
-        // Write to disk
-        Storage::disk('local')->put($file, $pdf->Output('accounts-payable.pdf', 'S'));
+                $tbl .= "
+<tr>
+  <td colspan=\"5\"></td>
+  <td align=\"right\">".number_format($td,2)."</td>
+  <td align=\"right\">".number_format($tc,2)."</td>
+</tr>
+<tr><td colspan=\"7\"><br/><br/></td></tr>
+";
+
+                $lctr++;
+
+                if ((($lctr % 3) === 0 || ($ctr % 25) === 0) && $ctr !== 0) {
+                    $tbl .= '<br pagebreak="true"/>';
+                    $ctr = 0;
+                    $lctr = 0;
+                }
+            }
+        });
+
+    $tbl .= '</table>';
+    $pdf->writeHTML($tbl, true, false, false, false, '');
+    Storage::disk('local')->put($file, $pdf->Output('accounts-payable.pdf', 'S'));
+}
+
+
+private function buildExcel(string $file, callable $progress): void
+{
+    $cid = (int) $this->companyId;
+
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('Accounts Payable Journal');
+
+    // Header (simple, you can style later like legacy)
+    $r = 1;
+    $ws->setCellValue("A{$r}", 'ACCOUNTS PAYABLE JOURNAL'); $r++;
+    $ws->setCellValue("A{$r}", 'SUCDEN PHILIPPINES, INC.'); $r++;
+    $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
+    $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
+    $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r += 2;
+    $ws->setCellValue("A{$r}", 'ACCOUNTS PAYABLE JOURNAL'); $r++;
+    $ws->setCellValue(
+        "A{$r}",
+        "For the period covering: {$this->startDate} to {$this->endDate}"
+    );
+    $r += 2;
+
+    $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}");
+    $r++;
+
+    foreach (range('A', 'G') as $col) {
+        $ws->getColumnDimension($col)->setWidth(18);
     }
 
-    private function buildExcel(string $file, callable $progress): void
-    {
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('Accounts Payable Journal');
+    $done = 0;
 
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'ACCOUNTS PAYABLE JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", 'SUCDEN PHILIPPINES, INC.'); $r++;
-        $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
-        $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
-        $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r += 2;
-        $ws->setCellValue("A{$r}", 'ACCOUNTS PAYABLE JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
-        $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
+    DB::table('cash_purchase as r')
+        ->selectRaw("
+            r.id,
+            to_char(r.purchase_date,'MM/DD/YYYY') as purchase_date,
+            r.cp_no,
+            r.rr_no,
+            r.explanation,
 
-        foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(15);
+            (
+                SELECT m2.mill_name
+                FROM mill_list m2
+                WHERE m2.company_id = r.company_id
+                  AND m2.mill_id = r.mill_id
+                ORDER BY m2.id DESC
+                LIMIT 1
+            ) as mill_name,
 
-        $done = 0;
-        DB::table('cash_purchase as r')
-            ->selectRaw("
-                r.id,
-                to_char(r.purchase_date,'MM/DD/YYYY') as purchase_date,
-                r.cp_no,
-                r.rr_no,
-                r.explanation,
-                m.mill_name as mill_name,
-                COALESCE(b.acct_desc, r.bank_id) as bank_name,
-                json_agg(json_build_object(
-                    'acct_code', d.acct_code,
-                    'acct_desc', a.acct_desc,
-                    'debit', d.debit,
-                    'credit', d.credit
-                ) ORDER BY d.id) as lines
-            ")
-            ->leftJoin('mill_list as m','m.mill_id','=','r.mill_id')
-            ->join('cash_purchase_details as d', function ($j) {
-                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-            })
-            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
-            ->leftJoin('account_code as b','b.acct_code','=','r.bank_id')
-            ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
-            ->whereBetween('r.purchase_date', [$this->startDate, $this->endDate])
-            ->when($this->query, function ($q) {
-                $q->where(function ($x) {
-                    $like = '%'.$this->query.'%';
-                    $x->where('r.cp_no', 'ILIKE', $like)
-                      ->orWhere('r.booking_no', 'ILIKE', $like)
-                      ->orWhere('r.explanation', 'ILIKE', $like)
-                      ->orWhere('r.rr_no', 'ILIKE', $like)
-                      ->orWhere('r.bank_id', 'ILIKE', $like)
-                      ->orWhere('r.vend_id', 'ILIKE', $like)
-                      ->orWhere('r.mill_id', 'ILIKE', $like);
-                });
-            })
-            ->groupBy('r.id','r.purchase_date','r.cp_no','r.rr_no','r.explanation','m.mill_name','b.acct_desc')
-            ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
-                foreach ($chunk as $row) {
-                    $apId = 'ARCP-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+            COALESCE(b.acct_desc, r.bank_id) as bank_name,
 
-                    $ws->setCellValue("A{$r}", $row->purchase_date);
-                    $ws->setCellValue("B{$r}", $apId); $r++;
-
-                    $ws->setCellValue("A{$r}", "PJ - {$row->cp_no}");
-                    $ws->setCellValue("B{$r}", "RR#: {$row->rr_no} --- {$row->bank_name}"); $r++;
-
-                    $ws->setCellValue("A{$r}", $row->mill_name);
-                    $ws->setCellValue("B{$r}", $row->explanation); $r++;
-
-                    $itemDebit=0; $itemCredit=0;
-                    foreach (json_decode($row->lines,true) as $ln) {
-                        $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
-                        $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                        $ws->setCellValue("F{$r}", (float)($ln['debit'] ?? 0));
-                        $ws->setCellValue("G{$r}", (float)($ln['credit'] ?? 0));
-                        $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                        $itemDebit  += (float)($ln['debit'] ?? 0);
-                        $itemCredit += (float)($ln['credit'] ?? 0);
-                        $r++;
-                    }
-
-                    $ws->setCellValue("E{$r}", 'TOTAL');
-                    $ws->setCellValue("F{$r}", $itemDebit);
-                    $ws->setCellValue("G{$r}", $itemCredit);
-                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                    $r += 2;
-
-                    $done++; $progress($done);
-                }
+            json_agg(json_build_object(
+                'acct_code', d.acct_code,
+                'acct_desc', COALESCE(a.acct_desc, ''),
+                'debit', d.debit,
+                'credit', d.credit
+            ) ORDER BY d.id) as lines
+        ")
+        ->join('cash_purchase_details as d', function ($j) {
+            $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+        })
+        ->leftJoin('account_code as a', function ($j) use ($cid) {
+            $j->on('a.acct_code', '=', 'd.acct_code')
+              ->where('a.company_id', '=', $cid);
+        })
+        ->leftJoin('account_code as b', function ($j) use ($cid) {
+            $j->on('b.acct_code', '=', 'r.bank_id')
+              ->where('b.company_id', '=', $cid);
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.purchase_date', [$this->startDate, $this->endDate])
+        ->when($this->query, function ($q) {
+            $q->where(function ($x) {
+                $like = '%' . $this->query . '%';
+                $x->where('r.cp_no', 'ILIKE', $like)
+                  ->orWhere('r.booking_no', 'ILIKE', $like)
+                  ->orWhere('r.explanation', 'ILIKE', $like)
+                  ->orWhere('r.rr_no', 'ILIKE', $like)
+                  ->orWhere('r.bank_id', 'ILIKE', $like)
+                  ->orWhere('r.vend_id', 'ILIKE', $like)
+                  ->orWhere('r.mill_id', 'ILIKE', $like);
             });
+        })
+        ->groupBy(
+            'r.id',
+            'r.purchase_date',
+            'r.cp_no',
+            'r.rr_no',
+            'r.explanation',
+            'r.bank_id',
+            'b.acct_desc'
+        )
+        ->orderBy('r.id')
+        ->chunk(200, function ($chunk) use (&$r, $ws, &$done, $progress) {
+            foreach ($chunk as $row) {
+                $done++;
+                $progress($done);
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream); rewind($stream);
-        Storage::disk('local')->put($file, stream_get_contents($stream));
-        fclose($stream);
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+                $lines = json_decode($row->lines, true) ?: [];
+
+                $descLine = trim(implode(' - ', array_filter([
+                    $row->rr_no,
+                    $row->mill_name,
+                    $row->bank_name,
+                    $row->explanation
+                ])));
+
+                // Entry header rows (legacy-like)
+                $ws->setCellValue("A{$r}", $row->purchase_date);
+                $ws->setCellValue("B{$r}", $row->id);
+                $r++;
+
+                $ws->setCellValue("A{$r}", $descLine);
+                $ws->setCellValue("B{$r}", $row->cp_no);
+                $r++;
+
+                $ws->setCellValue("A{$r}", $row->rr_no);
+                $r++;
+
+                $itemTotalDebit  = 0.0;
+                $itemTotalCredit = 0.0;
+
+                foreach ($lines as $ln) {
+                    $debit  = (float) ($ln['debit'] ?? 0);
+                    $credit = (float) ($ln['credit'] ?? 0);
+
+                    $itemTotalDebit  += $debit;
+                    $itemTotalCredit += $credit;
+
+                    $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
+                    $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
+                    $ws->setCellValue("F{$r}", $debit);
+                    $ws->setCellValue("G{$r}", $credit);
+                    $ws->getStyle("F{$r}:G{$r}")
+                        ->getNumberFormat()
+                        ->setFormatCode('#,##0.00');
+                    $r++;
+                }
+
+                // Totals per entry
+                $ws->setCellValue("E{$r}", "TOTAL");
+                $ws->setCellValue("F{$r}", $itemTotalDebit);
+                $ws->setCellValue("G{$r}", $itemTotalCredit);
+                $ws->getStyle("F{$r}:G{$r}")
+                    ->getNumberFormat()
+                    ->setFormatCode('#,##0.00');
+
+                $r += 2;
+            }
+        });
+
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream);
+    rewind($stream);
+    Storage::disk('local')->put($file, stream_get_contents($stream));
+    fclose($stream);
+
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
+
+
+
+
 }

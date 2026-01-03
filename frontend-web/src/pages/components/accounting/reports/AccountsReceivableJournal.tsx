@@ -21,16 +21,41 @@ export default function AccountsReceivableJournal() {
   const [busy, setBusy]           = useState(false);
   const pollRef = useRef<number|null>(null);
 
+  const user = (() => {
+  try {
+    const s = localStorage.getItem('user');
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
+  })();
+
+const companyId =
+  Number(localStorage.getItem('company_id')) ||
+  Number(user?.company_id ?? user?.companyId ?? user?.company?.id) ||
+  0;
+
+
+
+
   const begin = async (requested: 'pdf'|'excel') => {
     if (busy) return;
     setBusy(true);
     try {
-      const { data } = await napi.post('/accounts-receivable/report', {
-        start_date: startDate,
-        end_date: endDate,
-        format: requested,            // BE normalizes excel->xls
-        query: searchTerm || undefined,
-      });
+if (!companyId) {
+  alert('Missing company_id. Please re-login.');
+  setBusy(false);
+  return;
+}
+
+const { data } = await napi.post('/accounts-receivable/report', {
+  start_date: startDate,
+  end_date: endDate,
+  format: requested,
+  query: searchTerm || undefined,
+  company_id: companyId,
+});
+
       setTicket(data.ticket);
       setStatus({ status: 'queued', progress: 1, format: requested === 'pdf' ? 'pdf' : 'xls' } as Status);
       setShowModal(true);
@@ -46,13 +71,30 @@ export default function AccountsReceivableJournal() {
     if (!ticket) return;
     const poll = async () => {
       try {
-        const { data } = await napi.get(`/accounts-receivable/report/${ticket}/status`);
+const { data } = await napi.get(
+  `/accounts-receivable/report/${ticket}/status?company_id=${companyId}`
+);
         setStatus(data);
         if (data.status === 'done' || data.status === 'error') {
           if (pollRef.current) window.clearInterval(pollRef.current);
           pollRef.current = null;
         }
-      } catch {}
+} catch (e: any) {
+  setStatus({
+    status: 'error',
+    progress: 100,
+    format: status?.format ?? 'pdf',
+    error:
+      e?.response?.data?.error ||
+      e?.response?.data?.message ||
+      e?.message ||
+      'Polling failed',
+  });
+  if (pollRef.current) {
+    window.clearInterval(pollRef.current);
+    pollRef.current = null;
+  }
+}
     };
     poll();
     pollRef.current = window.setInterval(poll, 1500) as unknown as number;
@@ -61,7 +103,10 @@ export default function AccountsReceivableJournal() {
 
   const download = async () => {
     if (!ticket || !status || status.status !== 'done') return;
-    const res = await napi.get(`/accounts-receivable/report/${ticket}/download`, { responseType: 'blob' });
+const res = await napi.get(
+  `/accounts-receivable/report/${ticket}/download?company_id=${companyId}`,
+  { responseType: 'blob' }
+);
     const url = URL.createObjectURL(res.data);
     const a = document.createElement('a');
     a.href = url;
@@ -72,7 +117,10 @@ export default function AccountsReceivableJournal() {
 
   const viewPdf = async () => {
     if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
-    const res = await napi.get(`/accounts-receivable/report/${ticket}/view`, { responseType: 'blob' });
+const res = await napi.get(
+  `/accounts-receivable/report/${ticket}/view?company_id=${companyId}`,
+  { responseType: 'blob' }
+);
     const url = URL.createObjectURL(res.data);
     window.open(url, '_blank', 'noopener,noreferrer');
   };
@@ -113,7 +161,18 @@ export default function AccountsReceivableJournal() {
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-5">
             <div className="flex items-center justify-between mb-3">
               <div className="font-semibold">{status?.format === 'pdf' ? 'Generating PDF…' : 'Generating Excel…'}</div>
-              <button className="text-gray-500" onClick={()=>setShowModal(false)}>✕</button>
+<button
+  className="text-gray-500"
+  onClick={() => {
+    setShowModal(false);
+    if (pollRef.current) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }}
+>
+  ✕
+</button>
             </div>
             <div className="mb-2 text-sm">
               Range: <b>{startDate}</b> to <b>{endDate}</b>

@@ -135,9 +135,11 @@ class CashDisbursementController extends Controller
         $main = CashDisbursement::create($data);
 
         // Auto-create BANK line if we can resolve bank acct from account_code.bank_id
-        $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
-            ->where('active_flag', 1)
-            ->first(['acct_code']);
+$bankAcct = AccountCode::where('bank_id', $data['bank_id'])
+    ->where('company_id', (int) $data['company_id'])
+    ->where('active_flag', 1)
+    ->first(['acct_code']);
+
         if ($bankAcct) {
             CashDisbursementDetail::create([
                 'transaction_id' => $main->id,
@@ -180,8 +182,11 @@ $this->requireApprovedEdit($txId, $companyId ? (int)$companyId : null);
             return response()->json(['message'=>'Debit or credit is required.'], 422);
         }
 
-        $exists = AccountCode::where('acct_code',$payload['acct_code'])
-            ->where('active_flag',1)->exists();
+$exists = AccountCode::where('acct_code', $payload['acct_code'])
+    ->where('company_id', (int) $companyId)
+    ->where('active_flag', 1)
+    ->exists();
+
         if (!$exists) return response()->json(['message'=>'Invalid or inactive account.'], 422);
 
         $dup = CashDisbursementDetail::where('transaction_id',$payload['transaction_id'])
@@ -238,8 +243,11 @@ $this->requireApprovedEdit($txId, $companyId ? (int)$companyId : null);
         }
 
         if (array_key_exists('acct_code',$apply) && $apply['acct_code'] !== $detail->acct_code) {
-            $exists = AccountCode::where('acct_code',$apply['acct_code'])
-                ->where('active_flag',1)->exists();
+$exists = AccountCode::where('acct_code', $apply['acct_code'])
+    ->where('company_id', (int) $companyId)
+    ->where('active_flag', 1)
+    ->exists();
+
             if (!$exists) return response()->json(['message'=>'Invalid or inactive account.'], 422);
             $dup = CashDisbursementDetail::where('transaction_id',$payload['transaction_id'])
                 ->where('acct_code',$apply['acct_code'])->exists();
@@ -289,28 +297,36 @@ public function destroy($id)
 
 
     // === Show header + details ===
-    public function show($id, Request $req)
-    {
-        $companyId = $req->query('company_id');
+public function show($id, Request $req)
+{
+    $companyId = $req->query('company_id');
 
-        $main = CashDisbursement::when($companyId, fn($q)=>$q->where('company_id',$companyId))
-            ->findOrFail($id);
+    $main = CashDisbursement::when($companyId, fn($q)=>$q->where('company_id',$companyId))
+        ->findOrFail($id);
 
-        $details = CashDisbursementDetail::where('transaction_id',$main->id)
-            ->leftJoin('account_code','cash_disbursement_details.acct_code','=','account_code.acct_code')
-            ->orderBy('cash_disbursement_details.id')
-            ->get([
-                'cash_disbursement_details.id',
-                'cash_disbursement_details.transaction_id',
-                'cash_disbursement_details.acct_code',
-                DB::raw('COALESCE(account_code.acct_desc, \'\') as acct_desc'),
-                'cash_disbursement_details.debit',
-                'cash_disbursement_details.credit',
-                'cash_disbursement_details.workstation_id',
-            ]);
+    $details = CashDisbursementDetail::from('cash_disbursement_details as d')
+        ->where('d.transaction_id', $main->id)
+        ->when($companyId, fn($q)=>$q->where('d.company_id', $companyId))
+        ->leftJoin('account_code as a', function ($j) use ($companyId) {
+            $j->on('d.acct_code', '=', 'a.acct_code');
+            if ($companyId) {
+                $j->where('a.company_id', '=', $companyId);
+            }
+        })
+        ->orderBy('d.id')
+        ->get([
+            'd.id',
+            'd.transaction_id',
+            'd.acct_code',
+            DB::raw("COALESCE(a.acct_desc, '') as acct_desc"),
+            'd.debit',
+            'd.credit',
+            'd.workstation_id',
+        ]);
 
-        return response()->json(['main'=>$main,'details'=>$details]);
-    }
+    return response()->json(['main'=>$main,'details'=>$details]);
+}
+
 
     // === List (for Search Transaction) ===
 public function list(Request $req)
@@ -497,11 +513,15 @@ public function updateCancel(Request $req)
 
         $headerQ = DB::table('cash_disbursement as d');
 
-        if ($vendKey) {
-            $headerQ->leftJoin('vendor_list as v', function ($j) use ($vendKey) {
-                $j->on('d.vend_id', '=', 'v.'.$vendKey);
-            });
-        }
+$companyId = $req->query('company_id');
+
+if ($vendKey) {
+    $headerQ->leftJoin('vendor_list as v', function ($j) use ($vendKey, $companyId) {
+        $j->on('d.vend_id', '=', 'v.'.$vendKey);
+        if ($companyId) $j->where('v.company_id', '=', $companyId);
+    });
+}
+
 
         $header = $headerQ
             ->select(
@@ -511,20 +531,28 @@ public function updateCancel(Request $req)
                 DB::raw($vendKey ? "COALESCE(v.vend_name,'') as vend_name" : "'' as vend_name"),
                 'd.amount_in_words','d.workstation_id','d.user_id','d.created_at'
             )
-            ->where('d.id', $id)
-            ->first();
+    ->where('d.id', $id)
+    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+    ->first();
 
         if (!$header || $header->is_cancel === 'y') {
             abort(404, 'Cash Disbursement not found or cancelled');
         }
 
-        $details = DB::table('cash_disbursement_details as x')
-            ->join('account_code as a','x.acct_code','=','a.acct_code')
-            ->where('x.transaction_id',$id)
-            ->orderBy('x.workstation_id','desc') // BANK row first
-            ->orderBy('x.credit','desc')
-            ->select('x.acct_code','a.acct_desc','x.debit','x.credit')
-            ->get();
+$companyId = $req->query('company_id');
+
+$details = DB::table('cash_disbursement_details as x')
+    ->join('account_code as a', function ($j) use ($companyId) {
+        $j->on('x.acct_code', '=', 'a.acct_code');
+        if ($companyId) $j->where('a.company_id', '=', $companyId);
+    })
+    ->where('x.transaction_id', $id)
+    ->when($companyId, fn($q) => $q->where('x.company_id', $companyId))
+    ->orderBy('x.workstation_id','desc')
+    ->orderBy('x.credit','desc')
+    ->select('x.acct_code','a.acct_desc','x.debit','x.credit')
+    ->get();
+
 
         $totalDebit  = (float)$details->sum('debit');
         $totalCredit = (float)$details->sum('credit');
@@ -663,11 +691,15 @@ public function formExcel(Request $req, $id)
         : (Schema::hasColumn('vendor_list', 'vend_code') ? 'vend_code' : null);
 
     $headerQ = DB::table('cash_disbursement as d');
-    if ($vendKey) {
-        $headerQ->leftJoin('vendor_list as v', function ($j) use ($vendKey) {
-            $j->on('d.vend_id', '=', 'v.'.$vendKey);
-        });
-    }
+$companyId = $req->query('company_id');
+
+if ($vendKey) {
+    $headerQ->leftJoin('vendor_list as v', function ($j) use ($vendKey, $companyId) {
+        $j->on('d.vend_id', '=', 'v.'.$vendKey);
+        if ($companyId) $j->where('v.company_id', '=', $companyId);
+    });
+}
+
 
     $header = $headerQ
         ->select(
@@ -677,20 +709,26 @@ public function formExcel(Request $req, $id)
             DB::raw($vendKey ? "COALESCE(v.vend_name,'') as vend_name" : "'' as vend_name"),
             'd.amount_in_words','d.created_at'
         )
-        ->where('d.id', $id)
-        ->first();
+    ->where('d.id', $id)
+    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+    ->first();
 
     if (!$header || $header->is_cancel === 'y') {
         abort(404, 'Cash Disbursement not found or cancelled');
     }
 
-    $details = DB::table('cash_disbursement_details as x')
-        ->join('account_code as a','x.acct_code','=','a.acct_code')
-        ->where('x.transaction_id',$id)
-        ->orderBy('x.workstation_id','desc')
-        ->orderBy('x.credit','desc')
-        ->select('x.acct_code','a.acct_desc','x.debit','x.credit')
-        ->get();
+$details = DB::table('cash_disbursement_details as x')
+    ->join('account_code as a', function ($j) use ($companyId) {
+        $j->on('x.acct_code', '=', 'a.acct_code');
+        if ($companyId) $j->where('a.company_id', '=', $companyId);
+    })
+    ->where('x.transaction_id', $id)
+    ->when($companyId, fn($q) => $q->where('x.company_id', $companyId))
+    ->orderBy('x.workstation_id','desc')
+    ->orderBy('x.credit','desc')
+    ->select('x.acct_code','a.acct_desc','x.debit','x.credit')
+    ->get();
+
 
     $totalDebit  = (float)$details->sum('debit');
     $totalCredit = (float)$details->sum('credit');
@@ -819,9 +857,11 @@ public function formExcel(Request $req, $id)
         $main = CashDisbursement::find($transactionId);
         if (!$main) return;
 
-        $bankAcct = AccountCode::where('bank_id', $main->bank_id)
-            ->where('active_flag',1)
-            ->first(['acct_code']);
+$bankAcct = AccountCode::where('bank_id', $main->bank_id)
+    ->where('company_id', (int) $main->company_id)
+    ->where('active_flag', 1)
+    ->first(['acct_code']);
+
         if (!$bankAcct) return;
 
 $bankRow = CashDisbursementDetail::where('transaction_id', $transactionId)
@@ -961,9 +1001,11 @@ public function updateMain(Request $req)
 
     // If bank changed, ensure BANK row acct_code aligns to new bank_id mapping
     if ($oldBankId !== (string) $data['bank_id']) {
-        $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
-            ->where('active_flag', 1)
-            ->first(['acct_code']);
+$bankAcct = AccountCode::where('bank_id', $data['bank_id'])
+    ->where('company_id', (int) $data['company_id'])
+    ->where('active_flag', 1)
+    ->first(['acct_code']);
+
 
         if ($bankAcct) {
             $bankRow = CashDisbursementDetail::where('transaction_id', $tx->id)
@@ -1042,9 +1084,11 @@ public function updateMainNoApproval(Request $req)
 
     // ✅ IMPORTANT: if bank changed, align the BANK row acct_code (same logic as updateMain)
     if ($oldBankId !== (string) $data['bank_id']) {
-        $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
-            ->where('active_flag', 1)
-            ->first(['acct_code']);
+$bankAcct = AccountCode::where('bank_id', $data['bank_id'])
+    ->where('company_id', (int) $data['company_id'])
+    ->where('active_flag', 1)
+    ->first(['acct_code']);
+
 
         if ($bankAcct) {
             $bankRow = CashDisbursementDetail::where('transaction_id', $tx->id)

@@ -33,6 +33,18 @@ export default function CashReceiptBook() {
   const [showModal, setShowModal] = useState(false);
   const [busy, setBusy]           = useState(false);
   const pollRef = useRef<number | null>(null);
+  // ✅ Option A requires company_id on EVERY request (status/view/download)
+  const user = (() => {
+    try {
+      const s = localStorage.getItem('user');
+      return s ? JSON.parse(s) : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const companyId =
+    Number(user?.company_id ?? user?.companyId ?? user?.company?.id) || 0;
 
   const friendly = () =>
     `CashReceiptBook_${startDate}_to_${endDate}.${status?.format === 'pdf' ? 'pdf' : 'xls'}`;
@@ -41,11 +53,21 @@ export default function CashReceiptBook() {
     if (busy) return;
     setBusy(true);
     try {
-      const { data } = await napi.post('/cash-receipts/report', {
-        start_date: startDate,
-        end_date: endDate,
-        format: requested,
-      });
+// --- ADD: company_id from localStorage user (same pattern as your GL page) ---
+
+if (!companyId) {
+  alert('Missing company_id. Please re-login.');
+  setBusy(false);
+  return;
+}
+
+const { data } = await napi.post('/cash-receipts/report', {
+  start_date: startDate,
+  end_date: endDate,
+  format: requested,
+  company_id: companyId, // ✅ FIX: backend requires this
+});
+
       setTicket(data.ticket);
       setStatus({ status: 'queued', progress: 1, format: requested === 'pdf' ? 'pdf' : 'xls' } as Status);
       setShowModal(true);
@@ -55,10 +77,12 @@ export default function CashReceiptBook() {
   };
 
   useEffect(() => {
-    if (!ticket) return;
+if (!ticket || !companyId) return;
     const poll = async () => {
       try {
-        const { data } = await napi.get<Status>(`/cash-receipts/report/${ticket}/status`);
+const { data } = await napi.get<Status>(
+  `/cash-receipts/report/${ticket}/status?company_id=${companyId}`
+);
         setStatus(data);
         if (data.status === 'done' || data.status === 'error') {
           if (pollRef.current) window.clearInterval(pollRef.current);
@@ -73,13 +97,19 @@ export default function CashReceiptBook() {
 
   const download = async () => {
     if (!ticket || !status || status.status !== 'done') return;
-    const res = await napi.get(`/cash-receipts/report/${ticket}/download`, { responseType: 'blob' });
+const res = await napi.get(
+  `/cash-receipts/report/${ticket}/download?company_id=${companyId}`,
+  { responseType: 'blob' }
+);
     saveBlob(res.data, friendly());
   };
 
   const viewPdf = async () => {
     if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
-    const res = await napi.get(`/cash-receipts/report/${ticket}/view`, { responseType: 'blob' });
+const res = await napi.get(
+  `/cash-receipts/report/${ticket}/view?company_id=${companyId}`,
+  { responseType: 'blob' }
+);
     openBlob(res.data);
   };
 

@@ -141,6 +141,10 @@ public function updateMainNoApproval(Request $req)
     ]);
 
     $tx = CashSales::findOrFail($data['id']);
+if ((int)$tx->company_id !== (int)$data['company_id']) {
+    abort(403, 'Company mismatch.');
+}
+
 
     // ✅ SAFETY: cannot update cancelled / deleted
     if (in_array($tx->is_cancel, ['c','d','y'], true)) {
@@ -217,9 +221,11 @@ public function updateMainNoApproval(Request $req)
         }
 
         // Valid account?
-        $exists = AccountCode::where('acct_code', $payload['acct_code'])
-            ->where('active_flag', 1)
-            ->exists();
+$exists = AccountCode::where('acct_code', $payload['acct_code'])
+    ->where('company_id', (int) $payload['company_id'])
+    ->where('active_flag', 1)
+    ->exists();
+
         if (!$exists) return response()->json(['message' => 'Invalid or inactive account.'], 422);
 
         // Duplicate acct_code in same transaction?
@@ -265,7 +271,35 @@ public function updateMainNoApproval(Request $req)
             if ($d > 0 && $c > 0) return response()->json(['message'=>'Provide either debit OR credit.'], 422);
         }
 
+// validate acct_code change
+if (array_key_exists('acct_code', $apply) && $apply['acct_code'] !== $detail->acct_code) {
+    $main = CashSales::findOrFail($payload['transaction_id']);
+    $companyId = (int) $main->company_id;
+
+    $exists = AccountCode::where('acct_code', $apply['acct_code'])
+        ->where('company_id', $companyId)
+        ->where('active_flag', 1)
+        ->exists();
+
+    if (!$exists) {
+        return response()->json(['message' => 'Invalid or inactive account.'], 422);
+    }
+
+    $dup = CashSalesDetail::where('transaction_id', $payload['transaction_id'])
+        ->where('acct_code', $apply['acct_code'])
+        ->exists();
+
+    if ($dup) {
+        return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
+    }
+}
+
+
         $detail->update($apply);
+
+
+
+
 
         $totals = $this->recalcTotals($payload['transaction_id']);
         return response()->json(['ok'=>true,'totals'=>$totals]);
@@ -288,27 +322,35 @@ public function updateMainNoApproval(Request $req)
     }
 
     // 6) Show main+details (for Search Transaction)
-    public function show($id, Request $req)
-    {
-        $companyId = $req->query('company_id');
+public function show($id, Request $req)
+{
+    $companyId = $req->query('company_id');
 
-        $main = CashSales::when($companyId, fn($q)=>$q->where('company_id',$companyId))
-            ->findOrFail($id);
+    $main = CashSales::when($companyId, fn($q)=>$q->where('company_id',$companyId))
+        ->findOrFail($id);
 
-        $details = CashSalesDetail::where('transaction_id',$main->id)
-            ->leftJoin('account_code','cash_sales_details.acct_code','=','account_code.acct_code')
-            ->orderBy('cash_sales_details.id')
-            ->get([
-                'cash_sales_details.id',
-                'cash_sales_details.transaction_id',
-                'cash_sales_details.acct_code',
-                DB::raw('COALESCE(account_code.acct_desc, \'\') as acct_desc'),
-                'cash_sales_details.debit',
-                'cash_sales_details.credit',
-            ]);
+    $details = CashSalesDetail::from('cash_sales_details as d')
+        ->where('d.transaction_id', $main->id)
+        ->when($companyId, fn($q)=>$q->where('d.company_id', $companyId))
+        ->leftJoin('account_code as a', function ($j) use ($companyId) {
+            $j->on('d.acct_code', '=', 'a.acct_code');
+            if ($companyId) {
+                $j->where('a.company_id', '=', $companyId);
+            }
+        })
+        ->orderBy('d.id')
+        ->get([
+            'd.id',
+            'd.transaction_id',
+            'd.acct_code',
+            DB::raw("COALESCE(a.acct_desc, '') as acct_desc"),
+            'd.debit',
+            'd.credit',
+        ]);
 
-        return response()->json(['main'=>$main,'details'=>$details]);
-    }
+    return response()->json(['main'=>$main,'details'=>$details]);
+}
+
 
     // 7) Search list for combobox
 public function list(Request $req)
@@ -391,49 +433,47 @@ public function list(Request $req)
 public function updateCancel(Request $req)
 {
     $data = $req->validate([
-        'id'   => ['required','integer','exists:cash_sales,id'],
-        'flag' => ['required','in:0,1'], // 1 = cancel, 0 = uncancel
+        'id'         => ['required','integer','exists:cash_sales,id'],
+        'company_id' => ['required','integer'],
+        'flag'       => ['required','in:0,1'],
     ]);
 
-    // '1' → cancelled ('c'), '0' → normal ('n')
     $val = $data['flag'] === '1' ? 'c' : 'n';
 
-    CashSales::where('id', $data['id'])->update([
-        'is_cancel' => $val,
-    ]);
+    $updated = CashSales::where('id', (int)$data['id'])
+        ->where('company_id', (int)$data['company_id'])
+        ->update(['is_cancel' => $val]);
 
-    return response()->json([
-        'ok'        => true,
-        'is_cancel' => $val,
-    ]);
+    if (!$updated) abort(404, 'Not found.');
+
+    return response()->json(['ok'=>true,'is_cancel'=>$val]);
 }
+
 
 
 public function softDeleteMain(Request $req)
 {
     $data = $req->validate([
-        'id' => ['required','integer','exists:cash_sales,id'],
+        'id'         => ['required','integer','exists:cash_sales,id'],
+        'company_id' => ['required','integer'],
     ]);
 
-    $row = CashSales::find($data['id']);
-    if (!$row) {
-        return response()->json(['message' => 'Sales voucher not found.'], 404);
-    }
+    $row = CashSales::where('id', (int)$data['id'])
+        ->where('company_id', (int)$data['company_id'])
+        ->first();
 
-    // If already hard-cancelled/deleted, just return
+    if (!$row) abort(404, 'Not found.');
+
     if ($row->is_cancel === 'd') {
-        return response()->json(['ok' => true, 'is_cancel' => 'd']);
+        return response()->json(['ok'=>true,'is_cancel'=>'d']);
     }
 
-    // Mark as deleted (soft delete); will be hidden from dropdowns
     $row->is_cancel = 'd';
     $row->save();
 
-    return response()->json([
-        'ok'        => true,
-        'is_cancel' => 'd',
-    ]);
+    return response()->json(['ok'=>true,'is_cancel'=>'d']);
 }
+
 
 
 
@@ -469,14 +509,18 @@ public function softDeleteMain(Request $req)
             }
 
         // --- Details (scoped by company)
-        $details = DB::table('cash_sales_details as d')
-            ->join('account_code as a', 'd.acct_code', '=', 'a.acct_code')
-            ->where('d.transaction_id', $id)
-            ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
-            ->orderBy('d.workstation_id','desc')
-            ->orderBy('d.credit','desc')
-            ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
-            ->get();
+$details = DB::table('cash_sales_details as d')
+    ->join('account_code as a', function ($j) use ($companyId) {
+        $j->on('d.acct_code', '=', 'a.acct_code');
+        if ($companyId) $j->where('a.company_id', '=', $companyId);
+    })
+    ->where('d.transaction_id', $id)
+    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+    ->orderBy('d.workstation_id','desc')
+    ->orderBy('d.credit','desc')
+    ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
+    ->get();
+
 
         $totalDebit  = $details->sum('debit');
         $totalCredit = $details->sum('credit');
@@ -749,16 +793,20 @@ public function checkPdf(Request $request, $id)
             }
 
         // Details (scoped)
-        $details = DB::table('cash_sales_details as d')
-            ->leftJoin('account_code as a','d.acct_code','=','a.acct_code')
-            ->where('d.transaction_id', $id)
-            ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
-            ->orderBy('d.id')
-            ->get([
-                'd.acct_code',
-                DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
-                'd.debit','d.credit'
-            ]);
+$details = DB::table('cash_sales_details as d')
+    ->leftJoin('account_code as a', function ($j) use ($companyId) {
+        $j->on('d.acct_code', '=', 'a.acct_code');
+        if ($companyId) $j->where('a.company_id', '=', $companyId);
+    })
+    ->where('d.transaction_id', $id)
+    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+    ->orderBy('d.id')
+    ->get([
+        'd.acct_code',
+        DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
+        'd.debit','d.credit'
+    ]);
+
 
         $totalDebit  = $details->sum('debit');
         $totalCredit = $details->sum('credit');

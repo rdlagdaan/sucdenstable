@@ -12,8 +12,8 @@ use Illuminate\Http\JsonResponse;
 class GeneralJournalBookController extends Controller
 {
     /**
-     * Start a General Journal report job.
-     * Accepts format: pdf | excel | xls | xlsx  (excel/xlsx → xls writer)
+     * Option A (multi-tenant): No auth required.
+     * Enforce tenant scope using company_id on start/status/download/view.
      */
     public function start(Request $req): JsonResponse
     {
@@ -22,58 +22,78 @@ class GeneralJournalBookController extends Controller
             'end_date'   => 'required|date|after_or_equal:start_date',
             'format'     => 'required|string|in:pdf,excel,xls,xlsx',
             'query'      => 'nullable|string|max:200',
+            'company_id' => 'required|integer|min:1', // ✅ REQUIRED (Option A)
         ]);
 
-        // Normalize format
+        // Normalize format -> 'pdf' | 'xls'
         $fmt = strtolower($v['format']);
         if ($fmt === 'excel' || $fmt === 'xlsx') {
             $fmt = 'xls';
         }
 
-        $ticket     = Str::uuid()->toString();
-        $companyId  = $req->user()->company_id ?? null;
-        $userId     = $req->user()->id ?? null;
+        $ticket    = Str::uuid()->toString();
+        $companyId = (int) $v['company_id'];
 
-        // Seed cache state (front-end polls this)
+        // Seed cache state (frontend polls this)
         Cache::put("gjb:$ticket", [
             'status'     => 'queued',
             'progress'   => 0,
-            'format'     => $fmt,     // pdf | xls
+            'format'     => $fmt, // pdf | xls
             'file'       => null,
             'error'      => null,
             'range'      => [$v['start_date'], $v['end_date']],
             'query'      => $v['query'] ?? null,
-            'user_id'    => $userId,
             'company_id' => $companyId,
         ], now()->addHours(2));
 
-        // Fire the job after response (snappy UX; still uses your queue worker)
+        // Dispatch job after response
         BuildGeneralJournalBook::dispatchAfterResponse(
-            ticket:     $ticket,
-            startDate:  $v['start_date'],
-            endDate:    $v['end_date'],
-            format:     $fmt,          // pdf | xls
-            companyId:  $companyId,
-            userId:     $userId,
-            query:      $v['query'] ?? null
+            ticket:    $ticket,
+            startDate: $v['start_date'],
+            endDate:   $v['end_date'],
+            format:    $fmt,
+            companyId: $companyId,
+            query:     $v['query'] ?? null
         );
 
         return response()->json(['ticket' => $ticket]);
     }
 
-    public function status(string $ticket): JsonResponse
+    public function status(Request $req, string $ticket): JsonResponse
     {
         $state = Cache::get("gjb:$ticket");
         if (!$state) {
             return response()->json(['error' => 'not_found'], 404);
         }
+
+        $cid = (int) $req->query('company_id', 0);
+        if ($cid <= 0) {
+            return response()->json(['error' => 'missing_company_id'], 422);
+        }
+
+        // ✅ tenant enforcement
+        if ((int) ($state['company_id'] ?? 0) !== $cid) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         return response()->json($state);
     }
 
-    public function download(string $ticket)
+    public function download(Request $req, string $ticket)
     {
         $state = Cache::get("gjb:$ticket");
         if (!$state) return response()->json(['error' => 'not_found'], 404);
+
+        $cid = (int) $req->query('company_id', 0);
+        if ($cid <= 0) {
+            return response()->json(['error' => 'missing_company_id'], 422);
+        }
+
+        // ✅ tenant enforcement
+        if ((int) ($state['company_id'] ?? 0) !== $cid) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         if (($state['status'] ?? '') !== 'done' || empty($state['file'])) {
             return response()->json(['error' => 'not_ready'], 409);
         }
@@ -95,10 +115,21 @@ class GeneralJournalBookController extends Controller
         ]);
     }
 
-    public function view(string $ticket)
+    public function view(Request $req, string $ticket)
     {
         $state = Cache::get("gjb:$ticket");
         if (!$state) return response()->json(['error' => 'not_found'], 404);
+
+        $cid = (int) $req->query('company_id', 0);
+        if ($cid <= 0) {
+            return response()->json(['error' => 'missing_company_id'], 422);
+        }
+
+        // ✅ tenant enforcement
+        if ((int) ($state['company_id'] ?? 0) !== $cid) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         if (($state['status'] ?? '') !== 'done' || empty($state['file'])) {
             return response()->json(['error' => 'not_ready'], 409);
         }

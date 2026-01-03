@@ -20,6 +20,23 @@ export default function CashDisbursementBook() {
   const [busy, setBusy]           = useState(false);
   const pollRef = useRef<number | null>(null);
 
+
+  const user = (() => {
+    try {
+      const s = localStorage.getItem('user');
+      return s ? JSON.parse(s) : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const companyId =
+    Number(localStorage.getItem('company_id')) ||
+    Number(user?.company_id ?? user?.companyId ?? user?.company?.id) ||
+    0;
+
+
+
   const friendly = () =>
     `CashDisbursementBook_${startDate}_to_${endDate}.${status?.format === 'pdf' ? 'pdf' : 'xls'}`;
 
@@ -31,7 +48,9 @@ export default function CashDisbursementBook() {
         start_date: startDate,
         end_date: endDate,
         format: requested, // BE normalizes 'excel'->'xls'
+        company_id: companyId,
       });
+
       setTicket(data.ticket);
       setStatus({ status: 'queued', progress: 1, format: requested === 'pdf' ? 'pdf' : 'xls' } as Status);
       setShowModal(true);
@@ -47,7 +66,9 @@ export default function CashDisbursementBook() {
     if (!ticket) return;
     const poll = async () => {
       try {
-        const { data } = await napi.get<Status>(`/cash-disbursements/report/${ticket}/status`);
+        const { data } = await napi.get<Status>(
+          `/cash-disbursements/report/${ticket}/status?company_id=${companyId}`
+        );
         setStatus(data);
         if (data.status === 'done' || data.status === 'error') {
           if (pollRef.current) window.clearInterval(pollRef.current);
@@ -62,7 +83,10 @@ export default function CashDisbursementBook() {
 
   const download = async () => {
     if (!ticket || !status || status.status !== 'done') return;
-    const res = await napi.get(`/cash-disbursements/report/${ticket}/download`, { responseType: 'blob' });
+    const res = await napi.get(
+      `/cash-disbursements/report/${ticket}/download?company_id=${companyId}`,
+      { responseType: 'blob' }
+    );
     const url = URL.createObjectURL(res.data);
     const a = document.createElement('a');
     a.href = url; a.download = friendly();
@@ -72,7 +96,10 @@ export default function CashDisbursementBook() {
 
   const viewPdf = async () => {
     if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
-    const res = await napi.get(`/cash-disbursements/report/${ticket}/view`, { responseType: 'blob' });
+    const res = await napi.get(
+      `/cash-disbursements/report/${ticket}/view?company_id=${companyId}`,
+      { responseType: 'blob' }
+    );
     const url = URL.createObjectURL(res.data);
     window.open(url, '_blank', 'noopener,noreferrer');
   };

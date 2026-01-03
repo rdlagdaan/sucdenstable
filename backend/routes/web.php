@@ -59,6 +59,21 @@ use App\Http\Controllers\ApprovalController;
 
 use App\Http\Controllers\PlanterController;
 
+
+
+use App\Http\Controllers\ReceivingPostingController;
+
+Route::middleware(['web','auth:sanctum'])->prefix('api')->group(function () {
+    // Receiving Posting module (Bite A)
+    Route::get('/receiving-posting/list', [ReceivingPostingController::class, 'list']);
+    Route::get('/receiving-posting/show/{id}', [ReceivingPostingController::class, 'show']);
+    Route::get('/receiving-posting/preview-journal/{id}', [ReceivingPostingController::class, 'previewJournal']);
+});
+
+
+
+
+
 Route::get('/planters/lookup', [PlanterController::class, 'lookup']);
 
 
@@ -164,33 +179,42 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 
 
 Route::prefix('api')->middleware(['web', 'auth:sanctum'])->group(function () {
+
     Route::get ('/check-register/months',  [CheckRegisterController::class, 'months']);
     Route::get ('/check-register/years',   [CheckRegisterController::class, 'years']);
+
     Route::post('/check-register/report',  [CheckRegisterController::class, 'start']);
-    Route::get ('/check-register/report/{ticket}/status',   [CheckRegisterController::class, 'status']);
-    Route::get ('/check-register/report/{ticket}/download', [CheckRegisterController::class, 'download']);
-    Route::get ('/check-register/report/{ticket}/view',     [CheckRegisterController::class, 'view']);
+
+    Route::get ('/check-register/report/{ticket}/status',   [CheckRegisterController::class, 'status'])->whereUuid('ticket');
+    Route::get ('/check-register/report/{ticket}/download', [CheckRegisterController::class, 'download'])->whereUuid('ticket');
+    Route::get ('/check-register/report/{ticket}/view',     [CheckRegisterController::class, 'view'])->whereUuid('ticket');
+
 });
 
 
-Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+
+
+Route::prefix('api')->middleware(['web'])->group(function () {
+
     Route::prefix('accounts-receivable')->group(function () {
         Route::post('/report',                   [AccountsReceivableJournalController::class, 'start']);
         Route::get ('/report/{ticket}/status',   [AccountsReceivableJournalController::class, 'status'])->whereUuid('ticket');
         Route::get ('/report/{ticket}/download', [AccountsReceivableJournalController::class, 'download'])->whereUuid('ticket');
         Route::get ('/report/{ticket}/view',     [AccountsReceivableJournalController::class, 'view'])->whereUuid('ticket');
     });
+
 });
 
 
 
 
-Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+// Cash Disbursement Book – ticketed report lifecycle (Option A: company_id scoped, no auth)
+Route::prefix('api')->middleware(['web'])->group(function () {
     Route::prefix('cash-disbursements')->group(function () {
-        Route::post('/report',                [CashDisbursementBookController::class, 'start']);
-        Route::get ('/report/{ticket}/status',[CashDisbursementBookController::class, 'status'])->whereUuid('ticket');
-        Route::get ('/report/{ticket}/download',[CashDisbursementBookController::class, 'download'])->whereUuid('ticket');
-        Route::get ('/report/{ticket}/view',  [CashDisbursementBookController::class, 'view'])->whereUuid('ticket');
+        Route::post('/report',                   [CashDisbursementBookController::class, 'start']);
+        Route::get ('/report/{ticket}/status',   [CashDisbursementBookController::class, 'status'])->whereUuid('ticket');
+        Route::get ('/report/{ticket}/download', [CashDisbursementBookController::class, 'download'])->whereUuid('ticket');
+        Route::get ('/report/{ticket}/view',     [CashDisbursementBookController::class, 'view'])->whereUuid('ticket');
     });
 });
 
@@ -198,7 +222,7 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 
 
 
-Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+Route::prefix('api')->middleware(['web'])->group(function () {
     Route::prefix('accounts-payable')->group(function () {
         // Start a job
         Route::post('/report', [AccountsPayableJournalController::class, 'start']);
@@ -211,7 +235,7 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
     });
 });
 
-Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+Route::prefix('api')->middleware(['web'])->group(function () {
     // Cash Receipt Book – ticketed report lifecycle
     Route::post('/cash-receipts/report',                   [CashReceiptBookController::class, 'start']);
     Route::get ('/cash-receipts/report/{ticket}/status',   [CashReceiptBookController::class, 'status']);
@@ -221,11 +245,12 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 
 
 
-Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+Route::prefix('api')->middleware(['web'])->group(function () {
+    // General Journal – ticketed report lifecycle (Option A: company_id scoped)
     Route::post('/general-journal/report',                   [GeneralJournalBookController::class, 'start']);
-    Route::get ('/general-journal/report/{ticket}/status',   [GeneralJournalBookController::class, 'status']);
-    Route::get ('/general-journal/report/{ticket}/view',     [GeneralJournalBookController::class, 'view']);
-    Route::get ('/general-journal/report/{ticket}/download', [GeneralJournalBookController::class, 'download']);
+    Route::get ('/general-journal/report/{ticket}/status',   [GeneralJournalBookController::class, 'status'])->whereUuid('ticket');
+    Route::get ('/general-journal/report/{ticket}/view',     [GeneralJournalBookController::class, 'view'])->whereUuid('ticket');
+    Route::get ('/general-journal/report/{ticket}/download', [GeneralJournalBookController::class, 'download'])->whereUuid('ticket');
 });
 
 
@@ -566,7 +591,8 @@ Route::get('/api/receiving/quedan-listing-pdf/{receiptNo}', [ReceivingController
 Route::get('/api/receiving/quedan-listing-inssto-pdf/{receiptNo}', [ReceivingController::class, 'quedanListingInsStoPdf']);
 Route::get('/api/receiving/quedan-listing-excel/{receiptNo}', [ReceivingController::class, 'quedanListingExcel']);
 Route::get('/api/receiving/quedan-listing-insurance-storage-excel/{receiptNo?}', [ReceivingController::class, 'quedanListingInsuranceStorageExcel']);
-    // Sales Journal
+
+// Sales Journal
     Route::get('/api/sales/generate-cs-number', [SalesJournalController::class, 'generateCsNumber']);
     Route::post('/api/sales/save-main', [SalesJournalController::class, 'storeMain']);
     Route::post('/api/sales/save-detail', [SalesJournalController::class, 'saveDetail']);

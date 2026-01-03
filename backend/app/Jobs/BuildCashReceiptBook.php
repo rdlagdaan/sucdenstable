@@ -18,14 +18,15 @@ class BuildCashReceiptBook implements ShouldQueue
 
     public int $timeout = 900; // 15 min
 
-    public function __construct(
-        public string $ticket,
-        public string $startDate,
-        public string $endDate,
-        public string $format,    // 'pdf' | 'xls'
-        public ?int $companyId,
-        public ?int $userId,
-    ) {}
+public function __construct(
+    public string $ticket,
+    public string $startDate,
+    public string $endDate,
+    public string $format,    // 'pdf' | 'xls'
+    public int $companyId,    // ✅ required
+    public ?int $userId,
+) {}
+
 
     private function key(): string { return "crb:{$this->ticket}"; }
 
@@ -35,59 +36,84 @@ class BuildCashReceiptBook implements ShouldQueue
         Cache::put($this->key(), array_merge($cur, $patch), now()->addHours(2));
     }
 
-    public function handle(): void
-    {
+public function handle(): void
+{
+    $this->patchState([
+        'status'   => 'running',
+        'progress' => 1,
+        'format'   => $this->format,
+        'file'     => null,
+        'error'    => null,
+    ]);
+
+    // Company scope must exist (Option A)
+    $cid = (int) $this->companyId;
+    if ($cid <= 0) {
         $this->patchState([
-            'status'   => 'running',
-            'progress' => 1,
-            'format'   => $this->format,
-            'file'     => null,
+            'status'   => 'error',
+            'progress' => 100,
+            'error'    => 'Missing company scope (companyId=0).',
+        ]);
+        return;
+    }
+
+    try {
+        // Count rows for progress (scoped)
+        $total = DB::table('cash_receipts as r')
+            ->where('r.company_id', $cid)
+            ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
+            ->count();
+
+        // Progress callback used by buildPdf/buildExcel
+        $step = function (int $done) use ($total) {
+            // Keep 1..99 while building, set to 100 only when done
+            $pct = $total
+                ? min(99, 1 + (int) floor(($done / max(1, $total)) * 98))
+                : 50;
+
+            $this->patchState(['progress' => $pct]);
+        };
+
+        // Ensure reports dir exists
+        $dir  = 'reports';
+        $disk = Storage::disk('local');
+        if (!$disk->exists($dir)) {
+            $disk->makeDirectory($dir);
+        }
+
+        // Output file path
+        $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
+        $path  = ($this->format === 'pdf')
+            ? "{$dir}/cash_receipt_book_{$stamp}.pdf"
+            : "{$dir}/cash_receipt_book_{$stamp}.xls";
+
+        // Build report
+        if ($this->format === 'pdf') {
+            $this->buildPdf($path, $step);
+        } else {
+            $this->buildExcel($path, $step);
+        }
+
+        // Keep only newest report for same format
+        $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);
+
+        // Done
+        $this->patchState([
+            'status'   => 'done',
+            'progress' => 100,
+            'file'     => $path,
             'error'    => null,
         ]);
-
-        try {
-            // count rows for progress
-            $total = DB::table('cash_receipts as r') // ← singular table name (matches your modules)
-                ->when($this->companyId, fn($q) => $q->where('r.company_id', $this->companyId))
-                ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
-                ->count();
-
-            $step = function (int $done) use ($total) {
-                $pct = $total ? min(99, 1 + (int)floor(($done / max(1,$total)) * 98)) : 50;
-                $this->patchState(['progress' => $pct]);
-            };
-
-            $dir = 'reports';
-            $disk = Storage::disk('local');
-            if (!$disk->exists($dir)) $disk->makeDirectory($dir);
-
-            $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
-            $path  = $this->format === 'pdf'
-                   ? "$dir/cash_receipt_book_{$stamp}.pdf"
-                   : "$dir/cash_receipt_book_{$stamp}.xls";
-
-            if ($this->format === 'pdf') {
-                $this->buildPdf($path, $step);
-            } else {
-                $this->buildExcel($path, $step);
-            }
-
-            // keep only the newest per format
-            $this->pruneOldReports($path, sameFormatOnly: true, keep: 1);
-
-            $this->patchState([
-                'status'   => 'done',
-                'progress' => 100,
-                'file'     => $path,
-            ]);
-        } catch (\Throwable $e) {
-            $this->patchState([
-                'status' => 'error',
-                'error'  => $e->getMessage(),
-            ]);
-            throw $e;
-        }
+    } catch (\Throwable $e) {
+        $this->patchState([
+            'status'   => 'error',
+            'progress' => 100,
+            'error'    => $e->getMessage(),
+        ]);
+        throw $e;
     }
+}
+
 
     private function pruneOldReports(string $keepFile, bool $sameFormatOnly = true, int $keep = 1): void
     {
@@ -108,6 +134,8 @@ class BuildCashReceiptBook implements ShouldQueue
 
     private function buildPdf(string $file, callable $progress): void
     {
+        $cid = (int) $this->companyId;
+        
         $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
         $pdf->setPrintHeader(false);
         $pdf->setPrintFooter(false);
@@ -150,13 +178,19 @@ class BuildCashReceiptBook implements ShouldQueue
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->leftJoin('bank as bk', 'bk.bank_id', '=', 'r.bank_id')
+->leftJoin('bank as bk', function ($j) use ($cid) {
+    $j->on('bk.bank_id', '=', 'r.bank_id')
+      ->where('bk.company_id', '=', $cid);
+})
             ->join('cash_receipt_details as d', function ($j) {
                 // d.transaction_id is VARCHAR in your schema — cast it to BIGINT to match r.id
                 $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
             })
-            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
-            ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
+->leftJoin('account_code as a', function ($j) use ($cid) {
+    $j->on('a.acct_code', '=', 'd.acct_code')
+      ->where('a.company_id', '=', $cid);
+})
+->where('r.company_id', $cid)
             ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
             ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
             ->orderBy('r.id')
@@ -226,6 +260,7 @@ class BuildCashReceiptBook implements ShouldQueue
 
     private function buildExcel(string $file, callable $progress): void
     {
+        $cid = (int) $this->companyId; 
         $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
         $ws = $wb->getActiveSheet();
         $ws->setTitle('Cash Receipts Book');
@@ -257,12 +292,18 @@ class BuildCashReceiptBook implements ShouldQueue
                     'credit', d.credit
                 ) ORDER BY d.id) as lines
             ")
-            ->leftJoin('bank as bk','bk.bank_id','=','r.bank_id')
+->leftJoin('bank as bk', function ($j) use ($cid) {
+    $j->on('bk.bank_id', '=', 'r.bank_id')
+      ->where('bk.company_id', '=', $cid);
+})
             ->join('cash_receipt_details as d', function ($j) {
                 $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
             })
-            ->leftJoin('account_code as a','a.acct_code','=','d.acct_code')
-            ->when($this->companyId, fn($q)=>$q->where('r.company_id',$this->companyId))
+->leftJoin('account_code as a', function ($j) use ($cid) {
+    $j->on('a.acct_code', '=', 'd.acct_code')
+      ->where('a.company_id', '=', $cid);
+})
+->where('r.company_id', $cid)
             ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
             ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
             ->orderBy('r.id')

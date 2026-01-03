@@ -11,12 +11,22 @@ use App\Jobs\BuildCashDisbursementBook;
 
 class CashDisbursementBookController extends Controller
 {
+    /**
+     * Start a Cash Disbursement Book job.
+     * Accepts: pdf | excel | xls | xlsx   (excel/xlsx → xls)
+     *
+     * Option A: require explicit company_id scope (no auth)
+     */
     public function start(Request $req): JsonResponse
     {
         $v = $req->validate([
             'start_date' => 'required|date',
             'end_date'   => 'required|date|after_or_equal:start_date',
             'format'     => 'required|string|in:pdf,excel,xls,xlsx',
+
+            // ✅ Option A: required explicit scope
+            'company_id' => 'required|integer|min:1',
+            'user_id'    => 'nullable|integer|min:1',
         ]);
 
         // normalize -> 'pdf' | 'xls'
@@ -25,10 +35,11 @@ class CashDisbursementBookController extends Controller
             $fmt = 'xls';
         }
 
-        $ticket     = Str::uuid()->toString();
-        $companyId  = $req->user()->company_id ?? null;
-        $userId     = $req->user()->id ?? null;
+        $ticket    = Str::uuid()->toString();
+        $companyId = (int) $v['company_id'];
+        $userId    = isset($v['user_id']) ? (int) $v['user_id'] : null;
 
+        // seed cache (polled by FE)
         Cache::put("cdb:$ticket", [
             'status'     => 'queued',
             'progress'   => 0,
@@ -40,12 +51,12 @@ class CashDisbursementBookController extends Controller
             'company_id' => $companyId,
         ], now()->addHours(2));
 
-        // run after the HTTP response (same as CRB/APJ)
+        // run after the HTTP response
         BuildCashDisbursementBook::dispatchAfterResponse(
             ticket:    $ticket,
             startDate: $v['start_date'],
             endDate:   $v['end_date'],
-            format:    $fmt,     // pdf | xls
+            format:    $fmt,       // pdf | xls
             companyId: $companyId,
             userId:    $userId
         );
@@ -56,14 +67,38 @@ class CashDisbursementBookController extends Controller
     public function status(string $ticket): JsonResponse
     {
         $state = Cache::get("cdb:$ticket");
-        if (!$state) return response()->json(['error' => 'not_found'], 404);
+        if (!$state) {
+            return response()->json(['error' => 'not_found'], 404);
+        }
+
+        // ✅ Option A: require company_id for ticket access
+        $companyId = (int) request()->query('company_id', 0);
+        if ($companyId <= 0) {
+            return response()->json(['error' => 'missing_company_scope'], 422);
+        }
+        if ((int)($state['company_id'] ?? 0) !== $companyId) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         return response()->json($state);
     }
 
     public function download(string $ticket)
     {
         $state = Cache::get("cdb:$ticket");
-        if (!$state) return response()->json(['error' => 'not_found'], 404);
+        if (!$state) {
+            return response()->json(['error' => 'not_found'], 404);
+        }
+
+        // ✅ Option A: require company_id for ticket access
+        $companyId = (int) request()->query('company_id', 0);
+        if ($companyId <= 0) {
+            return response()->json(['error' => 'missing_company_scope'], 422);
+        }
+        if ((int)($state['company_id'] ?? 0) !== $companyId) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         if (($state['status'] ?? '') !== 'done' || empty($state['file'])) {
             return response()->json(['error' => 'not_ready'], 409);
         }
@@ -88,15 +123,27 @@ class CashDisbursementBookController extends Controller
     public function view(string $ticket)
     {
         $state = Cache::get("cdb:$ticket");
-        if (!$state) return response()->json(['error'=>'not_found'], 404);
+        if (!$state) {
+            return response()->json(['error' => 'not_found'], 404);
+        }
+
+        // ✅ Option A: require company_id for ticket access
+        $companyId = (int) request()->query('company_id', 0);
+        if ($companyId <= 0) {
+            return response()->json(['error' => 'missing_company_scope'], 422);
+        }
+        if ((int)($state['company_id'] ?? 0) !== $companyId) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         if (($state['status'] ?? '') !== 'done' || empty($state['file'])) {
-            return response()->json(['error'=>'not_ready'], 409);
+            return response()->json(['error' => 'not_ready'], 409);
         }
         if (($state['format'] ?? '') !== 'pdf') {
-            return response()->json(['error'=>'only_pdf_view_supported'], 415);
+            return response()->json(['error' => 'only_pdf_view_supported'], 415);
         }
         if (!Storage::disk('local')->exists($state['file'])) {
-            return response()->json(['error'=>'missing_file'], 410);
+            return response()->json(['error' => 'missing_file'], 410);
         }
 
         $absolute = Storage::disk('local')->path($state['file']);

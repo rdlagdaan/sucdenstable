@@ -73,6 +73,49 @@ class MyJournalVoucherPDF extends \TCPDF
 
 class GeneralAccountingController extends Controller
 {
+    
+ /** 6) Show main + details (company-scoped) */
+public function show($id, Request $req)
+{
+    $companyId = (int) $req->query('company_id');
+
+    // ✅ main: enforce company scope
+    $main = GeneralAccounting::where('id', (int)$id)
+        ->where('company_id', $companyId)
+        ->first();
+
+    if (!$main) {
+        return response()->json(['message' => 'Journal not found.'], 404);
+    }
+
+    // ✅ details: enforce transaction + company scope
+    $details = GeneralAccountingDetail::from('general_accounting_details as d')
+        ->leftJoin('account_code as a', function ($j) use ($companyId) {
+            $j->on('d.acct_code', '=', 'a.acct_code')
+              ->where('a.company_id', '=', $companyId);
+        })
+        ->where('d.transaction_id', (int)$main->id)
+        ->where('d.company_id', $companyId)
+        ->orderBy('d.id')
+        ->get([
+            'd.id',
+            'd.transaction_id',
+            'd.acct_code',
+            DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
+            'd.debit',
+            'd.credit',
+            'd.company_id',
+        ]);
+
+    return response()->json([
+        'main'    => $main,
+        'details' => $details,
+    ]);
+}
+   
+    
+    
+    
     /** 1) Generate next GA number */
     public function generateGaNumber(Request $req)
     {
@@ -119,6 +162,11 @@ class GeneralAccountingController extends Controller
     }
 
     /** 3) Insert detail line (enforce validations) */
+/**
+ * 3) Insert detail line (company-scoped + not-cancelled guard)
+ * NOTE: saveDetail does NOT require approval (matches your current behavior).
+ * If you want approval here too, uncomment the requireEditApproval line.
+ */
 public function saveDetail(Request $req)
 {
     $payload = $req->validate([
@@ -131,121 +179,189 @@ public function saveDetail(Request $req)
         'workstation_id' => ['nullable','string','max:25'],
     ]);
 
-    // 🔹 Make sure workstation_id is populated (DB requires NOT NULL)
-    if (empty($payload['workstation_id'])) {
-        $main = GeneralAccounting::find($payload['transaction_id']);
+    // 1) Load main + enforce tenant (company) safety
+    $main = GeneralAccounting::findOrFail((int)$payload['transaction_id']);
 
-        if ($main && !empty($main->workstation_id)) {
+    if ((int)$main->company_id !== (int)$payload['company_id']) {
+        abort(403, 'Company mismatch.');
+    }
+
+    // 2) Block edits if cancelled/deleted
+    if (in_array((string)$main->is_cancel, ['c','d','y'], true)) {
+        abort(403, 'Cancelled/deleted journal cannot be modified.');
+    }
+
+    // Optional: require approval for adding details too
+    // $this->requireEditApproval((int)$main->id);
+
+    // 3) Ensure workstation_id (DB NOT NULL)
+    if (empty($payload['workstation_id'])) {
+        if (!empty($main->workstation_id)) {
             $payload['workstation_id'] = $main->workstation_id;
         } else {
-            return response()->json([
-                'message' => 'Workstation is required for journal details.',
-            ], 422);
+            return response()->json(['message' => 'Workstation is required for journal details.'], 422);
         }
     }
 
+    // 4) Validate debit/credit XOR and >0
     $d = (float)($payload['debit'] ?? 0);
     $c = (float)($payload['credit'] ?? 0);
     if (($d > 0 && $c > 0) || ($d <= 0 && $c <= 0)) {
         return response()->json(['message' => 'Provide either debit OR credit (not both/zero).'], 422);
     }
 
+    // 5) Validate account is active FOR THIS COMPANY
     $acctOk = AccountCode::where('acct_code', $payload['acct_code'])
-        ->where('active_flag', 1)->exists();
-    if (!$acctOk) return response()->json(['message' => 'Invalid or inactive account.'], 422);
+        ->where('company_id', (int)$payload['company_id'])
+        ->where('active_flag', 1)
+        ->exists();
 
-    $dup = GeneralAccountingDetail::where('transaction_id',$payload['transaction_id'])
-        ->where('acct_code',$payload['acct_code'])->exists();
-    if ($dup) return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
+    if (!$acctOk) {
+        return response()->json(['message' => 'Invalid or inactive account.'], 422);
+    }
 
-    $payload['general_accounting_id'] = $payload['transaction_id'];
+    // 6) Prevent duplicate acct_code inside same transaction (optionally also scope by company)
+    $dup = GeneralAccountingDetail::where('transaction_id', (int)$payload['transaction_id'])
+        ->where('acct_code', $payload['acct_code'])
+        ->exists();
+
+    if ($dup) {
+        return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
+    }
+
+    // 7) Set FK field (your table uses both naming styles)
+    $payload['general_accounting_id'] = (int)$payload['transaction_id'];
 
     $detail = GeneralAccountingDetail::create($payload);
-    $totals = $this->recalcTotals($payload['transaction_id']);
+    $totals = $this->recalcTotals((int)$payload['transaction_id']);
 
     return response()->json(['detail_id' => $detail->id, 'totals' => $totals]);
 }
 
 
-    /** 4) Update detail */
-    public function updateDetail(Request $req)
-    {
-        $payload = $req->validate([
-            'id'             => ['required','integer','exists:general_accounting_details,id'],
-            'transaction_id' => ['required','integer','exists:general_accounting,id'],
-            'acct_code'      => ['nullable','string','max:75'],
-            'debit'          => ['nullable','numeric'],
-            'credit'         => ['nullable','numeric'],
-        ]);
+/**
+ * 4) Update detail (company-safe detail lookup + company-scoped acct validation + not-cancelled guard)
+ */
+public function updateDetail(Request $req)
+{
+    $payload = $req->validate([
+        'id'             => ['required','integer','exists:general_accounting_details,id'],
+        'transaction_id' => ['required','integer','exists:general_accounting,id'],
+        'company_id'     => ['required','integer'],
+        'acct_code'      => ['nullable','string','max:75'],
+        'debit'          => ['nullable','numeric'],
+        'credit'         => ['nullable','numeric'],
+    ]);
 
-        // Enforce supervisor edit approval for this transaction
-        $this->requireEditApproval((int) $payload['transaction_id']);
+    // 1) Load main + enforce tenant safety
+    $main = GeneralAccounting::findOrFail((int)$payload['transaction_id']);
+    $companyId = (int)$main->company_id;
 
-        $row = GeneralAccountingDetail::find($payload['id']);
-        if (!$row) return response()->json(['message'=>'Detail not found.'], 404);
+    if ($companyId !== (int)$payload['company_id']) {
+        abort(403, 'Company mismatch.');
+    }
 
-        $apply = [];
-        if (isset($payload['acct_code'])) $apply['acct_code'] = $payload['acct_code'];
-        if (isset($payload['debit']))     $apply['debit']     = $payload['debit'];
-        if (isset($payload['credit']))    $apply['credit']    = $payload['credit'];
+    // 2) Block edits if cancelled/deleted
+    if (in_array((string)$main->is_cancel, ['c','d','y'], true)) {
+        abort(403, 'Cancelled/deleted journal cannot be modified.');
+    }
 
-        if (array_key_exists('debit',$apply) && array_key_exists('credit',$apply)) {
-            $d = (float)$apply['debit']; $c = (float)$apply['credit'];
-            if ($d > 0 && $c > 0) return response()->json(['message'=>'Provide either debit OR credit.'], 422);
-            if ($d <= 0 && $c <= 0) return response()->json(['message'=>'Debit or credit is required.'], 422);
+    // 3) Approval gate (your existing behavior)
+    $this->requireEditApproval((int)$main->id);
+
+    // 4) Tenant-safe detail lookup: id + transaction_id + company_id
+    $row = GeneralAccountingDetail::where('id', (int)$payload['id'])
+        ->where('transaction_id', (int)$main->id)
+        ->where('company_id', $companyId)
+        ->first();
+
+    if (!$row) {
+        return response()->json(['message' => 'Detail not found.'], 404);
+    }
+
+    // 5) Build apply set
+    $apply = [];
+    if (array_key_exists('acct_code', $payload)) $apply['acct_code'] = $payload['acct_code'];
+    if (array_key_exists('debit', $payload))     $apply['debit']     = $payload['debit'];
+    if (array_key_exists('credit', $payload))    $apply['credit']    = $payload['credit'];
+
+    // 6) Validate debit/credit rules (consider BOTH existing + incoming values)
+    $newDebit  = array_key_exists('debit',  $apply) ? (float)($apply['debit'] ?? 0) : (float)($row->debit ?? 0);
+    $newCredit = array_key_exists('credit', $apply) ? (float)($apply['credit'] ?? 0) : (float)($row->credit ?? 0);
+
+    if (($newDebit > 0 && $newCredit > 0) || ($newDebit <= 0 && $newCredit <= 0)) {
+        return response()->json(['message' => 'Provide either debit OR credit (not both/zero).'], 422);
+    }
+
+    // 7) If changing acct_code: validate account active for THIS COMPANY + prevent duplicates
+    if (array_key_exists('acct_code', $apply) && $apply['acct_code'] !== $row->acct_code) {
+        $acctOk = AccountCode::where('acct_code', $apply['acct_code'])
+            ->where('company_id', $companyId)
+            ->where('active_flag', 1)
+            ->exists();
+
+        if (!$acctOk) {
+            return response()->json(['message' => 'Invalid or inactive account.'], 422);
         }
 
-        if (isset($apply['acct_code'])) {
-            $acctOk = AccountCode::where('acct_code',$apply['acct_code'])->where('active_flag',1)->exists();
-            if (!$acctOk) return response()->json(['message'=>'Invalid or inactive account.'], 422);
-            $dup = GeneralAccountingDetail::where('transaction_id',$payload['transaction_id'])
-                    ->where('acct_code',$apply['acct_code'])
-                    ->where('id','<>',$payload['id'])
-                    ->exists();
-            if ($dup) return response()->json(['message'=>'Duplicate account code for this transaction.'], 422);
+        $dup = GeneralAccountingDetail::where('transaction_id', (int)$main->id)
+            ->where('company_id', $companyId)
+            ->where('acct_code', $apply['acct_code'])
+            ->where('id', '<>', (int)$row->id)
+            ->exists();
+
+        if ($dup) {
+            return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
         }
-
-        $row->update($apply);
-        $totals = $this->recalcTotals($payload['transaction_id']);
-        return response()->json(['ok'=>true,'totals'=>$totals]);
     }
 
-    /** 5) Delete detail */
-    public function deleteDetail(Request $req)
-    {
-        $payload = $req->validate([
-            'id'             => ['required','integer','exists:general_accounting_details,id'],
-            'transaction_id' => ['required','integer','exists:general_accounting,id'],
-        ]);
+    $row->update($apply);
 
-        // 🔐 require supervisor approval for deleting a detail line
-        $this->requireEditApproval((int) $payload['transaction_id']);
+    $totals = $this->recalcTotals((int)$main->id);
+    return response()->json(['ok' => true, 'totals' => $totals]);
+}
 
-        GeneralAccountingDetail::where('id',$payload['id'])->delete();
-        $totals = $this->recalcTotals($payload['transaction_id']);
-        return response()->json(['ok'=>true,'totals'=>$totals]);
+
+/**
+ * 5) Delete detail (company-safe delete + not-cancelled guard)
+ */
+public function deleteDetail(Request $req)
+{
+    $payload = $req->validate([
+        'id'             => ['required','integer','exists:general_accounting_details,id'],
+        'transaction_id' => ['required','integer','exists:general_accounting,id'],
+        'company_id'     => ['required','integer'],
+    ]);
+
+    // 1) Load main + enforce tenant safety
+    $main = GeneralAccounting::findOrFail((int)$payload['transaction_id']);
+    $companyId = (int)$main->company_id;
+
+    if ($companyId !== (int)$payload['company_id']) {
+        abort(403, 'Company mismatch.');
     }
 
-    /** 6) Show main + details */
-    public function show($id, Request $req)
-    {
-        $companyId = $req->query('company_id');
-
-        $main = GeneralAccounting::when($companyId, fn($q)=>$q->where('company_id',$companyId))
-            ->findOrFail($id);
-
-        $details = GeneralAccountingDetail::from('general_accounting_details as d')
-            ->leftJoin('account_code as a','d.acct_code','=','a.acct_code')
-            ->where('d.transaction_id',$main->id)
-            ->orderBy('d.id')
-            ->get([
-                'd.id','d.transaction_id','d.acct_code',
-                DB::raw("COALESCE(a.acct_desc,'') as acct_desc"),
-                'd.debit','d.credit'
-            ]);
-
-        return response()->json(['main'=>$main,'details'=>$details]);
+    // 2) Block edits if cancelled/deleted
+    if (in_array((string)$main->is_cancel, ['c','d','y'], true)) {
+        abort(403, 'Cancelled/deleted journal cannot be modified.');
     }
+
+    // 3) Approval gate (your existing behavior)
+    $this->requireEditApproval((int)$main->id);
+
+    // 4) Tenant-safe delete: scope by id + transaction_id + company_id
+    $deleted = GeneralAccountingDetail::where('id', (int)$payload['id'])
+        ->where('transaction_id', (int)$main->id)
+        ->where('company_id', $companyId)
+        ->delete();
+
+    if (!$deleted) {
+        return response()->json(['message' => 'Detail not found.'], 404);
+    }
+
+    $totals = $this->recalcTotals((int)$main->id);
+    return response()->json(['ok' => true, 'totals' => $totals]);
+}
 
     /** 7) List for JE dropdown */
 public function list(Request $req)
@@ -300,48 +416,45 @@ public function list(Request $req)
 public function updateCancel(Request $req)
 {
     $data = $req->validate([
-        'id'   => ['required','integer','exists:general_accounting,id'],
-        'flag' => ['required','in:0,1'], // 1 = cancel, 0 = uncancel
-        // company_id may be sent by frontend but we don't need it here
+        'id'         => ['required','integer','exists:general_accounting,id'],
+        'company_id' => ['required','integer'],
+        'flag'       => ['required','in:0,1'],
     ]);
 
-    // 🔹 1 → cancelled ('c'), 0 → normal ('n')
     $val = $data['flag'] === '1' ? 'c' : 'n';
 
-    GeneralAccounting::where('id', $data['id'])->update([
-        'is_cancel' => $val,
-    ]);
+    $updated = GeneralAccounting::where('id', (int)$data['id'])
+        ->where('company_id', (int)$data['company_id'])
+        ->update(['is_cancel' => $val]);
 
-    return response()->json([
-        'ok'        => true,
-        'is_cancel' => $val,
-    ]);
+    if (!$updated) abort(404, 'Not found.');
+
+    return response()->json(['ok'=>true,'is_cancel'=>$val]);
 }
 
 
     /** 10) Delete main (cascade details) */
 /** 10) Soft-delete main JE (like Sales Journal) */
-public function destroy($id)
+public function destroy(Request $req, $id)
 {
-    $row = GeneralAccounting::find($id);
-    if (!$row) {
-        return response()->json(['message' => 'Journal Voucher not found.'], 404);
-    }
+    $data = $req->validate([
+        'company_id' => ['required','integer'],
+    ]);
 
-    // If already deleted, just return OK
-    if ($row->is_cancel === 'd') {
-        return response()->json(['ok' => true, 'is_cancel' => 'd']);
-    }
+    $row = GeneralAccounting::where('id', (int)$id)
+        ->where('company_id', (int)$data['company_id'])
+        ->first();
 
-    // 🔹 Soft delete → mark as deleted; details kept for audit
+    if (!$row) return response()->json(['message'=>'Journal Voucher not found.'], 404);
+
+    if ($row->is_cancel === 'd') return response()->json(['ok'=>true,'is_cancel'=>'d']);
+
     $row->is_cancel = 'd';
     $row->save();
 
-    return response()->json([
-        'ok'        => true,
-        'is_cancel' => 'd',
-    ]);
+    return response()->json(['ok'=>true,'is_cancel'=>'d']);
 }
+
 
 
     /** 11) Print Journal Voucher PDF */
@@ -372,11 +485,18 @@ public function formPdf(Request $request, $id)
 
 
     // 2) Details + live totals (don’t trust stored flags)
-    $details = DB::table('general_accounting_details as d')
-        ->join('account_code as a','d.acct_code','=','a.acct_code')
-        ->where('d.transaction_id', $id)
-        ->orderBy('d.id')
-        ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
+$details = DB::table('general_accounting_details as d')
+    ->join('account_code as a', function ($j) use ($companyId) {
+        $j->on('d.acct_code', '=', 'a.acct_code');
+        if ($companyId) {
+            $j->where('a.company_id', $companyId);
+        }
+    })
+    ->where('d.transaction_id', $id)
+    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+    ->orderBy('d.id')
+    ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
+
 
     $totalDebit  = (float)$details->sum('debit');
     $totalCredit = (float)$details->sum('credit');
@@ -522,11 +642,18 @@ public function formExcel($id, Request $req)
     }
 
     // Details
-    $details = DB::table('general_accounting_details as d')
-        ->join('account_code as a','d.acct_code','=','a.acct_code')
-        ->where('d.transaction_id',$id)
-        ->orderBy('d.id')
-        ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
+$details = DB::table('general_accounting_details as d')
+    ->join('account_code as a', function ($j) use ($companyId) {
+        $j->on('d.acct_code', '=', 'a.acct_code');
+        if ($companyId) {
+            $j->where('a.company_id', $companyId);
+        }
+    })
+    ->where('d.transaction_id', $id)
+    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+    ->orderBy('d.id')
+    ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
+
 
     // Spreadsheet
     $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
@@ -710,23 +837,25 @@ protected function requireEditApproval(int $transactionId): \stdClass
 
 
     /** ---- helper ---- */
-    protected function recalcTotals(int $transactionId): array
-    {
-        $tot = GeneralAccountingDetail::where('transaction_id',$transactionId)
-            ->selectRaw('COALESCE(SUM(debit),0) as sum_debit, COALESCE(SUM(credit),0) as sum_credit')
-            ->first();
+protected function recalcTotals(int $transactionId): array
+{
+    $tot = GeneralAccountingDetail::where('transaction_id', $transactionId)
+        ->selectRaw('COALESCE(SUM(debit),0) as sum_debit, COALESCE(SUM(credit),0) as sum_credit')
+        ->first();
 
-        $sumDebit  = round((float)($tot->sum_debit ?? 0), 2);
-        $sumCredit = round((float)($tot->sum_credit ?? 0), 2);
-        $balanced  = abs($sumDebit - $sumCredit) < 0.005;
+    $sumDebit  = round((float)($tot->sum_debit ?? 0), 2);
+    $sumCredit = round((float)($tot->sum_credit ?? 0), 2);
+    $balanced  = abs($sumDebit - $sumCredit) < 0.005;
 
-        GeneralAccounting::where('id',$transactionId)->update([
-            'gen_acct_amount' => $sumDebit, // header “Amount” = total DEBIT
-            'sum_debit'       => $sumDebit,
-            'sum_credit'      => $sumCredit,
-            'is_balanced'     => $balanced,
-        ]);
+    GeneralAccounting::where('id', $transactionId)->update([
+        'gen_acct_amount' => $sumDebit,
+        'sum_debit'       => $sumDebit,
+        'sum_credit'      => $sumCredit,
+        'is_balanced'     => $balanced,
+    ]);
 
-        return ['debit'=>$sumDebit,'credit'=>$sumCredit,'balanced'=>$balanced];
-    }
+    return ['debit'=>$sumDebit,'credit'=>$sumCredit,'balanced'=>$balanced];
+}
+
+
 }

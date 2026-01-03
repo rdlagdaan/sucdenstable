@@ -40,6 +40,21 @@ export default function GeneralJournalBook() {
 
   const pollRef = useRef<number | null>(null);
 
+  const user = (() => {
+    try {
+      const s = localStorage.getItem('user');
+      return s ? JSON.parse(s) : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const companyId =
+    Number(localStorage.getItem('company_id')) ||
+    Number(user?.company_id ?? user?.companyId ?? user?.company?.id) ||
+    0;
+
+
   const friendlyName = () =>
     `GeneralJournal_${startDate}_to_${endDate}.${status?.format === 'pdf' ? 'pdf' : 'xls'}`;
 
@@ -48,12 +63,14 @@ export default function GeneralJournalBook() {
     setBusy(true);
     try {
       // normalize to controller expectation (pdf | excel/xls/xlsx → controller maps to pdf|xls)
-      const { data } = await napi.post('general-journal/report', {
-        start_date: startDate,
-        end_date: endDate,
-        format: requested,
-        query: searchTerm || undefined,
-      });
+const { data } = await napi.post('general-journal/report', {
+  start_date: startDate,
+  end_date: endDate,
+  format: requested,
+  query: searchTerm || undefined,
+  company_id: companyId, // ✅ REQUIRED (Option A)
+});
+
       setTicket(data.ticket);
       setStatus({ status: 'queued', progress: 1, format: requested === 'pdf' ? 'pdf' : 'xls' } as Status);
       setShowModal(true);
@@ -70,7 +87,10 @@ export default function GeneralJournalBook() {
 
     const poll = async () => {
       try {
-        const { data } = await napi.get<Status>(`general-journal/report/${ticket}/status`);
+const { data } = await napi.get<Status>(
+  `general-journal/report/${ticket}/status`,
+  { params: { company_id: companyId } }
+);
         setStatus(data);
         if (data.status === 'done' || data.status === 'error') {
           if (pollRef.current) window.clearInterval(pollRef.current);
@@ -91,13 +111,25 @@ export default function GeneralJournalBook() {
 
   const download = async () => {
     if (!ticket || !status || status.status !== 'done') return;
-    const res = await napi.get(`general-journal/report/${ticket}/download`, { responseType: 'blob' });
+const res = await napi.get(
+  `general-journal/report/${ticket}/download`,
+  {
+    responseType: 'blob',
+    params: { company_id: companyId },
+  }
+);
     saveBlob(res.data, friendlyName());
   };
 
   const viewPdf = async () => {
     if (!ticket || !status || status.status !== 'done' || status.format !== 'pdf') return;
-    const res = await napi.get(`general-journal/report/${ticket}/view`, { responseType: 'blob' });
+const res = await napi.get(
+  `general-journal/report/${ticket}/view`,
+  {
+    responseType: 'blob',
+    params: { company_id: companyId },
+  }
+);
     openBlob(res.data);
   };
 

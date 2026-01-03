@@ -44,6 +44,14 @@ private const FIRST_FLOW_YEAR = 2025;
         try {
             $this->setStatus('running', 1, 'Loading…');
 
+$cid = (int) $this->companyId;
+if ($cid <= 0) {
+    $this->setStatus('failed', 100, 'Missing company scope (companyId=0).');
+    return;
+}
+
+
+
             $sdate = Carbon::parse($this->startDate)->startOfDay()->toDateString();
             $edate = Carbon::parse($this->endDate)->endOfDay()->toDateString();
 
@@ -82,7 +90,7 @@ $fyStart     = Carbon::parse($openingAsOf)->addDay()->toDateString(); // 2025-01
 
                 ->where('ac.active_flag', 1)
                 ->whereBetween('ac.acct_code', [$this->startAccount, $this->endAccount])
-                ->when($this->companyId, fn($q) => $q->where('ac.company_id', $this->companyId))
+->where('ac.company_id', $cid) // ✅ always scoped
                 ->orderBy('ac.acct_number')
                 ->get()
                 ->keyBy('acct_code');
@@ -98,7 +106,7 @@ $fyStart     = Carbon::parse($openingAsOf)->addDay()->toDateString(); // 2025-01
 $openings = DB::table('beginning_balance as bb')
     ->select('bb.account_code', 'bb.amount')
     ->whereBetween('bb.account_code', [$this->startAccount, $this->endAccount])
-    ->when($this->companyId > 0, fn($q) => $q->where('bb.company_id', $this->companyId))
+->where('bb.company_id', $cid)
     ->get()
     ->keyBy('account_code')
     ->map(fn($r) => (float)$r->amount);
@@ -353,61 +361,79 @@ foreach ($acctRows as $r) {
  * Returns acct_code => net(debit-credit) for [from..to]
  * ✅ Includes ONLY header rows where is_cancel = 'n'
  */
+/**
+ * Returns acct_code => net(debit-credit) for [from..to]
+ * ✅ Includes ONLY header rows where is_cancel = 'n'
+ * ✅ ALWAYS company-scoped (no “companyId=0 means all”)
+ */
 private function sumMovements(string $from, string $to)
 {
-    $companyId = $this->companyId;
+    $companyId = (int) $this->companyId;
+
+    // hard safety (should already be guarded in handle(), but keep fail-safe)
+    if ($companyId <= 0) {
+        return collect();
+    }
 
     $sql = "
     with src as (
-        -- General
+        -- General Accounting
         select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
         from general_accounting ga
         join general_accounting_details d
           on (d.transaction_id)::bigint = ga.id
         where ga.gen_acct_date between :s and :e
           and ga.is_cancel = 'n'
+          and ga.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and ga.company_id = :cid" : "") . "
         group by d.acct_code
 
         union all
-        select d.acct_code, sum(d.debit), sum(d.credit)
+
+        -- Cash Disbursement
+        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
         from cash_disbursement h
         join cash_disbursement_details d on d.transaction_id = h.id
         where h.disburse_date between :s and :e
           and h.is_cancel = 'n'
+          and h.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and h.company_id = :cid" : "") . "
         group by d.acct_code
 
         union all
-        select d.acct_code, sum(d.debit), sum(d.credit)
+
+        -- Cash Receipts
+        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
         from cash_receipts h
         join cash_receipt_details d on (d.transaction_id)::bigint = h.id
         where h.receipt_date between :s and :e
           and h.is_cancel = 'n'
+          and h.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and h.company_id = :cid" : "") . "
         group by d.acct_code
 
         union all
-        select d.acct_code, sum(d.debit), sum(d.credit)
+
+        -- Cash Purchase
+        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
         from cash_purchase h
         join cash_purchase_details d on d.transaction_id = h.id
         where h.purchase_date between :s and :e
           and h.is_cancel = 'n'
+          and h.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and h.company_id = :cid" : "") . "
         group by d.acct_code
 
         union all
-        select d.acct_code, sum(d.debit), sum(d.credit)
+
+        -- Cash Sales
+        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
         from cash_sales h
         join cash_sales_details d on (d.transaction_id)::bigint = h.id
         where h.sales_date between :s and :e
           and h.is_cancel = 'n'
+          and h.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and h.company_id = :cid" : "") . "
         group by d.acct_code
     )
     select acct_code, sum(deb) - sum(cred) as net
@@ -416,22 +442,26 @@ private function sumMovements(string $from, string $to)
     ";
 
     $bindings = [
-        's'  => $from,
-        'e'  => $to,
-        'sa' => $this->startAccount,
-        'ea' => $this->endAccount,
+        's'   => $from,
+        'e'   => $to,
+        'sa'  => $this->startAccount,
+        'ea'  => $this->endAccount,
+        'cid' => $companyId, // ✅ ALWAYS bind cid (no conditional)
     ];
-    if ($companyId) $bindings['cid'] = $companyId;
 
     $rows = DB::select($sql, $bindings);
-    return collect($rows)->keyBy('acct_code')->map(fn($r) => (float)$r->net);
+
+    return collect($rows)
+        ->keyBy('acct_code')
+        ->map(fn($r) => (float) $r->net);
 }
+
 // =================== BEGIN ADD: RE helper methods (copied from TB) ===================
 
 private function sumBeginningBalanceTotalGreaterOrEqual(int $threshold): float
 {
     return (float) DB::table('beginning_balance as bb')
-        ->when($this->companyId > 0, fn($q) => $q->where('bb.company_id', $this->companyId))
+->where('bb.company_id', (int)$this->companyId)
         ->whereRaw("
             (
               CASE
@@ -530,13 +560,23 @@ private function sumNetIncomeForYear(int $year): float
  * Detail rows for the General Ledger for [from..to]
  * ✅ Includes ONLY header rows where is_cancel = 'n'
  */
+/**
+ * Detail rows for the General Ledger for [from..to]
+ * ✅ Includes ONLY header rows where is_cancel = 'n'
+ * ✅ ALWAYS company-scoped (no “companyId=0 means all”)
+ */
 private function periodRows(string $from, string $to): array
 {
-    $companyId = $this->companyId;
+    $companyId = (int) $this->companyId;
+
+    // hard safety (should already be guarded in handle(), but keep fail-safe)
+    if ($companyId <= 0) {
+        return [];
+    }
 
     $sql = "
     select * from (
-        -- General
+        -- General Accounting
         select
           'G' as category,
           ga.id as batch_no,
@@ -552,11 +592,12 @@ private function periodRows(string $from, string $to): array
           on (d.transaction_id)::bigint = ga.id
         where ga.gen_acct_date between :s and :e
           and ga.is_cancel = 'n'
+          and ga.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and ga.company_id = :cid" : "") . "
         group by ga.id, ga.gen_acct_date, ga.ga_no, ga.explanation, d.acct_code
 
         union all
+
         -- Cash Disbursement
         select
           'D' as category,
@@ -575,11 +616,12 @@ private function periodRows(string $from, string $to): array
          and v.company_id::text = h.company_id::text
         where h.disburse_date between :s and :e
           and h.is_cancel = 'n'
+          and h.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and h.company_id = :cid" : "") . "
         group by h.id, h.disburse_date, h.cd_no, v.vend_name, h.explanation, d.acct_code
 
         union all
+
         -- Cash Receipts
         select
           'R' as category,
@@ -598,11 +640,12 @@ private function periodRows(string $from, string $to): array
          and c.company_id::text = h.company_id::text
         where h.receipt_date between :s and :e
           and h.is_cancel = 'n'
+          and h.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and h.company_id = :cid" : "") . "
         group by h.id, h.receipt_date, h.cr_no, c.cust_name, h.details, d.acct_code
 
         union all
+
         -- Cash Purchase
         select
           'P' as category,
@@ -621,11 +664,12 @@ private function periodRows(string $from, string $to): array
          and v.company_id::text = h.company_id::text
         where h.purchase_date between :s and :e
           and h.is_cancel = 'n'
+          and h.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and h.company_id = :cid" : "") . "
         group by h.id, h.purchase_date, h.cp_no, v.vend_name, h.explanation, d.acct_code
 
         union all
+
         -- Cash Sales
         select
           'S' as category,
@@ -644,23 +688,24 @@ private function periodRows(string $from, string $to): array
          and c.company_id::text = h.company_id::text
         where h.sales_date between :s and :e
           and h.is_cancel = 'n'
+          and h.company_id = :cid
           and d.acct_code between :sa and :ea
-          " . ($companyId ? "and h.company_id = :cid" : "") . "
         group by h.id, h.sales_date, h.cs_no, c.cust_name, h.explanation, d.acct_code
     ) as u
     order by u.acct_code, u.post_date, u.batch_no
     ";
 
     $bindings = [
-        's'  => $from,
-        'e'  => $to,
-        'sa' => $this->startAccount,
-        'ea' => $this->endAccount,
+        's'   => $from,
+        'e'   => $to,
+        'sa'  => $this->startAccount,
+        'ea'  => $this->endAccount,
+        'cid' => $companyId, // ✅ ALWAYS bind cid (no conditional)
     ];
-    if ($companyId) $bindings['cid'] = $companyId;
 
     return DB::select($sql, $bindings);
 }
+
     /* --------------------------- writers --------------------------- */
 
 private function writePdf(array $report, string $sdate, string $edate, string $orientation = 'landscape'): array
@@ -669,6 +714,8 @@ private function writePdf(array $report, string $sdate, string $edate, string $o
     $target       = $this->targetLocal('general-ledger', 'pdf', $downloadName);
 
     $pdf = new GLPDF(PDF_PAGE_ORIENTATION, PDF_UNIT, PDF_PAGE_FORMAT, true, 'UTF-8', false);
+    $pdf->setCompanyHeader((int)$this->companyId);
+
     $pdf->SetHeaderData('', 0, '', '');
     $pdf->setHeaderFont([PDF_FONT_NAME_MAIN, '', PDF_FONT_SIZE_MAIN]);
     $pdf->setFooterFont([PDF_FONT_NAME_DATA, '', PDF_FONT_SIZE_DATA]);
@@ -962,14 +1009,13 @@ private function writeXls(array $report, string $sdate, string $edate): array
     $row = 1;
     $dateRangeTxt = \Carbon\Carbon::parse($sdate)->format('m/d/Y').' --- '.\Carbon\Carbon::parse($edate)->format('m/d/Y');
 
-// =================== BEGIN OVERWRITE: XLS column sizing + formats (A..H only) ===================
-foreach (range('A','H') as $col) {
-    $sheet->getColumnDimension($col)->setWidth(18);
-}
-// Numeric columns: Beginning, Debit, Credit, Ending = E..H
-$sheet->getStyle('E:H')->getNumberFormat()->setFormatCode('#,##0.00');
-// =================== END OVERWRITE: XLS column sizing + formats (A..H only) ===================
-
+    // =================== BEGIN OVERWRITE: XLS column sizing + formats (A..H only) ===================
+    foreach (range('A','H') as $col) {
+        $sheet->getColumnDimension($col)->setWidth(18);
+    }
+    // Numeric columns: Beginning, Debit, Credit, Ending = E..H
+    $sheet->getStyle('E:H')->getNumberFormat()->setFormatCode('#,##0.00');
+    // =================== END OVERWRITE: XLS column sizing + formats (A..H only) ===================
 
     $bold = function($coord) use ($sheet) { $sheet->getStyle($coord)->getFont()->setBold(true); };
 
@@ -979,141 +1025,160 @@ $sheet->getStyle('E:H')->getNumberFormat()->setFormatCode('#,##0.00');
         $acctDesc = (string)($rows[0]['acct_desc'] ?? '');
         $mainAcct = (string)($rows[0]['main_acct'] ?? '');
 
+        // ✅ Company-aware header (company_id aware)
+        $cid = (int)($this->companyId ?? 0);
+
+        $companyHdr = [
+            'name'  => 'SUCDEN PHILIPPINES, INC.',
+            'tin'   => 'TIN-000-105-2567-000',
+            'addr1' => 'Unit 2202 The Podium West Tower',
+            'addr2' => 'Ortigas Center, Mandaluyong City',
+        ];
+
+        if ($cid === 2) {
+            $companyHdr = [
+                'name'  => 'AMEROP PHILIPPINES, INC.',
+                'tin'   => 'TIN- 762-592-927-000',
+                'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
+                'addr2' => 'Brgy. Mandalagan, Bacolod City',
+            ];
+        }
+
         // Company block
-        $sheet->setCellValue("A{$row}", 'SUCDEN PHILIPPINES, INC.');
-$sheet->mergeCells("A{$row}:H{$row}");
+        $sheet->setCellValue("A{$row}", $companyHdr['name']);
+        $sheet->mergeCells("A{$row}:H{$row}");
         $bold("A{$row}");
         $sheet->getStyle("A{$row}")->getFont()->setSize(15);
         $row++;
 
-        $sheet->setCellValue("A{$row}", 'TIN-000-105-2567-000');
-$sheet->mergeCells("A{$row}:H{$row}");
+        $sheet->setCellValue("A{$row}", $companyHdr['tin']);
+        $sheet->mergeCells("A{$row}:H{$row}");
         $bold("A{$row}");
         $sheet->getStyle("A{$row}")->getFont()->setSize(12);
         $row++;
 
-        $sheet->setCellValue("A{$row}", 'Unit 2202 The Podium West Tower');
-$sheet->mergeCells("A{$row}:H{$row}");
+        $sheet->setCellValue("A{$row}", $companyHdr['addr1']);
+        $sheet->mergeCells("A{$row}:H{$row}");
         $bold("A{$row}");
         $row++;
 
-        $sheet->setCellValue("A{$row}", 'Ortigas Center, Mandaluyong City');
-$sheet->mergeCells("A{$row}:H{$row}");
+        $sheet->setCellValue("A{$row}", $companyHdr['addr2']);
+        $sheet->mergeCells("A{$row}:H{$row}");
         $bold("A{$row}");
         $row++;
 
         $row++;
         $sheet->setCellValue("A{$row}", "GENERAL LEDGER - ({$mainAcct})");
-$sheet->mergeCells("A{$row}:H{$row}");
+        $sheet->mergeCells("A{$row}:H{$row}");
         $bold("A{$row}");
         $row++;
 
         $sheet->setCellValue("A{$row}", "For the period covering: {$dateRangeTxt}");
-$sheet->mergeCells("A{$row}:H{$row}");
+        $sheet->mergeCells("A{$row}:H{$row}");
         $bold("A{$row}");
         $row++;
 
         $sheet->setCellValue("A{$row}", "{$acctCode} - {$acctDesc}");
-$sheet->mergeCells("A{$row}:H{$row}");
+        $sheet->mergeCells("A{$row}:H{$row}");
         $bold("A{$row}");
         $row++;
 
         // Header row
         $row++;
-// =================== BEGIN OVERWRITE: XLS headers (remove Post Date + Batch #) ===================
-$headers = [
-    'Tran Date',
-    'Reference #',
-    'Cust/Vend',
-    'Posting Comment',
-    'Beginning Balance',
-    'Debit',
-    'Credit',
-    'Ending Balance'
-];
-// =================== END OVERWRITE: XLS headers (remove Post Date + Batch #) ===================
+
+        // =================== BEGIN OVERWRITE: XLS headers (remove Post Date + Batch #) ===================
+        $headers = [
+            'Tran Date',
+            'Reference #',
+            'Cust/Vend',
+            'Posting Comment',
+            'Beginning Balance',
+            'Debit',
+            'Credit',
+            'Ending Balance'
+        ];
+        // =================== END OVERWRITE: XLS headers (remove Post Date + Batch #) ===================
+
         $col='A';
         foreach ($headers as $h) {
             $sheet->setCellValue("{$col}{$row}", $h);
             $sheet->getStyle("{$col}{$row}")->getFont()->setSize(12);
             $col++;
         }
+
         if ($row === 9) { // freeze only once the first time
             $sheet->freezePane("A".($row+1));
         }
         $row++;
 
-
-
-// =================== BEGIN OVERWRITE: XLS row rendering (supports month-opening rows) ===================
-$monthDebit = 0.0; $monthCredit = 0.0;
-$acctTotDebit = 0.0; $acctTotCredit = 0.0;
-$lastMonthKey = null;
-
-foreach ($rows as $r) {
-    $dt = \Carbon\Carbon::parse($r['post_date'] ?? $r['tran_date'] ?? $sdate);
-    $monthKey = $dt->format('Y-m');
-
-    if ($lastMonthKey !== null && $lastMonthKey !== $monthKey) {
-        // month subtotal lines (Debit=F, Credit=G)
-        $row++;  $sheet->setCellValue("F{$row}", '-----------------'); $sheet->setCellValue("G{$row}", '-----------------');
-        $row++;  $sheet->setCellValue("F{$row}", $monthDebit);        $sheet->setCellValue("G{$row}", $monthCredit);
-        $row++;  /* spacing row */
+        // =================== BEGIN OVERWRITE: XLS row rendering (supports month-opening rows) ===================
         $monthDebit = 0.0; $monthCredit = 0.0;
-    }
-    $lastMonthKey = $monthKey;
+        $acctTotDebit = 0.0; $acctTotCredit = 0.0;
+        $lastMonthKey = null;
 
-    $isMonthOpen = !empty($r['is_month_open']);
+        foreach ($rows as $r) {
+            $dt = \Carbon\Carbon::parse($r['post_date'] ?? $r['tran_date'] ?? $sdate);
+            $monthKey = $dt->format('Y-m');
 
-    $debit  = (float)($r['debit']  ?? 0);
-    $credit = (float)($r['credit'] ?? 0);
-    $ending = (float)($r['ending'] ?? 0);
+            if ($lastMonthKey !== null && $lastMonthKey !== $monthKey) {
+                // month subtotal lines (Debit=F, Credit=G)
+                $row++;  $sheet->setCellValue("F{$row}", '-----------------'); $sheet->setCellValue("G{$row}", '-----------------');
+                $row++;  $sheet->setCellValue("F{$row}", $monthDebit);        $sheet->setCellValue("G{$row}", $monthCredit);
+                $row++;  /* spacing row */
+                $monthDebit = 0.0; $monthCredit = 0.0;
+            }
+            $lastMonthKey = $monthKey;
 
-    $ref    = (string)($r['reference_no'] ?? '');
-    $party  = (string)($r['party'] ?? '');
-    $comm   = (string)($r['comment'] ?? '');
+            $isMonthOpen = !empty($r['is_month_open']);
 
-    // columns: A Date, B Ref, C Party, D Comment, E Beginning, F Debit, G Credit, H Ending
-    $sheet->setCellValue("A{$row}", $dt->format('m/d/Y'));
-    $sheet->setCellValue("B{$row}", $ref);
-    $sheet->setCellValue("C{$row}", $party);
-    $sheet->setCellValue("D{$row}", $comm);
+            $debit  = (float)($r['debit']  ?? 0);
+            $credit = (float)($r['credit'] ?? 0);
+            $ending = (float)($r['ending'] ?? 0);
 
-    if ($isMonthOpen) {
-        $sheet->setCellValue("E{$row}", (float)($r['beginning'] ?? 0.0));
-        // make month opening label bold for visibility
-        $sheet->getStyle("D{$row}")->getFont()->setBold(true);
-        $sheet->getStyle("E{$row}")->getFont()->setBold(true);
-        $sheet->getStyle("H{$row}")->getFont()->setBold(true);
-    }
+            $ref    = (string)($r['reference_no'] ?? '');
+            $party  = (string)($r['party'] ?? '');
+            $comm   = (string)($r['comment'] ?? '');
 
-    if ($debit  != 0.0) $sheet->setCellValue("F{$row}", $debit);
-    if ($credit != 0.0) $sheet->setCellValue("G{$row}", $credit);
+            // columns: A Date, B Ref, C Party, D Comment, E Beginning, F Debit, G Credit, H Ending
+            $sheet->setCellValue("A{$row}", $dt->format('m/d/Y'));
+            $sheet->setCellValue("B{$row}", $ref);
+            $sheet->setCellValue("C{$row}", $party);
+            $sheet->setCellValue("D{$row}", $comm);
 
-// ✅ blank Ending display on Beginning Balance rows
-if (!$isMonthOpen) {
-    $sheet->setCellValue("H{$row}", $ending);
-} else {
-    $sheet->setCellValue("H{$row}", ''); // show blank like the PDF
-}
+            if ($isMonthOpen) {
+                $sheet->setCellValue("E{$row}", (float)($r['beginning'] ?? 0.0));
+                // make month opening label bold for visibility
+                $sheet->getStyle("D{$row}")->getFont()->setBold(true);
+                $sheet->getStyle("E{$row}")->getFont()->setBold(true);
+                $sheet->getStyle("H{$row}")->getFont()->setBold(true);
+            }
 
-    $monthDebit += $debit;   $monthCredit += $credit;
-    $acctTotDebit += $debit; $acctTotCredit += $credit;
+            if ($debit  != 0.0) $sheet->setCellValue("F{$row}", $debit);
+            if ($credit != 0.0) $sheet->setCellValue("G{$row}", $credit);
 
-    $row++;
-}
+            // ✅ blank Ending display on Beginning Balance rows
+            if (!$isMonthOpen) {
+                $sheet->setCellValue("H{$row}", $ending);
+            } else {
+                $sheet->setCellValue("H{$row}", ''); // show blank like the PDF
+            }
 
-// Account totals (Debit=F, Credit=G, Ending=H)
-$row++; $sheet->setCellValue("F{$row}", '-----------------'); $sheet->setCellValue("G{$row}", '-----------------'); $sheet->setCellValue("H{$row}", '-----------------');
-$row++; $sheet->setCellValue("F{$row}", $acctTotDebit);      $sheet->setCellValue("G{$row}", $acctTotCredit);
+            $monthDebit += $debit;   $monthCredit += $credit;
+            $acctTotDebit += $debit; $acctTotCredit += $credit;
 
-$finalEnding = (float)end($rows)['ending'] ?? 0.0;
-$sheet->setCellValue("H{$row}", $finalEnding);
+            $row++;
+        }
 
-$row++; $sheet->setCellValue("F{$row}", '-----------------'); $sheet->setCellValue("G{$row}", '-----------------'); $sheet->setCellValue("H{$row}", '-----------------');
-$row += 3;
-// =================== END OVERWRITE: XLS row rendering (supports month-opening rows) ===================
+        // Account totals (Debit=F, Credit=G, Ending=H)
+        $row++; $sheet->setCellValue("F{$row}", '-----------------'); $sheet->setCellValue("G{$row}", '-----------------'); $sheet->setCellValue("H{$row}", '-----------------');
+        $row++; $sheet->setCellValue("F{$row}", $acctTotDebit);      $sheet->setCellValue("G{$row}", $acctTotCredit);
 
+        $finalEnding = (float)end($rows)['ending'] ?? 0.0;
+        $sheet->setCellValue("H{$row}", $finalEnding);
+
+        $row++; $sheet->setCellValue("F{$row}", '-----------------'); $sheet->setCellValue("G{$row}", '-----------------'); $sheet->setCellValue("H{$row}", '-----------------');
+        $row += 3;
+        // =================== END OVERWRITE: XLS row rendering (supports month-opening rows) ===================
     }
 
     $writer = ($ext === 'xls')
@@ -1125,13 +1190,11 @@ $row += 3;
     }
 
     $writer->save($target['abs']);
-    // optional tidy-up (memory), not required for opening performance
     $spreadsheet->disconnectWorksheets();
     unset($spreadsheet, $writer);
 
     return $target;
 }
-
 
 
 

@@ -76,7 +76,7 @@ public function requestEdit(Request $req)
     $requester = $u?->id;
 
     // ✅ force action to lowercase so we always store 'edit', 'cancel', 'delete', etc.
-    $action = strtolower((string) $req->input('action', 'edit'));
+$action = strtolower(trim((string) $req->input('action', 'edit')));
 
     if (!$module || !$recordId) {
         return response()->json(['message' => 'module and record_id are required'], 422);
@@ -189,13 +189,56 @@ public function requestEdit(Request $req)
     /**
      * GET /api/approvals/{id}
      */
-    public function show($id)
-    {
-        $req = Approval::findOrFail($id);
-        $this->authorizeView($req);
+public function show($id)
+{
+    $req = Approval::findOrFail($id);
+    $this->authorizeView($req);
 
-        return response()->json($req);
+    $module = strtolower(trim((string) $req->module));
+    $action = strtolower(trim((string) $req->action));
+
+    $context = null;
+
+    if ($module === 'receiving_entries' && $action === 'process') {
+        $companyId = (int) ($req->company_id ?? 0);
+        $recordId  = (int) ($req->record_id ?? 0);
+
+        $receiving = DB::table('receiving_entry')
+            ->where('id', $recordId)
+            ->when($companyId > 0, fn($q) => $q->where('company_id', $companyId))
+            ->first();
+
+$preview = null;
+$previewError = null;
+
+try {
+    $svc = app(\App\Services\ReceivingPurchaseJournalService::class);
+    $preview = $svc->buildJournalPreview($companyId, $recordId);
+} catch (\Throwable $e) {
+    $previewError = $e->getMessage(); // ✅ send to frontend
+    \Log::error('Approval show(): buildJournalPreview failed', [
+        'approval_id' => $req->id,
+        'company_id'  => $companyId,
+        'record_id'   => $recordId,
+        'err'         => $e->getMessage(),
+    ]);
+}
+
+
+$context = [
+  'receiving' => $receiving,
+  'purchase_journal_preview' => $preview,
+  'purchase_journal_preview_error' => $previewError, // ✅ add
+];
+
     }
+
+    return response()->json([
+        'approval' => $req,
+        'context'  => $context,
+    ]);
+}
+
 
 public function statusBySubject(\Illuminate\Http\Request $req)
 {
@@ -365,7 +408,7 @@ public function approve(Request $request, int $id)
     $approval->save();
 
     // Apply module-specific side-effects (e.g. update cash_sales)
-    $this->applyModuleAction($approval);
+$this->applyModuleAction($approval, $request);
 
     return response()->json(['ok' => true]);
 }
@@ -378,11 +421,15 @@ public function approve(Request $request, int $id)
  *  - sales_journal + DELETE  → set cash_sales.is_cancel = 'd'
  *  - general_accounting + CANCEL / DELETE → update general_accounting.is_cancel
  */
-private function applyModuleAction(Approval $approval): void
+/**
+ * Apply the side-effect of an approved action to its module/record.
+ */
+private function applyModuleAction(Approval $approval, Request $request): void
 {
     try {
-        $module    = $approval->module;
-        $action    = strtoupper((string) ($approval->action ?? ''));
+        $module = trim((string) ($approval->module ?? ''));
+        $action = strtoupper(trim((string) ($approval->action ?? '')));
+
         $recordId  = (int) $approval->record_id;
         $companyId = $approval->company_id;
 
@@ -392,6 +439,16 @@ private function applyModuleAction(Approval $approval): void
 
         $now = now();
 
+        \Log::info('applyModuleAction dispatch', [
+            'approval_id' => $approval->id,
+            'module_raw'  => $approval->module,
+            'module_norm' => $module,
+            'action_raw'  => $approval->action,
+            'action_norm' => $action,
+            'record_id'   => $recordId,
+            'company_id'  => $companyId,
+        ]);
+
         // ───── SALES JOURNAL (existing behavior) ─────
         if ($module === 'sales_journal') {
             $q = DB::table('cash_sales')->where('id', $recordId);
@@ -400,20 +457,11 @@ private function applyModuleAction(Approval $approval): void
             }
 
             if ($action === 'CANCEL') {
-                $q->update([
-                    'is_cancel'  => 'c',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'c', 'updated_at' => $now]);
             } elseif ($action === 'DELETE') {
-                $q->update([
-                    'is_cancel'  => 'd',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'd', 'updated_at' => $now]);
             } elseif ($action === 'UNCANCEL') {
-                $q->update([
-                    'is_cancel'  => 'n',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'n', 'updated_at' => $now]);
             }
         }
 
@@ -425,26 +473,13 @@ private function applyModuleAction(Approval $approval): void
             }
 
             if ($action === 'CANCEL') {
-                // cancel JE
-                $q->update([
-                    'is_cancel'  => 'c',   // <-- use 'c' to mirror Sales Journal
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'c', 'updated_at' => $now]);
             } elseif ($action === 'DELETE') {
-                // soft-delete JE (hide from dropdowns)
-                $q->update([
-                    'is_cancel'  => 'd',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'd', 'updated_at' => $now]);
             } elseif ($action === 'UNCANCEL') {
-                // if you later add an UNCANCEL approval type
-                $q->update([
-                    'is_cancel'  => 'n',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'n', 'updated_at' => $now]);
             }
         }
-
 
         // ───── CASH RECEIPTS (NEW) ─────
         if ($module === 'cash_receipts' || $module === 'cash_receipt') {
@@ -454,26 +489,13 @@ private function applyModuleAction(Approval $approval): void
             }
 
             if ($action === 'CANCEL') {
-                // cancelled
-                $q->update([
-                    'is_cancel'  => 'c',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'c', 'updated_at' => $now]);
             } elseif ($action === 'DELETE') {
-                // soft delete
-                $q->update([
-                    'is_cancel'  => 'd',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'd', 'updated_at' => $now]);
             } elseif ($action === 'UNCANCEL') {
-                // active
-                $q->update([
-                    'is_cancel'  => 'n',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'n', 'updated_at' => $now]);
             }
         }
-
 
         // ───── PURCHASE JOURNAL (NEW) ─────
         if ($module === 'purchase_journal') {
@@ -483,97 +505,61 @@ private function applyModuleAction(Approval $approval): void
             }
 
             if ($action === 'CANCEL') {
-                // keep your existing Y/N scheme for now
-                $q->update([
-                    'is_cancel'  => 'c',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'c', 'updated_at' => $now]);
             } elseif ($action === 'UNCANCEL') {
-                $q->update([
-                    'is_cancel'  => 'n',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'n', 'updated_at' => $now]);
             } elseif ($action === 'DELETE') {
-                // if you keep hard delete
-                $q->update([
-                    'is_cancel'  => 'd',
-                    'updated_at' => $now,
-                ]);
+                $q->update(['is_cancel' => 'd', 'updated_at' => $now]);
             }
         }
 
+        // ───── CASH DISBURSEMENT (NEW) ─────
+        if ($module === 'cash_disbursement' || $module === 'cash_disbursements') {
+            $q = DB::table('cash_disbursement')->where('id', $recordId);
+            if (!empty($companyId)) {
+                $q->where('company_id', $companyId);
+            }
 
+            if ($action === 'CANCEL') {
+                $q->update(['is_cancel' => 'y', 'updated_at' => $now]);
+            } elseif ($action === 'UNCANCEL') {
+                $q->update(['is_cancel' => 'n', 'updated_at' => $now]);
+            } elseif ($action === 'DELETE') {
+                DB::table('cash_disbursement_details')
+                    ->where('transaction_id', $recordId)
+                    ->delete();
 
-// ───── CASH DISBURSEMENT (NEW) ─────
-if ($module === 'cash_disbursement' || $module === 'cash_disbursements') {
-    // header table
-    $q = DB::table('cash_disbursement')->where('id', $recordId);
-    if (!empty($companyId)) {
-        $q->where('company_id', $companyId);
-    }
-
-    if ($action === 'CANCEL') {
-        $q->update([
-            'is_cancel'  => 'y',
-            'updated_at' => $now,
-        ]);
-    } elseif ($action === 'UNCANCEL') {
-        $q->update([
-            'is_cancel'  => 'n',
-            'updated_at' => $now,
-        ]);
-    } elseif ($action === 'DELETE') {
-        // hard-delete to match your current CD destroy() behavior
-        DB::table('cash_disbursement_details')
-            ->where('transaction_id', $recordId)
-            ->delete();
-
-        $q->delete();
-    }
-}
-
+                $q->delete();
+            }
+        }
 
         // ───── PBN POSTING (NEW) ─────
-        // module: 'pbn_posting'
-        // actions:
-        //  - POST          => pbn_entry.posted_flag = 1
-        //  - UNPOST_UNUSED => set pbn_entry_details.selected_flag = 0 where used_qty = 0
-        //  - CLOSE         => pbn_entry.close_flag = 1
         if ($module === 'pbn_posting') {
-            // normalize
             $act = strtoupper($action);
 
-            // Header row
             $hdr = DB::table('pbn_entry')->where('id', $recordId);
             if (!empty($companyId)) {
                 $hdr->where('company_id', $companyId);
             }
 
-            // quick fetch for state checks
             $pbn = (clone $hdr)->first();
-            if (!$pbn) {
-                return;
-            }
+            if (!$pbn) return;
 
-            // If deleted/hidden, do nothing
             if (isset($pbn->delete_flag) && (int)$pbn->delete_flag === 1) {
                 return;
             }
 
-            // 1) POST
             if ($act === 'POST') {
-                // do not post if already closed
                 if (isset($pbn->close_flag) && (int)$pbn->close_flag === 1) {
                     return;
                 }
 
                 $hdr->update([
                     'posted_flag' => 1,
-                    'posted_by'   => (string)($approval->approved_by ?? ''), // varchar field
+                    'posted_by'   => (string)($approval->approved_by ?? ''),
                     'updated_at'  => $now,
                 ]);
 
-                // Mark all details as selectable/posted (uses existing selected_flag field)
                 DB::table('pbn_entry_details')
                     ->where('pbn_entry_id', $recordId)
                     ->when(!empty($companyId), fn($q) => $q->where('company_id', $companyId))
@@ -588,19 +574,13 @@ if ($module === 'cash_disbursement' || $module === 'cash_disbursements') {
                 return;
             }
 
-            // 2) UNPOST_UNUSED
             if ($act === 'UNPOST_UNUSED') {
-                // If closed, do not allow changes
                 if (isset($pbn->close_flag) && (int)$pbn->close_flag === 1) {
                     return;
                 }
 
-                // Best-effort: requires receiving usage table to exist.
-                // This matches the same expected schema described in PbnPostingController:
-                // receiving_details: company_id, pbn_entry_id, pbn_detail_id, quantity
                 $receivingTable = \App\Http\Controllers\PbnPostingController::RECEIVING_DETAILS_TABLE ?? 'receiving_details';
 
-                // If receiving table is missing, do nothing (safe)
                 try {
                     $used = DB::table($receivingTable)
                         ->where('company_id', (int)$companyId)
@@ -617,7 +597,6 @@ if ($module === 'cash_disbursement' || $module === 'cash_disbursements') {
                         if ($k > 0) $usedMap[$k] = (float)($r->used_qty ?? 0);
                     }
 
-                    // Unpost ONLY those with used_qty == 0
                     $detailIds = DB::table('pbn_entry_details')
                         ->where('pbn_entry_id', $recordId)
                         ->when(!empty($companyId), fn($q) => $q->where('company_id', $companyId))
@@ -640,22 +619,20 @@ if ($module === 'cash_disbursement' || $module === 'cash_disbursements') {
                             ->when(!empty($companyId), fn($q) => $q->where('company_id', $companyId))
                             ->whereIn('id', $unusedIds)
                             ->update([
-                                'selected_flag' => 0,  // hides unused from Receiving dropdown
+                                'selected_flag' => 0,
                                 'updated_at'    => $now,
                             ]);
                     }
                 } catch (\Throwable $e) {
                     \Log::warning('PBN UNPOST_UNUSED skipped (receiving usage table not ready)', [
-                        'err' => $e->getMessage()
+                        'err' => $e->getMessage(),
                     ]);
                 }
 
                 return;
             }
 
-            // 3) CLOSE
             if ($act === 'CLOSE') {
-                // allow close only if already posted
                 if ((int)($pbn->posted_flag ?? 0) !== 1) {
                     return;
                 }
@@ -670,9 +647,96 @@ if ($module === 'cash_disbursement' || $module === 'cash_disbursements') {
             }
         }
 
+        // ───── RECEIVING ENTRY POSTING (UPDATED) ─────
+        if (in_array(trim((string)$module), ['receiving_entries', 'receiving_entry'], true)) {
+            $act = strtoupper(trim((string)$action));
 
+            $hdrQ = DB::table('receiving_entry')->where('id', $recordId);
+            if (!empty($companyId)) $hdrQ->where('company_id', $companyId);
 
+            $re = (clone $hdrQ)->first();
+            if (!$re) return;
 
+            $isDeleted   = (bool)($re->deleted_flag ?? false);
+            $isProcessed = (bool)($re->processed_flag ?? false);
+
+            if ($act === 'POST') {
+                if ($isDeleted) return;
+                if ($isProcessed) return;
+
+                $updated = $hdrQ->update([
+                    'posted_flag' => true,
+                    'posted_by'   => (int)($approval->approved_by ?? 0),
+                    'posted_at'   => $now,
+                    'updated_at'  => $now,
+                ]);
+
+                \Log::info('Receiving POST applyModuleAction update result', [
+                    'record_id'   => $recordId,
+                    'company_id'  => $companyId,
+                    'updated'     => $updated,
+                    'module'      => $module,
+                    'action'      => $action,
+                    'approval_id' => $approval->id,
+                ]);
+
+                // ✅ IMPORTANT: POST does NOT create Purchase Journal. PROCESS does.
+                return;
+            }
+
+            if ($act === 'PROCESS') {
+                $isPosted = (bool)($re->posted_flag ?? false);
+                if ($isDeleted) return;
+                if (!$isPosted) {
+                    throw new \RuntimeException('Cannot PROCESS: Receiving Entry is not posted yet.');
+                }
+                if ($isProcessed) return;
+
+                // ✅ Updated: removed pay_method/bank/check_ref
+                $inputs = $request->validate([
+                    'explanation' => ['required','string','max:1000'],
+                    'booking_no'  => ['nullable','string','max:25'],
+                ]);
+
+                $svc = app(\App\Services\ReceivingPurchaseJournalService::class);
+
+                // Server truth preview + balance check
+                $preview = $svc->buildJournalPreview((int)$companyId, (int)$recordId);
+                if (empty($preview['totals']['balanced'])) {
+                    throw new \RuntimeException('Cannot PROCESS: Purchase Journal is not balanced.');
+                }
+
+                $ip  = (string)($request->ip() ?? '0.0.0.0');
+                $uid = (int)($approval->approved_by ?? 0);
+
+                // ✅ MUST succeed or throw (do not swallow)
+                $cpId = $svc->upsertPurchaseJournalFromReceiving(
+                    (int)$companyId,
+                    (int)$recordId,
+                    $uid,
+                    $ip,
+                    $inputs
+                );
+
+                $hdrQ->update([
+                    'processed_flag'   => true,
+                    'processed_by'     => $uid,
+                    'processed_at'     => $now,
+                    'cash_purchase_id' => $cpId,
+                    'updated_at'       => $now,
+                ]);
+
+                \Log::info('Receiving PROCESS created/updated Purchase Journal', [
+                    'company_id'       => $companyId,
+                    'receiving_entry'  => $recordId,
+                    'cash_purchase_id' => $cpId,
+                    'cp_no'            => DB::table('cash_purchase')->where('id', $cpId)->value('cp_no'),
+                    'approval_id'      => $approval->id,
+                ]);
+
+                return;
+            }
+        }
 
     } catch (\Throwable $e) {
         \Log::error('applyModuleAction failed', [
@@ -682,6 +746,9 @@ if ($module === 'cash_disbursement' || $module === 'cash_disbursements') {
             'record_id'   => $approval->record_id,
             'err'         => $e->getMessage(),
         ]);
+
+        // ✅ IMPORTANT: do not hide failures (especially PROCESS)
+        throw $e;
     }
 }
 

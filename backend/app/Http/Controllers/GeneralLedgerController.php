@@ -16,10 +16,22 @@ class GeneralLedgerController extends Controller
     /** Accounts endpoint for the two combo boxes. */
 public function accounts(Request $request)
 {
-    $companyId = (int)($request->input('company_id') ?? auth()->user()?->company_id ?? 0);
+    // ✅ Old behavior: company_id comes from request (frontend sends it)
+    $companyId = (int) $request->query('company_id', 0);
+
+    if ($companyId <= 0) {
+        return response()->json(['error' => 'Missing company_id'], 422);
+    }
+
+    // ✅ Prevent duplicate rows from account_main
+    $am = DB::table('account_main')
+        ->selectRaw("main_acct_code, MAX(main_acct) as main_acct")
+        ->groupBy('main_acct_code');
 
     $rows = DB::table('account_code as ac')
-        ->leftJoin('account_main as am', 'am.main_acct_code', '=', 'ac.main_acct_code')
+        ->leftJoinSub($am, 'am', function ($join) {
+            $join->on('am.main_acct_code', '=', 'ac.main_acct_code');
+        })
         ->select([
             'ac.acct_code',
             'ac.acct_desc',
@@ -27,22 +39,20 @@ public function accounts(Request $request)
             'ac.main_acct_code',
             DB::raw("COALESCE(am.main_acct, ac.main_acct) as main_acct"),
         ])
-        ->when($companyId, fn($q) => $q->where('ac.company_id', $companyId))
+        ->where('ac.company_id', $companyId)   // ✅ hard scope
         ->where('ac.active_flag', 1)
-        // ---- natural-ish sort by acct_code ----
-        // 1) numeric sort on the leading digits of acct_code (handles '1001-01' too)
         ->orderByRaw("
             CASE
               WHEN ac.acct_code ~ '^[0-9]+' THEN (substring(ac.acct_code from '^[0-9]+'))::int
               ELSE NULL
             END NULLS LAST
         ")
-        // 2) stable tiebreaker for non-numeric or equal numeric prefixes
         ->orderBy('ac.acct_code')
         ->get();
 
     return response()->json($rows);
 }
+
 
 
     /** Start report job. */
@@ -61,7 +71,11 @@ public function accounts(Request $request)
         $ticket      = (string) Str::uuid();
         $format      = $validated['format']      ?? 'pdf';
         $orientation = $validated['orientation'] ?? 'landscape';
-        $companyId   = (int)($validated['company_id'] ?? (auth()->user()?->company_id ?? 0));
+$companyId = (int) ($validated['company_id'] ?? 0);
+if ($companyId <= 0) {
+    return response()->json(['error' => 'Missing company_id'], 422);
+}
+
 
         // Seed initial job state in cache (frontend polls this)
         $state = [

@@ -12,8 +12,13 @@ use App\Jobs\BuildReceiptRegister;
 
 class ReceiptRegisterController extends Controller
 {
-    public function months(): JsonResponse
+    public function months(Request $req): JsonResponse
     {
+        // ✅ Option A: require company_id (keep API consistent, even if month_list is global)
+        $req->validate([
+            'company_id' => 'required|integer|min:1',
+        ]);
+
         $rows = DB::table('month_list')
             ->selectRaw('month_num, month_desc')
             ->orderByRaw('CAST(NULLIF(month_num, \'\') AS integer)')
@@ -22,41 +27,58 @@ class ReceiptRegisterController extends Controller
         return response()->json($rows);
     }
 
-    public function years(): JsonResponse
+    public function years(Request $req): JsonResponse
     {
-        $years = DB::table('cash_receipts')
-            ->selectRaw("DISTINCT EXTRACT(YEAR FROM receipt_date)::int AS year")
-            ->orderBy('year','desc')
+        // ✅ Option A: require company_id and scope results
+        $v = $req->validate([
+            'company_id' => 'required|integer|min:1',
+        ]);
+
+        $cid = (int) $v['company_id'];
+
+        $years = DB::table('cash_receipts as r')
+            ->where('r.company_id', $cid)
+            ->selectRaw("DISTINCT EXTRACT(YEAR FROM r.receipt_date)::int AS year")
+            ->orderBy('year', 'desc')
             ->pluck('year')
             ->all();
 
         if (empty($years)) {
             $y = (int) date('Y');
-            $years = range($y, $y - 5);
+            $years = range($y - 5, $y + 1);
+            rsort($years);
         }
 
-        return response()->json(array_map(fn($yr)=>['year'=>(int)$yr], $years));
+        return response()->json(array_map(fn($yr) => ['year' => (int)$yr], $years));
     }
 
     public function start(Request $req): JsonResponse
     {
         $v = $req->validate([
-            'month'  => 'required|integer|min:1|max:12',
-            'year'   => 'required|integer|min:1900|max:3000',
-            'format' => 'required|string|in:pdf,excel',
-            'query'  => 'nullable|string|max:200',
+            'month'      => 'required|integer|min:1|max:12',
+            'year'       => 'required|integer|min:1900|max:3000',
+            'format'     => 'required|string|in:pdf,excel,xls,xlsx',
+            'query'      => 'nullable|string|max:200',
+            'company_id' => 'required|integer|min:1', // ✅ Option A
         ]);
 
-        $fmt = $v['format']; // keep 'pdf' | 'excel' (Excel writer still saves .xls)
+        $user = $req->user();
+        if (!$user) {
+            return response()->json(['error' => 'unauthenticated'], 401);
+        }
 
-        $ticket     = Str::uuid()->toString();
-        $companyId  = $req->user()->company_id ?? null;
-        $userId     = $req->user()->id ?? null;
+        // ✅ normalize to pdf|xls (matches the updated frontend)
+        $fmt = strtolower($v['format']);
+        if ($fmt === 'excel' || $fmt === 'xlsx') $fmt = 'xls';
+
+        $ticket    = Str::uuid()->toString();
+        $companyId = (int) $v['company_id'];
+        $userId    = (int) ($user->id ?? 0);
 
         Cache::put("rr:$ticket", [
             'status'     => 'queued',
             'progress'   => 0,
-            'format'     => $fmt, // 'pdf' | 'excel'
+            'format'     => $fmt, // pdf|xls
             'file'       => null,
             'error'      => null,
             'period'     => [(int)$v['month'], (int)$v['year']],
@@ -65,12 +87,12 @@ class ReceiptRegisterController extends Controller
             'query'      => $v['query'] ?? null,
         ], now()->addHours(2));
 
-        // Octane-safe
+        // ✅ Octane-safe
         BuildReceiptRegister::dispatchAfterResponse(
             ticket:    $ticket,
             month:     (int)$v['month'],
             year:      (int)$v['year'],
-            format:    $fmt,
+            format:    $fmt,        // pdf|xls
             companyId: $companyId,
             userId:    $userId,
             query:     $v['query'] ?? null
@@ -79,22 +101,42 @@ class ReceiptRegisterController extends Controller
         return response()->json(['ticket' => $ticket]);
     }
 
-    public function status(string $ticket)
+    public function status(Request $req, string $ticket): JsonResponse
     {
         $state = Cache::get("rr:$ticket");
-        if (!$state) return response()->json(['error'=>'not_found'], 404);
+        if (!$state) return response()->json(['error' => 'not_found'], 404);
+
+        $user = $req->user();
+        if (!$user) return response()->json(['error' => 'unauthenticated'], 401);
+
+        $uid = (int) ($user->id ?? 0);
+
+        // ✅ enforce same user ticket access (Option A style)
+        if ((int)($state['user_id'] ?? 0) !== $uid) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         return response()->json($state);
     }
 
-    public function download(string $ticket)
+    public function download(Request $req, string $ticket)
     {
         $state = Cache::get("rr:$ticket");
-        if (!$state) return response()->json(['error'=>'not_found'], 404);
+        if (!$state) return response()->json(['error' => 'not_found'], 404);
+
+        $user = $req->user();
+        if (!$user) return response()->json(['error' => 'unauthenticated'], 401);
+
+        $uid = (int) ($user->id ?? 0);
+        if ((int)($state['user_id'] ?? 0) !== $uid) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         if (($state['status'] ?? '') !== 'done' || empty($state['file'])) {
-            return response()->json(['error'=>'not_ready'], 409);
+            return response()->json(['error' => 'not_ready'], 409);
         }
         if (!Storage::disk('local')->exists($state['file'])) {
-            return response()->json(['error'=>'missing_file'], 410);
+            return response()->json(['error' => 'missing_file'], 410);
         }
 
         $absolute = Storage::disk('local')->path($state['file']);
@@ -111,18 +153,27 @@ class ReceiptRegisterController extends Controller
         ]);
     }
 
-    public function view(string $ticket)
+    public function view(Request $req, string $ticket)
     {
         $state = Cache::get("rr:$ticket");
-        if (!$state) return response()->json(['error'=>'not_found'], 404);
+        if (!$state) return response()->json(['error' => 'not_found'], 404);
+
+        $user = $req->user();
+        if (!$user) return response()->json(['error' => 'unauthenticated'], 401);
+
+        $uid = (int) ($user->id ?? 0);
+        if ((int)($state['user_id'] ?? 0) !== $uid) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
         if (($state['status'] ?? '') !== 'done' || empty($state['file'])) {
-            return response()->json(['error'=>'not_ready'], 409);
+            return response()->json(['error' => 'not_ready'], 409);
         }
         if (($state['format'] ?? '') !== 'pdf') {
-            return response()->json(['error'=>'only_pdf_view_supported'], 415);
+            return response()->json(['error' => 'only_pdf_view_supported'], 415);
         }
         if (!Storage::disk('local')->exists($state['file'])) {
-            return response()->json(['error'=>'missing_file'], 410);
+            return response()->json(['error' => 'missing_file'], 410);
         }
 
         $absolute = Storage::disk('local')->path($state['file']);

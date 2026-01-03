@@ -57,57 +57,69 @@ class BuildTrialBalance implements ShouldQueue
             $fyStart     = Carbon::parse($openingAsOf)->addDay()->toDateString(); // 2025-01-01
 
             // 1) Accounts in range (respect FS filter)
-            $this->setStatus('running', 5, 'Loading accounts…');
+// 1) Accounts in range (respect FS filter)
+// 1) Accounts in range (respect FS filter)
+$this->setStatus('running', 5, 'Loading accounts…');
 
-            $accounts = DB::table('account_code as ac')
-                ->leftJoin('account_main as am', 'am.main_acct_code', '=', 'ac.main_acct_code')
-->selectRaw("
-    ac.acct_code,
-    ac.acct_desc,
-    ac.acct_number,
-    ac.main_acct_code,
-    COALESCE(am.main_acct, ac.main_acct) as main_acct,
-    ac.fs,
-    ac.exclude,
-    ac.active_flag,
-    -- P&L: FS starts with IS OR numeric prefix of acct_code > 4031
-    -- P&L: FS starts with IS OR numeric prefix of acct_code > 4031 (but 4031 itself is NOT P&L)
-    CASE
-      WHEN ac.acct_code = '4031' THEN 0
-      WHEN ac.fs ILIKE 'IS%' OR (
+$cid = (int) $this->companyId;
+
+// normalize range so start <= end (string compare is fine for numeric-like codes such as 1001..9999)
+$rangeStart = min($this->startAccount, $this->endAccount);
+$rangeEnd   = max($this->startAccount, $this->endAccount);
+
+$accounts = DB::table('account_code as ac')
+    ->leftJoin('account_main as am', 'am.main_acct_code', '=', 'ac.main_acct_code')
+    ->selectRaw("
+        ac.acct_code,
+        ac.acct_desc,
+        ac.acct_number,
+        ac.main_acct_code,
+        COALESCE(am.main_acct, ac.main_acct) as main_acct,
+        ac.fs,
+        ac.exclude,
+        ac.active_flag,
         CASE
-          WHEN ac.acct_code ~ '^[0-9]+' THEN (substring(ac.acct_code from '^[0-9]+'))::int
-          ELSE NULL
-        END
-      ) > 4031
-      THEN 1 ELSE 0
-    END as is_pnl
+          WHEN ac.acct_code = '4031' THEN 0
+          WHEN ac.fs ILIKE 'IS%' OR (
+            CASE
+              WHEN ac.acct_code ~ '^[0-9]+' THEN (substring(ac.acct_code from '^[0-9]+'))::int
+              ELSE NULL
+            END
+          ) > 4031
+          THEN 1 ELSE 0
+        END as is_pnl
+    ")
+    ->where('ac.active_flag', 1)
+    ->when($cid > 0, fn($q) => $q->where('ac.company_id', $cid))
 
-")
+    // ✅ RANGE BY acct_code ONLY
+    ->whereBetween('ac.acct_code', [$rangeStart, $rangeEnd])
+
+    // ✅ FS filter: ACT must treat NULL exclude as "not excluded"
+    ->when($this->fs !== 'ALL', function ($q) {
+        if ($this->fs === 'ACT') {
+            $q->where(function ($qq) {
+                $qq->where('ac.exclude', 0)
+                   ->orWhereNull('ac.exclude');
+            });
+        } elseif ($this->fs === 'BS') {
+            $q->where('ac.fs', 'like', 'BS%');
+        } elseif ($this->fs === 'IS') {
+            $q->where('ac.fs', 'like', 'IS%');
+        }
+    })
+
+    // sort for display (acct_number is OK for sorting, not filtering)
+    ->orderBy('ac.acct_code')
+    ->get()
+    ->keyBy('acct_code');
+
+if ($accounts->isEmpty()) {
+    $this->setStatus('failed', 100, 'No accounts in range.');
+    return;
+}
 
 
-
-                ->where('ac.active_flag', 1)
-                ->whereBetween('ac.acct_code', [$this->startAccount, $this->endAccount])
-                ->when($this->companyId > 0, fn($q) => $q->where('ac.company_id', $this->companyId))
-
-                ->when($this->fs !== 'ALL', function ($q) {
-                    if ($this->fs === 'ACT') {
-                        $q->where('ac.exclude', 0);
-                    } elseif ($this->fs === 'BS') {
-                        $q->where('ac.fs', 'like', 'BS%');
-                    } elseif ($this->fs === 'IS') {
-                        $q->where('ac.fs', 'like', 'IS%');
-                    }
-                })
-                ->orderBy('ac.acct_number')
-                ->get()
-                ->keyBy('acct_code');
-
-            if ($accounts->isEmpty()) {
-                $this->setStatus('failed', 100, 'No accounts in range.');
-                return;
-            }
 
             // 2) Beginning balances map (as of 2024-12-31)
             $this->setStatus('running', 12, 'Beginning balances…');
@@ -804,28 +816,72 @@ HTML,
     return $target;
 }
 
+
+private function companyHeader(): array
+{
+    $cid = (int) $this->companyId;
+
+    if ($cid === 2) {
+        return [
+            'name'  => 'AMEROP PHILIPPINES, INC.',
+            'tin'   => 'TIN- 762-592-927-000',
+            'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
+            'addr2' => 'Brgy. Mandalagan, Bacolod City',
+        ];
+    }
+
+    // default
+    return [
+        'name'  => 'SUCDEN PHILIPPINES, INC.',
+        'tin'   => 'TIN-000-105-2567-000',
+        'addr1' => 'Unit 2202 The Podium West Tower',
+        'addr2' => 'Ortigas Center, Mandaluyong City',
+    ];
+}
+
+
 /**
  * Renders the centered company header + TB columns exactly like the legacy sample.
  */
-private function renderTbHeader(\TCPDF $pdf, string $periodStart, string $periodEnd, string $wCode, string $wDesc, string $wAmt): void
-{
-    // Top title block (centered)
-    $pdf->SetFont('helvetica', 'B', 14);
-    $pdf->writeHTML('<div style="text-align:center;">SUCDEN PHILIPPINES, INC.</div>', false, false, false, false, '');
-    $pdf->SetFont('helvetica', 'B', 12);
-    $pdf->writeHTML('<div style="text-align:center;">Trial Balance</div>', false, false, false, false, '');
-    $pdf->SetFont('helvetica', '', 10);
-$pdf->writeHTML(
-    '<div style="text-align:center;">Period: '.$this->escape($periodStart).' — '.$this->escape($periodEnd).'</div>',
-    false, false, false, false, ''
-);
+private function renderTbHeader(
+    \TCPDF $pdf,
+    string $periodStart,
+    string $periodEnd,
+    string $wCode,
+    string $wDesc,
+    string $wAmt
+): void {
+    $co = $this->companyHeader();
 
-    // Thin rule
+    // Company name
+    $pdf->SetFont('helvetica', 'B', 14);
+    $pdf->writeHTML(
+        '<div style="text-align:center;">'.$this->escape($co['name']).'</div>',
+        false, false, false, false, ''
+    );
+
+    // Report title
+    $pdf->SetFont('helvetica', 'B', 12);
+    $pdf->writeHTML(
+        '<div style="text-align:center;">Trial Balance</div>',
+        false, false, false, false, ''
+    );
+
+    // Period
+    $pdf->SetFont('helvetica', '', 10);
+    $pdf->writeHTML(
+        '<div style="text-align:center;">Period: '
+        .$this->escape($periodStart).' — '.$this->escape($periodEnd)
+        .'</div>',
+        false, false, false, false, ''
+    );
+
+    // Rule
     $pdf->Ln(2);
     $pdf->writeHTML('<hr/>', false, false, false, false, '');
     $pdf->Ln(1);
 
-    // Column header row
+    // Column headers
     $pdf->SetFont('helvetica', 'B', 10);
     $pdf->writeHTML(
         <<<HTML
@@ -843,10 +899,10 @@ HTML,
         false, false, false, false, ''
     );
 
-    // Bottom rule under headers
     $pdf->writeHTML('<hr/>', false, false, false, false, '');
     $pdf->SetFont('helvetica', '', 9);
 }
+
 
 /** Format helper: 2-decimals, thousands, show 0.00 (legacy look) */
 private function n2(float $v): string
@@ -855,64 +911,125 @@ private function n2(float $v): string
 }
 
 
-    private function writeXls(array $rows, string $sdate, string $edate): array
-    {
-        $ext          = ($this->format === 'xls') ? 'xls' : 'xlsx';
-        $downloadName = $this->buildFriendlyDownloadName($ext);
-        $target       = $this->targetLocal('trial-balance', $ext, $downloadName);
+private function writeXls(array $rows, string $sdate, string $edate): array
+{
+    $ext          = ($this->format === 'xls') ? 'xls' : 'xlsx';
+    $downloadName = $this->buildFriendlyDownloadName($ext);
+    $target       = $this->targetLocal('trial-balance', $ext, $downloadName);
 
-        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $sheet       = $spreadsheet->getActiveSheet();
+    $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $sheet       = $spreadsheet->getActiveSheet();
 
-        foreach (range('A','F') as $col) { $sheet->getColumnDimension($col)->setWidth(18); }
-        $sheet->getStyle('C:F')->getNumberFormat()->setFormatCode('#,##0.00');
+    foreach (range('A','F') as $col) {
+        $sheet->getColumnDimension($col)->setWidth(18);
+    }
+    $sheet->getStyle('C:F')->getNumberFormat()->setFormatCode('#,##0.00');
 
-        $row = 1;
-        $sheet->setCellValue("A{$row}", "TRIAL BALANCE"); $sheet->mergeCells("A{$row}:F{$row}");
-        $sheet->getStyle("A{$row}")->getFont()->setBold(true)->setSize(14); $row++;
-        $sheet->setCellValue("A{$row}", "Period: ".Carbon::parse($sdate)->format('m/d/Y')." — ".Carbon::parse($edate)->format('m/d/Y'));
-        $sheet->mergeCells("A{$row}:F{$row}");
-        $sheet->getStyle("A{$row}")->getFont()->setBold(true); $row+=2;
+    $co  = $this->companyHeader();
+    $row = 1;
 
-        $headers = ['Account Code','Description','Beginning','Debit','Credit','Ending'];
-        $col='A'; foreach ($headers as $h){ $sheet->setCellValue("{$col}{$row}", $h); $sheet->getStyle("{$col}{$row}")->getFont()->setBold(true); $col++; }
-        $sheet->freezePane("A".($row+1)); $row++;
+    /* ================= Company Header ================= */
 
-        $totBeg=0.0; $totD=0.0; $totC=0.0; $totEnd=0.0;
+    $sheet->setCellValue("A{$row}", $co['name']);
+    $sheet->mergeCells("A{$row}:F{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setBold(true)->setSize(15);
+    $row++;
 
-        foreach ($rows as $r) {
-            $sheet->setCellValue("A{$row}", $r['acct_code']);
-            $sheet->setCellValue("B{$row}", $r['acct_desc']);
-            if ($r['beginning'] != 0.0) $sheet->setCellValue("C{$row}", (float)$r['beginning']);
-            if ($r['debit']     != 0.0) $sheet->setCellValue("D{$row}", (float)$r['debit']);
-            if ($r['credit']    != 0.0) $sheet->setCellValue("E{$row}", (float)$r['credit']);
-            $sheet->setCellValue("F{$row}", (float)$r['ending']);
+    $sheet->setCellValue("A{$row}", $co['tin']);
+    $sheet->mergeCells("A{$row}:F{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setBold(true)->setSize(12);
+    $row++;
 
-            $totBeg += (float)$r['beginning'];
-            $totD   += (float)$r['debit'];
-            $totC   += (float)$r['credit'];
-            $totEnd += (float)$r['ending'];
-            $row++;
-        }
+    $sheet->setCellValue("A{$row}", $co['addr1']);
+    $sheet->mergeCells("A{$row}:F{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setBold(true);
+    $row++;
+
+    $sheet->setCellValue("A{$row}", $co['addr2']);
+    $sheet->mergeCells("A{$row}:F{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setBold(true);
+    $row += 2;
+
+    /* ================= Report Header ================= */
+
+    $sheet->setCellValue("A{$row}", "TRIAL BALANCE");
+    $sheet->mergeCells("A{$row}:F{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setBold(true)->setSize(14);
+    $row++;
+
+    $sheet->setCellValue(
+        "A{$row}",
+        "Period: ".Carbon::parse($sdate)->format('m/d/Y')." — ".Carbon::parse($edate)->format('m/d/Y')
+    );
+    $sheet->mergeCells("A{$row}:F{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setBold(true);
+    $row += 2;
+
+    /* ================= Column Headers ================= */
+
+    $headers = ['Account Code','Description','Beginning','Debit','Credit','Ending'];
+    $col = 'A';
+    foreach ($headers as $h) {
+        $sheet->setCellValue("{$col}{$row}", $h);
+        $sheet->getStyle("{$col}{$row}")->getFont()->setBold(true);
+        $col++;
+    }
+
+    $sheet->freezePane("A".($row + 1));
+    $row++;
+
+    /* ================= Data Rows ================= */
+
+    $totBeg = 0.0;
+    $totD   = 0.0;
+    $totC   = 0.0;
+    $totEnd = 0.0;
+
+    foreach ($rows as $r) {
+        $sheet->setCellValue("A{$row}", $r['acct_code']);
+        $sheet->setCellValue("B{$row}", $r['acct_desc']);
+
+        if ($r['beginning'] != 0.0) $sheet->setCellValue("C{$row}", (float)$r['beginning']);
+        if ($r['debit']     != 0.0) $sheet->setCellValue("D{$row}", (float)$r['debit']);
+        if ($r['credit']    != 0.0) $sheet->setCellValue("E{$row}", (float)$r['credit']);
+
+        $sheet->setCellValue("F{$row}", (float)$r['ending']);
+
+        $totBeg += (float)$r['beginning'];
+        $totD   += (float)$r['debit'];
+        $totC   += (float)$r['credit'];
+        $totEnd += (float)$r['ending'];
 
         $row++;
-        $sheet->setCellValue("B{$row}", "Totals"); $sheet->getStyle("B{$row}")->getFont()->setBold(true);
-        $sheet->setCellValue("C{$row}", $totBeg);
-        $sheet->setCellValue("D{$row}", $totD);
-        $sheet->setCellValue("E{$row}", $totC);
-        $sheet->setCellValue("F{$row}", $totEnd);
-
-        $writer = ($ext === 'xls')
-            ? new \PhpOffice\PhpSpreadsheet\Writer\Xls($spreadsheet)
-            : new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
-        if (method_exists($writer, 'setPreCalculateFormulas')) $writer->setPreCalculateFormulas(false);
-
-        $writer->save($target['abs']);
-        $spreadsheet->disconnectWorksheets();
-        unset($spreadsheet, $writer);
-
-        return $target;
     }
+
+    /* ================= Totals ================= */
+
+    $row++;
+    $sheet->setCellValue("B{$row}", "Totals");
+    $sheet->getStyle("B{$row}")->getFont()->setBold(true);
+
+    $sheet->setCellValue("C{$row}", $totBeg);
+    $sheet->setCellValue("D{$row}", $totD);
+    $sheet->setCellValue("E{$row}", $totC);
+    $sheet->setCellValue("F{$row}", $totEnd);
+
+    /* ================= Save ================= */
+
+    $writer = ($ext === 'xls')
+        ? new \PhpOffice\PhpSpreadsheet\Writer\Xls($spreadsheet)
+        : new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+
+    if (method_exists($writer, 'setPreCalculateFormulas')) {
+        $writer->setPreCalculateFormulas(false);
+    }
+
+    $writer->save($target['abs']);
+    $spreadsheet->disconnectWorksheets();
+    unset($spreadsheet, $writer);
+
+    return $target;
+}
 
     /* --------------------------- targets & utils --------------------------- */
 
