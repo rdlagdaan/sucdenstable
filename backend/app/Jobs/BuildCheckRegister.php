@@ -153,257 +153,262 @@ class BuildCheckRegister implements ShouldQueue
     /** ---------- Writers ---------- */
 
     /** Build PDF via TCPDF. */
-    private function buildPdf(string $file, int $cid, string $start, string $end, callable $progress): void
-    {
-        $pdf = new \TCPDF('L','mm','LETTER', true, 'UTF-8', false);
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetMargins(10, 10, 10);
-        $pdf->SetAutoPageBreak(true, 10);
-        $pdf->setCellPadding(0);
-        $pdf->setCellHeightRatio(1.0);
-        $pdf->SetFont('helvetica', '', 8);
+private function buildPdf(string $file, int $cid, string $start, string $end, callable $progress): void
+{
+    $pdf = new \TCPDF('L','mm','LETTER', true, 'UTF-8', false);
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+    $pdf->SetMargins(10, 10, 10);
+    $pdf->SetAutoPageBreak(true, 10);
+    $pdf->setCellPadding(0);
+    $pdf->setCellHeightRatio(1.0);
+    $pdf->SetFont('helvetica', '', 8);
 
-        $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
-        $yearDesc  = Carbon::parse($start)->year;
+    $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
+    $yearDesc  = Carbon::parse($start)->year;
 
-        $addHeader = function() use ($pdf, $monthDesc, $yearDesc) {
-            $pdf->AddPage();
-            $pdf->writeHTML(
-                '<h2 style="margin:0;">CHECK REGISTER</h2>'.
-                '<div style="margin:0 0 4px 0;"><b>For the Month of '.$monthDesc.' '.$yearDesc.'</b></div>'.
-                '<table width="100%" border="1" cellpadding="3" cellspacing="0" style="border-collapse:collapse;line-height:1;">
-                    <tr>
-                      <td width="8%"  align="center"><b>Date</b></td>
-                      <td width="10%" align="center"><b>Check Voucher</b></td>
-                      <td width="12%" align="center"><b>Bank Account</b></td>
-                      <td width="22%" align="center" colspan="2"><b>Vendor</b></td>
-                      <td width="28%" align="center" colspan="2"><b>Particular</b></td>
-                      <td width="10%" align="center"><b>Check Number</b></td>
-                      <td width="10%" align="center"><b>Amount</b></td>
-                    </tr>
-                  </table>',
-                true, false, false, false, ''
-            );
-        };
+    // ✅ simple company header per your requirement
+    $companyName = ($cid === 2) ? 'AMEROP PHILIPPINES, INC' : 'SUCDEN PHILIPPINES, INC';
 
-        $addHeader();
+    $addHeader = function() use ($pdf, $monthDesc, $yearDesc, $companyName) {
+        $pdf->AddPage();
+        $pdf->writeHTML(
+            '<div style="text-align:right; margin:0;"><b>'.htmlspecialchars($companyName, ENT_QUOTES|ENT_SUBSTITUTE, 'UTF-8').'</b></div>'.
+            '<h2 style="margin:0;">CHECK REGISTER</h2>'.
+            '<div style="margin:0 0 4px 0;"><b>For the Month of '.$monthDesc.' '.$yearDesc.'</b></div>'.
+            '<table width="100%" border="1" cellpadding="3" cellspacing="0" style="border-collapse:collapse;line-height:1;">
+                <tr>
+                  <td width="8%"  align="center"><b>Date</b></td>
+                  <td width="10%" align="center"><b>Check Voucher</b></td>
+                  <td width="12%" align="center"><b>Bank Account</b></td>
+                  <td width="22%" align="center" colspan="2"><b>Vendor</b></td>
+                  <td width="28%" align="center" colspan="2"><b>Particular</b></td>
+                  <td width="10%" align="center"><b>Check Number</b></td>
+                  <td width="10%" align="center"><b>Amount</b></td>
+                </tr>
+              </table>',
+            true, false, false, false, ''
+        );
+    };
 
-        $openRowsTable = fn() => '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;line-height:1;"><tbody>';
-        $rowsHtml = $openRowsTable();
+    $addHeader();
 
-        $pageTotal  = 0.0;
-        $grandTotal = 0.0;
-        $linesOnPage = 0;
-        $done = 0;
+    $openRowsTable = fn() => '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;line-height:1;"><tbody>';
+    $rowsHtml = $openRowsTable();
 
-        DB::table('cash_disbursement as r')
-            ->selectRaw("
-                to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
-                r.cd_no,
-                r.disburse_amount,
-                r.check_ref_no,
-                r.explanation,
-                b.bank_account_number,
-                COALESCE(v.vend_name, r.vend_id) as vend_name
-            ")
-            ->leftJoin('bank as b', function ($j) use ($cid) {
-                $j->on('b.bank_id', '=', 'r.bank_id');
-                // If bank is tenant-scoped, prevent cross-company
-                if (Schema::hasColumn('bank', 'company_id')) {
-                    $j->where('b.company_id', '=', $cid);
-                }
-            })
-            ->leftJoin('vendor_list as v', function ($j) use ($cid) {
-                $j->on('v.vend_code', '=', 'r.vend_id');
-                // If vendor_list is tenant-scoped, prevent cross-company
-                if (Schema::hasColumn('vendor_list', 'company_id')) {
-                    $j->where('v.company_id', '=', $cid);
-                }
-            })
-            ->where('r.company_id', $cid)
-            ->whereBetween('r.disburse_date', [$start, $end])
-            // ✅ match legacy: sort by cDNo asc
-            ->orderBy('r.cd_no', 'asc')
-            ->orderBy('r.disburse_date', 'asc')
-            ->chunk(300, function($chunk) use (&$rowsHtml, $openRowsTable, $addHeader, $pdf, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
-                foreach ($chunk as $row) {
-                    $amt = (float)$row->disburse_amount;
-                    $pageTotal  += $amt;
-                    $grandTotal += $amt;
-                    $linesOnPage++;
+    $pageTotal  = 0.0;
+    $grandTotal = 0.0;
+    $linesOnPage = 0;
+    $done = 0;
 
-                    $rowsHtml .= sprintf(
-                        '<tr>
-                           <td width="8%%">%s</td>
-                           <td width="10%%">%s</td>
-                           <td width="12%%">%s</td>
-                           <td width="22%%" colspan="2">%s</td>
-                           <td width="28%%" colspan="2">%s</td>
-                           <td width="10%%">%s</td>
-                           <td width="10%%" align="right">%s</td>
-                         </tr>',
-                        e($row->disburse_date ?? ''),
-                        e($row->cd_no ?? ''),
-                        e($row->bank_account_number ?? ''),
-                        e($row->vend_name ?? ''),
-                        e($row->explanation ?? ''),
-                        e($row->check_ref_no ?? ''),
-                        number_format($amt, 2)
+    DB::table('cash_disbursement as r')
+        ->selectRaw("
+            to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
+            r.cd_no,
+            r.disburse_amount,
+            r.check_ref_no,
+            r.explanation,
+            b.bank_account_number,
+            COALESCE(v.vend_name, r.vend_id) as vend_name
+        ")
+        ->leftJoin('bank as b', function ($j) use ($cid) {
+            $j->on('b.bank_id', '=', 'r.bank_id');
+            if (Schema::hasColumn('bank', 'company_id')) {
+                $j->where('b.company_id', '=', $cid);
+            }
+        })
+        ->leftJoin('vendor_list as v', function ($j) use ($cid) {
+            $j->on('v.vend_code', '=', 'r.vend_id');
+            if (Schema::hasColumn('vendor_list', 'company_id')) {
+                $j->where('v.company_id', '=', $cid);
+            }
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.disburse_date', [$start, $end])
+        ->orderBy('r.cd_no', 'asc')
+        ->orderBy('r.disburse_date', 'asc')
+        ->chunk(300, function($chunk) use (&$rowsHtml, $openRowsTable, $addHeader, $pdf, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
+            foreach ($chunk as $row) {
+                $amt = (float)$row->disburse_amount;
+                $pageTotal  += $amt;
+                $grandTotal += $amt;
+                $linesOnPage++;
+
+                $rowsHtml .= sprintf(
+                    '<tr>
+                       <td width="8%%">%s</td>
+                       <td width="10%%">%s</td>
+                       <td width="12%%">%s</td>
+                       <td width="22%%" colspan="2">%s</td>
+                       <td width="28%%" colspan="2">%s</td>
+                       <td width="10%%">%s</td>
+                       <td width="10%%" align="right">%s</td>
+                     </tr>',
+                    e($row->disburse_date ?? ''),
+                    e($row->cd_no ?? ''),
+                    e($row->bank_account_number ?? ''),
+                    e($row->vend_name ?? ''),
+                    e($row->explanation ?? ''),
+                    e($row->check_ref_no ?? ''),
+                    number_format($amt, 2)
+                );
+
+                if ($linesOnPage >= 40) {
+                    $rowsHtml .= '</tbody></table>';
+                    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+
+                    $pdf->writeHTML(
+                        '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
+                           <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
+                         </table>',
+                        true, false, false, false, ''
                     );
 
-                    if ($linesOnPage >= 40) {
-                        $rowsHtml .= '</tbody></table>';
-                        $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-
-                        $pdf->writeHTML(
-                            '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
-                               <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
-                             </table>',
-                            true, false, false, false, ''
-                        );
-
-                        $linesOnPage = 0;
-                        $pageTotal   = 0.0;
-                        $addHeader();
-                        $rowsHtml = $openRowsTable();
-                    }
-
-                    $done++; $progress($done);
+                    $linesOnPage = 0;
+                    $pageTotal   = 0.0;
+                    $addHeader();
+                    $rowsHtml = $openRowsTable();
                 }
-            });
 
-        $rowsHtml .= '</tbody></table>';
-        $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+                $done++; $progress($done);
+            }
+        });
 
-        $pdf->writeHTML(
-            '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
-               <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
-               <tr><td align="right"><b>GRAND TOTAL AMOUNT: '.number_format($grandTotal,2).'</b></td></tr>
-             </table>',
-            true, false, false, false, ''
-        );
+    $rowsHtml .= '</tbody></table>';
+    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
 
-        $pdf->SetY(-16);
-        $pdf->writeHTML(
-            '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
-               <tr>
-                 <td>Print Date: '.now()->format('M d, Y').'</td>
-                 <td>Print Time: '.now()->format('h:i:s a').'</td>
-                 <td align="right">'.$pdf->getAliasNumPage().'/'.$pdf->getAliasNbPages().'</td>
-               </tr>
-             </table>',
-            true, false, false, false, ''
-        );
+    $pdf->writeHTML(
+        '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
+           <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
+           <tr><td align="right"><b>GRAND TOTAL AMOUNT: '.number_format($grandTotal,2).'</b></td></tr>
+         </table>',
+        true, false, false, false, ''
+    );
 
-        Storage::disk('local')->put($file, $pdf->Output('check-register.pdf', 'S'));
-    }
+    $pdf->SetY(-16);
+    $pdf->writeHTML(
+        '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
+           <tr>
+             <td>Print Date: '.now()->format('M d, Y').'</td>
+             <td>Print Time: '.now()->format('h:i:s a').'</td>
+             <td align="right">'.$pdf->getAliasNumPage().'/'.$pdf->getAliasNbPages().'</td>
+           </tr>
+         </table>',
+        true, false, false, false, ''
+    );
+
+    Storage::disk('local')->put($file, $pdf->Output('check-register.pdf', 'S'));
+}
 
     /** Build Excel via PhpSpreadsheet. */
-    private function buildExcel(string $file, int $cid, string $start, string $end, callable $progress): void
-    {
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('Check Register');
+private function buildExcel(string $file, int $cid, string $start, string $end, callable $progress): void
+{
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('Check Register');
 
-        $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
-        $yearDesc  = Carbon::parse($start)->year;
+    $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
+    $yearDesc  = Carbon::parse($start)->year;
 
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'CHECK REGISTER'); $r++;
-        $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
+    // ✅ simple company header per your requirement
+    $companyName = ($cid === 2) ? 'AMEROP PHILIPPINES, INC' : 'SUCDEN PHILIPPINES, INC';
 
-        // Keep the same header layout your current sheet expects
-        $ws->fromArray(['Date','Check Voucher','Bank Account','Vendor','','Particular','','Check Number','Amount'], null, "A{$r}");
-        $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
-        $r++;
+    $r = 1;
+    $ws->setCellValue("A{$r}", $companyName); $r++;
+    $ws->setCellValue("A{$r}", 'CHECK REGISTER'); $r++;
+    $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
 
-        foreach (range('A','I') as $col) $ws->getColumnDimension($col)->setWidth(18);
+    // Keep the same header layout your current sheet expects
+    $ws->fromArray(['Date','Check Voucher','Bank Account','Vendor','','Particular','','Check Number','Amount'], null, "A{$r}");
+    $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
+    $r++;
 
-        $pageTotal = 0.0; $grandTotal = 0.0; $linesOnPage = 0; $done = 0;
+    foreach (range('A','I') as $col) $ws->getColumnDimension($col)->setWidth(18);
 
-        DB::table('cash_disbursement as r')
-            ->selectRaw("
-                to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
-                r.cd_no,
-                r.disburse_amount,
-                r.check_ref_no,
-                r.explanation,
-                b.bank_account_number,
-                COALESCE(v.vend_name, r.vend_id) as vend_name
-            ")
-            ->leftJoin('bank as b', function ($j) use ($cid) {
-                $j->on('b.bank_id', '=', 'r.bank_id');
-                if (Schema::hasColumn('bank', 'company_id')) {
-                    $j->where('b.company_id', '=', $cid);
-                }
-            })
-            ->leftJoin('vendor_list as v', function ($j) use ($cid) {
-                $j->on('v.vend_code', '=', 'r.vend_id');
-                if (Schema::hasColumn('vendor_list', 'company_id')) {
-                    $j->where('v.company_id', '=', $cid);
-                }
-            })
-            ->where('r.company_id', $cid)
-            ->whereBetween('r.disburse_date', [$start, $end])
-            // ✅ match legacy: sort by cDNo asc
-            ->orderBy('r.cd_no', 'asc')
-            ->orderBy('r.disburse_date', 'asc')
-            ->chunk(300, function($chunk) use (&$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
-                foreach ($chunk as $row) {
-                    $amt = (float)$row->disburse_amount;
-                    $pageTotal  += $amt;
-                    $grandTotal += $amt;
-                    $linesOnPage++;
+    $pageTotal = 0.0; $grandTotal = 0.0; $linesOnPage = 0; $done = 0;
 
-                    $ws->fromArray([
-                        $row->disburse_date ?? '',
-                        $row->cd_no ?? '',
-                        $row->bank_account_number ?? '',
-                        $row->vend_name ?? '', '',
-                        $row->explanation ?? '', '',
-                        $row->check_ref_no ?? '',
-                        $amt
-                    ], null, "A{$r}");
+    DB::table('cash_disbursement as r')
+        ->selectRaw("
+            to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
+            r.cd_no,
+            r.disburse_amount,
+            r.check_ref_no,
+            r.explanation,
+            b.bank_account_number,
+            COALESCE(v.vend_name, r.vend_id) as vend_name
+        ")
+        ->leftJoin('bank as b', function ($j) use ($cid) {
+            $j->on('b.bank_id', '=', 'r.bank_id');
+            if (Schema::hasColumn('bank', 'company_id')) {
+                $j->where('b.company_id', '=', $cid);
+            }
+        })
+        ->leftJoin('vendor_list as v', function ($j) use ($cid) {
+            $j->on('v.vend_code', '=', 'r.vend_id');
+            if (Schema::hasColumn('vendor_list', 'company_id')) {
+                $j->where('v.company_id', '=', $cid);
+            }
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.disburse_date', [$start, $end])
+        ->orderBy('r.cd_no', 'asc')
+        ->orderBy('r.disburse_date', 'asc')
+        ->chunk(300, function($chunk) use (&$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
+            foreach ($chunk as $row) {
+                $amt = (float)$row->disburse_amount;
+                $pageTotal  += $amt;
+                $grandTotal += $amt;
+                $linesOnPage++;
+
+                $ws->fromArray([
+                    $row->disburse_date ?? '',
+                    $row->cd_no ?? '',
+                    $row->bank_account_number ?? '',
+                    $row->vend_name ?? '', '',
+                    $row->explanation ?? '', '',
+                    $row->check_ref_no ?? '',
+                    $amt
+                ], null, "A{$r}");
+                $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                $r++;
+
+                if ($linesOnPage >= 45) {
+                    $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
+                    $ws->setCellValue("I{$r}", $pageTotal);
                     $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                    $r += 2;
+
+                    $linesOnPage = 0;
+                    $pageTotal = 0.0;
+
+                    // repeat header like your current behavior
+                    $ws->fromArray(['Date','Check Voucher','Bank Account','Vendor','','Particular','','Check Number','Amount'], null, "A{$r}");
+                    $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
                     $r++;
-
-                    if ($linesOnPage >= 45) {
-                        $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
-                        $ws->setCellValue("I{$r}", $pageTotal);
-                        $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                        $r += 2;
-
-                        $linesOnPage = 0;
-                        $pageTotal = 0.0;
-
-                        // repeat header like your current behavior
-                        $ws->fromArray(['Date','Check Voucher','Bank Account','Vendor','','Particular','','Check Number','Amount'], null, "A{$r}");
-                        $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
-                        $r++;
-                    }
-
-                    $done++; $progress($done);
                 }
-            });
 
-        $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
-        $ws->setCellValue("I{$r}", $pageTotal);
-        $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00'); $r++;
+                $done++; $progress($done);
+            }
+        });
 
-        $ws->setCellValue("H{$r}", 'GRAND TOTAL AMOUNT:');
-        $ws->setCellValue("I{$r}", $grandTotal);
-        $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+    $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
+    $ws->setCellValue("I{$r}", $pageTotal);
+    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00'); $r++;
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream);
-        rewind($stream);
+    $ws->setCellValue("H{$r}", 'GRAND TOTAL AMOUNT:');
+    $ws->setCellValue("I{$r}", $grandTotal);
+    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
 
-        Storage::disk('local')->put($file, stream_get_contents($stream));
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream);
+    rewind($stream);
 
-        fclose($stream);
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+    Storage::disk('local')->put($file, stream_get_contents($stream));
+
+    fclose($stream);
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
+
 }

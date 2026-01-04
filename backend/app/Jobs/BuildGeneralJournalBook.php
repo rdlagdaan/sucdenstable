@@ -198,26 +198,59 @@ class BuildGeneralJournalBook implements ShouldQueue
         }
     }
 
+
+
+/**
+ * ✅ Company-aware header block (uses $cid passed into buildPdf/buildXls)
+ * - company_id=2 => AMEROP
+ * - default => SUCDEN
+ */
+private function companyHeader(int $cid): array
+{
+    if ($cid === 2) {
+        return [
+            'name'  => 'AMEROP PHILIPPINES, INC.',
+            'tin'   => 'TIN- 762-592-927-000',
+            'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
+            'addr2' => 'Brgy. Mandalagan, Bacolod City',
+        ];
+    }
+
+    return [
+        'name'  => 'SUCDEN PHILIPPINES, INC.',
+        'tin'   => 'TIN- 000-105-267-000',
+        'addr1' => 'Unit 2202 The Podium West Tower, 12 ADB Ave',
+        'addr2' => 'Ortigas Center Mandaluyong City',
+    ];
+}
+
+
     /**
      * PDF: fix the "disarray" by using FIXED column widths.
      */
-    private function buildPdf(string $path, callable $progress, int $cid): void
-    {
-        $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetMargins(10, 10, 10);
-        $pdf->SetAutoPageBreak(true, 12);
-        $pdf->setImageScale(1.25);
-        $pdf->SetFont('helvetica', '', 8);
-        $pdf->AddPage();
+private function buildPdf(string $path, callable $progress, int $cid): void
+{
+    $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+    $pdf->SetMargins(10, 10, 10);
+    $pdf->SetAutoPageBreak(true, 12);
+    $pdf->setImageScale(1.25);
+    $pdf->SetFont('helvetica', '', 8);
+    $pdf->AddPage();
 
-        $hdr = <<<HTML
+    $co = $this->companyHeader($cid);
+    $name  = htmlspecialchars($co['name'],  ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $tin   = htmlspecialchars($co['tin'],   ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $addr1 = htmlspecialchars($co['addr1'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $addr2 = htmlspecialchars($co['addr2'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+    $hdr = <<<HTML
 <table width="100%" cellspacing="0" cellpadding="0">
-  <tr><td align="right"><b>SUCDEN PHILIPPINES, INC.</b><br/>
-    <span style="font-size:9px">TIN- 000-105-267-000</span><br/>
-    <span style="font-size:9px">Unit 2202 The Podium West Tower, 12 ADB Ave</span><br/>
-    <span style="font-size:9px">Ortigas Center Mandaluyong City</span></td></tr>
+  <tr><td align="right"><b>{$name}</b><br/>
+    <span style="font-size:9px">{$tin}</span><br/>
+    <span style="font-size:9px">{$addr1}</span><br/>
+    <span style="font-size:9px">{$addr2}</span></td></tr>
   <tr><td><hr/></td></tr>
 </table>
 
@@ -235,20 +268,20 @@ class BuildGeneralJournalBook implements ShouldQueue
 </table>
 HTML;
 
-        $pdf->writeHTML($hdr, true, false, false, false, '');
+    $pdf->writeHTML($hdr, true, false, false, false, '');
 
-        $done = 0;
-        $lineCount = 0;
+    $done = 0;
+    $lineCount = 0;
 
-        $q = $this->applyFilters($this->baseQuery($cid), $cid)
-            ->groupBy('r.id','r.gen_acct_date','r.ga_no','r.explanation')
-            ->orderBy('r.id');
+    $q = $this->applyFilters($this->baseQuery($cid), $cid)
+        ->groupBy('r.id','r.gen_acct_date','r.ga_no','r.explanation')
+        ->orderBy('r.id');
 
-        $q->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
-            foreach ($chunk as $row) {
-                $gjId = 'GLGJ-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+    $q->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
+        foreach ($chunk as $row) {
+            $gjId = 'GLGJ-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-                $block = <<<HTML
+            $block = <<<HTML
 <table width="100%" cellspacing="0" cellpadding="1">
   <tr>
     <td width="25%"><b>{$gjId}</b></td>
@@ -260,145 +293,149 @@ HTML;
   </tr>
 </table>
 HTML;
-                $pdf->writeHTML($block, true, false, false, false, '');
+            $pdf->writeHTML($block, true, false, false, false, '');
 
-                $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
-                $itemDebit = 0; $itemCredit = 0;
+            $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+            $itemDebit = 0; $itemCredit = 0;
 
-                foreach (json_decode($row->lines, true) as $ln) {
-                    $debit  = (float)($ln['debit'] ?? 0);
-                    $credit = (float)($ln['credit'] ?? 0);
-                    $itemDebit  += $debit;
-                    $itemCredit += $credit;
-
-                    $rowsHtml .= sprintf(
-                        '<tr>
-                           <td width="15%%">&nbsp;&nbsp;&nbsp;%s</td>
-                           <td width="55%%">%s</td>
-                           <td width="15%%" align="right">%s</td>
-                           <td width="15%%" align="right">%s</td>
-                         </tr>',
-                        e($ln['acct_code'] ?? ''),
-                        e($ln['acct_desc'] ?? ''),
-                        number_format($debit, 2),
-                        number_format($credit, 2)
-                    );
-
-                    $lineCount++;
-                    if ($lineCount >= 28) { // slightly more stable per page with fixed widths
-                        $rowsHtml .= '</table>';
-                        $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-                        $pdf->AddPage();
-                        $lineCount = 0;
-                        $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
-                    }
-                }
+            foreach (json_decode($row->lines, true) as $ln) {
+                $debit  = (float)($ln['debit'] ?? 0);
+                $credit = (float)($ln['credit'] ?? 0);
+                $itemDebit  += $debit;
+                $itemCredit += $credit;
 
                 $rowsHtml .= sprintf(
                     '<tr>
-                       <td width="15%%"></td>
-                       <td width="55%%" align="right"><b>TOTAL</b></td>
-                       <td width="15%%" align="right"><b>%s</b></td>
-                       <td width="15%%" align="right"><b>%s</b></td>
-                     </tr>
-                     <tr><td colspan="4"><hr/></td></tr>
-                     <tr><td colspan="4"><br/></td></tr>',
-                    number_format($itemDebit, 2),
-                    number_format($itemCredit, 2)
+                       <td width="15%%">&nbsp;&nbsp;&nbsp;%s</td>
+                       <td width="55%%">%s</td>
+                       <td width="15%%" align="right">%s</td>
+                       <td width="15%%" align="right">%s</td>
+                     </tr>',
+                    e($ln['acct_code'] ?? ''),
+                    e($ln['acct_desc'] ?? ''),
+                    number_format($debit, 2),
+                    number_format($credit, 2)
                 );
-                $rowsHtml .= '</table>';
 
-                $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-
-                $done++; $progress($done);
-            }
-        });
-
-        Storage::disk('local')->put($path, $pdf->Output('general-journal.pdf', 'S'));
-    }
-
-    private function buildXls(string $path, callable $progress, int $cid): void
-    {
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('General Journal');
-
-        // Column widths similar to your screenshots
-        $ws->getColumnDimension('A')->setWidth(18); // acct_code or gj id
-        $ws->getColumnDimension('B')->setWidth(55); // desc/explanation
-        $ws->getColumnDimension('C')->setWidth(18);
-        $ws->getColumnDimension('D')->setWidth(18);
-        $ws->getColumnDimension('E')->setWidth(12); // TOTAL label
-        $ws->getColumnDimension('F')->setWidth(18); // DEBIT
-        $ws->getColumnDimension('G')->setWidth(18); // CREDIT
-
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'GENERAL JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", 'SUCDEN PHILIPPINES, INC.'); $r++;
-        $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
-        $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
-        $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r += 2;
-        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
-
-        $ws->setCellValue("F{$r}", 'DEBIT');
-        $ws->setCellValue("G{$r}", 'CREDIT');
-        $r++;
-
-        $done = 0;
-
-        $q = $this->applyFilters($this->baseQuery($cid), $cid)
-            ->groupBy('r.id','r.gen_acct_date','r.ga_no','r.explanation')
-            ->orderBy('r.id');
-
-        $q->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
-            foreach ($chunk as $row) {
-                $gjId = 'GLGJ-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
-
-                $ws->setCellValue("A{$r}", $gjId);
-                $ws->setCellValue("B{$r}", "JE - {$row->ga_no}");
-                $r++;
-
-                $ws->setCellValue("A{$r}", $row->gen_date);
-                $ws->setCellValue("B{$r}", $row->explanation);
-                $r++;
-
-                $itemDebit = 0; $itemCredit = 0;
-
-                foreach (json_decode($row->lines, true) as $ln) {
-                    $debit  = (float)($ln['debit'] ?? 0);
-                    $credit = (float)($ln['credit'] ?? 0);
-
-                    $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
-                    $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                    $ws->setCellValue("F{$r}", $debit);
-                    $ws->setCellValue("G{$r}", $credit);
-                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-
-                    $itemDebit  += $debit;
-                    $itemCredit += $credit;
-                    $r++;
+                $lineCount++;
+                if ($lineCount >= 28) {
+                    $rowsHtml .= '</table>';
+                    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+                    $pdf->AddPage();
+                    $lineCount = 0;
+                    $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
                 }
+            }
 
-                $ws->setCellValue("E{$r}", 'TOTAL');
-                $ws->setCellValue("F{$r}", $itemDebit);
-                $ws->setCellValue("G{$r}", $itemCredit);
+            $rowsHtml .= sprintf(
+                '<tr>
+                   <td width="15%%"></td>
+                   <td width="55%%" align="right"><b>TOTAL</b></td>
+                   <td width="15%%" align="right"><b>%s</b></td>
+                   <td width="15%%" align="right"><b>%s</b></td>
+                 </tr>
+                 <tr><td colspan="4"><hr/></td></tr>
+                 <tr><td colspan="4"><br/></td></tr>',
+                number_format($itemDebit, 2),
+                number_format($itemCredit, 2)
+            );
+            $rowsHtml .= '</table>';
+
+            $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+
+            $done++; $progress($done);
+        }
+    });
+
+    Storage::disk('local')->put($path, $pdf->Output('general-journal.pdf', 'S'));
+}
+
+private function buildXls(string $path, callable $progress, int $cid): void
+{
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('General Journal');
+
+    // Column widths similar to your screenshots
+    $ws->getColumnDimension('A')->setWidth(18);
+    $ws->getColumnDimension('B')->setWidth(55);
+    $ws->getColumnDimension('C')->setWidth(18);
+    $ws->getColumnDimension('D')->setWidth(18);
+    $ws->getColumnDimension('E')->setWidth(12);
+    $ws->getColumnDimension('F')->setWidth(18);
+    $ws->getColumnDimension('G')->setWidth(18);
+
+    $co = $this->companyHeader($cid);
+
+    $r = 1;
+    $ws->setCellValue("A{$r}", 'GENERAL JOURNAL'); $r++;
+    $ws->setCellValue("A{$r}", $co['name']);  $r++;
+    $ws->setCellValue("A{$r}", $co['tin']);   $r++;
+    $ws->setCellValue("A{$r}", $co['addr1']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
+
+    $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
+
+    $ws->setCellValue("F{$r}", 'DEBIT');
+    $ws->setCellValue("G{$r}", 'CREDIT');
+    $r++;
+
+    $done = 0;
+
+    $q = $this->applyFilters($this->baseQuery($cid), $cid)
+        ->groupBy('r.id','r.gen_acct_date','r.ga_no','r.explanation')
+        ->orderBy('r.id');
+
+    $q->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
+        foreach ($chunk as $row) {
+            $gjId = 'GLGJ-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+
+            $ws->setCellValue("A{$r}", $gjId);
+            $ws->setCellValue("B{$r}", "JE - {$row->ga_no}");
+            $r++;
+
+            $ws->setCellValue("A{$r}", $row->gen_date);
+            $ws->setCellValue("B{$r}", $row->explanation);
+            $r++;
+
+            $itemDebit = 0; $itemCredit = 0;
+
+            foreach (json_decode($row->lines, true) as $ln) {
+                $debit  = (float)($ln['debit'] ?? 0);
+                $credit = (float)($ln['credit'] ?? 0);
+
+                $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
+                $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
+                $ws->setCellValue("F{$r}", $debit);
+                $ws->setCellValue("G{$r}", $credit);
                 $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
 
-                $r += 2;
-
-                $done++; $progress($done);
+                $itemDebit  += $debit;
+                $itemCredit += $credit;
+                $r++;
             }
-        });
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream);
-        rewind($stream);
+            $ws->setCellValue("E{$r}", 'TOTAL');
+            $ws->setCellValue("F{$r}", $itemDebit);
+            $ws->setCellValue("G{$r}", $itemCredit);
+            $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
 
-        Storage::disk('local')->put($path, stream_get_contents($stream));
+            $r += 2;
 
-        fclose($stream);
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+            $done++; $progress($done);
+        }
+    });
+
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream);
+    rewind($stream);
+
+    Storage::disk('local')->put($path, stream_get_contents($stream));
+
+    fclose($stream);
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
+
 }

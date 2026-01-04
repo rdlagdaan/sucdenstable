@@ -205,164 +205,205 @@ private function applyFilters($q)
 }
 
 
-    private function buildPdf(string $file, callable $progress): void
-    {
-        $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetMargins(10, 10, 10);
-        $pdf->SetAutoPageBreak(true, 12);
-        $pdf->setImageScale(1.25);
-        $pdf->SetFont('helvetica', '', 8);
-        $pdf->AddPage();
+/**
+ * ✅ Company-aware header block
+ * - company_id=2 => AMEROP
+ * - default => SUCDEN
+ */
+private function companyHeader(): array
+{
+    $cid = (int) $this->companyId;
 
-        $hdr = <<<HTML
-          <table width="100%" cellspacing="0" cellpadding="0">
-            <tr><td align="right"><b>SUCDEN PHILIPPINES, INC.</b><br/>
-              <span style="font-size:9px">TIN- 000-105-267-000</span><br/>
-              <span style="font-size:9px">Unit 2202 The Podium West Tower, 12 ADB Ave</span><br/>
-              <span style="font-size:9px">Ortigas Center Mandaluyong City</span></td></tr>
-            <tr><td><hr/></td></tr>
-          </table>
-          <h2>ACCOUNTS RECEIVABLE JOURNAL</h2>
-          <div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
-          <br/>
-          <table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
-        HTML;
-        $pdf->writeHTML($hdr, true, false, false, false, '');
+    if ($cid === 2) {
+        return [
+            'name'  => 'AMEROP PHILIPPINES, INC.',
+            'tin'   => 'TIN- 762-592-927-000',
+            'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
+            'addr2' => 'Brgy. Mandalagan, Bacolod City',
+        ];
+    }
 
-        $done = 0; $lineCount = 0;
+    return [
+        'name'  => 'SUCDEN PHILIPPINES, INC.',
+        'tin'   => 'TIN- 000-105-267-000',
+        'addr1' => 'Unit 2202 The Podium West Tower, 12 ADB Ave',
+        'addr2' => 'Ortigas Center Mandaluyong City',
+    ];
+}
 
-        $this->applyFilters($this->baseQuery())
-            ->groupBy('r.id','r.sales_date','r.cs_no','r.si_no','r.cust_id','r.booking_no','r.explanation','b.acct_desc')
-            ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
-                foreach ($chunk as $row) {
-                    $docId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-                    $block = <<<HTML
-                      <table width="100%" cellspacing="0" cellpadding="1">
-                        <tr><td>{$row->sales_date}</td><td colspan="6">{$docId}</td></tr>
-                        <tr>
-                          <td colspan="6"><b>SV - {$row->cs_no} - {$row->cust_id} - {$row->explanation}</b>
-                          &nbsp;&nbsp;<span style="font-size:11px"><u>{$row->si_no}</u></span></td>
-                          <td align="right">{$row->bank_name}</td>
-                        </tr>
-                        <tr><td colspan="7">&nbsp;&nbsp;&nbsp;OR#: {$row->booking_no}</td></tr>
-                      </table>
-                    HTML;
-                    $pdf->writeHTML($block, true, false, false, false, '');
 
-                    $itemDebit=0; $itemCredit=0;
-                    $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
 
-                    foreach (json_decode($row->lines, true) as $ln) {
-                        $itemDebit  += (float)($ln['debit'] ?? 0);
-                        $itemCredit += (float)($ln['credit'] ?? 0);
-                        $rowsHtml .= sprintf(
-                            '<tr>
-                               <td>&nbsp;&nbsp;&nbsp;%s</td>
-                               <td colspan="4">%s</td>
-                               <td align="right">%s</td>
-                               <td align="right">%s</td>
-                             </tr>',
-                            e($ln['acct_code'] ?? ''),
-                            e($ln['acct_desc'] ?? ''),
-                            number_format((float)($ln['debit'] ?? 0), 2),
-                            number_format((float)($ln['credit'] ?? 0), 2)
-                        );
+ private function buildPdf(string $file, callable $progress): void
+{
+    $co = $this->companyHeader();
 
-                        $lineCount++;
-                        if ($lineCount >= 25) {
-                            $rowsHtml .= '</table>';
-                            $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-                            $pdf->AddPage();
-                            $lineCount = 0;
-                            $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
-                        }
-                    }
+    $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+    $pdf->SetMargins(10, 10, 10);
+    $pdf->SetAutoPageBreak(true, 12);
+    $pdf->setImageScale(1.25);
+    $pdf->SetFont('helvetica', '', 8);
+    $pdf->AddPage();
 
+    $name  = htmlspecialchars($co['name'],  ENT_QUOTES, 'UTF-8');
+    $tin   = htmlspecialchars($co['tin'],   ENT_QUOTES, 'UTF-8');
+    $addr1 = htmlspecialchars($co['addr1'], ENT_QUOTES, 'UTF-8');
+    $addr2 = htmlspecialchars($co['addr2'], ENT_QUOTES, 'UTF-8');
+
+    $hdr = <<<HTML
+      <table width="100%" cellspacing="0" cellpadding="0">
+        <tr><td align="right"><b>{$name}</b><br/>
+          <span style="font-size:9px">{$tin}</span><br/>
+          <span style="font-size:9px">{$addr1}</span><br/>
+          <span style="font-size:9px">{$addr2}</span></td></tr>
+        <tr><td><hr/></td></tr>
+      </table>
+      <h2>ACCOUNTS RECEIVABLE JOURNAL</h2>
+      <div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
+      <br/>
+      <table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
+    HTML;
+
+    $pdf->writeHTML($hdr, true, false, false, false, '');
+
+    $done = 0; $lineCount = 0;
+
+    $this->applyFilters($this->baseQuery())
+        ->groupBy('r.id','r.sales_date','r.cs_no','r.si_no','r.cust_id','r.booking_no','r.explanation','b.acct_desc')
+        ->orderBy('r.id')
+        ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
+            foreach ($chunk as $row) {
+                $docId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+
+                $block = <<<HTML
+                  <table width="100%" cellspacing="0" cellpadding="1">
+                    <tr><td>{$row->sales_date}</td><td colspan="6">{$docId}</td></tr>
+                    <tr>
+                      <td colspan="6"><b>SV - {$row->cs_no} - {$row->cust_id} - {$row->explanation}</b>
+                      &nbsp;&nbsp;<span style="font-size:11px"><u>{$row->si_no}</u></span></td>
+                      <td align="right">{$row->bank_name}</td>
+                    </tr>
+                    <tr><td colspan="7">&nbsp;&nbsp;&nbsp;OR#: {$row->booking_no}</td></tr>
+                  </table>
+                HTML;
+                $pdf->writeHTML($block, true, false, false, false, '');
+
+                $itemDebit=0; $itemCredit=0;
+                $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+
+                foreach (json_decode($row->lines, true) as $ln) {
+                    $itemDebit  += (float)($ln['debit'] ?? 0);
+                    $itemCredit += (float)($ln['credit'] ?? 0);
                     $rowsHtml .= sprintf(
-                        '<tr><td></td><td colspan="4"></td>
-                           <td align="right"><b>%s</b></td>
-                           <td align="right"><b>%s</b></td>
-                         </tr>
-                         <tr><td colspan="7"><hr/></td></tr>
-                         <tr><td colspan="7"><br/></td></tr>',
-                        number_format($itemDebit,2),
-                        number_format($itemCredit,2)
+                        '<tr>
+                           <td>&nbsp;&nbsp;&nbsp;%s</td>
+                           <td colspan="4">%s</td>
+                           <td align="right">%s</td>
+                           <td align="right">%s</td>
+                         </tr>',
+                        e($ln['acct_code'] ?? ''),
+                        e($ln['acct_desc'] ?? ''),
+                        number_format((float)($ln['debit'] ?? 0), 2),
+                        number_format((float)($ln['credit'] ?? 0), 2)
                     );
-                    $rowsHtml .= '</table>';
-                    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
 
-                    $done++; $progress($done);
-                }
-            });
-
-        Storage::disk('local')->put($file, $pdf->Output('accounts-receivable.pdf', 'S'));
-    }
-
-    private function buildExcel(string $file, callable $progress): void
-    {
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('Accounts Receivable Journal');
-
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'ACCOUNTS RECEIVABLE JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", 'SUCDEN PHILIPPINES, INC.'); $r++;
-        $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
-        $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
-        $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r+=2;
-        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r+=2;
-        $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
-        foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(15);
-
-        $done = 0;
-        $this->applyFilters($this->baseQuery())
-            ->groupBy('r.id','r.sales_date','r.cs_no','r.si_no','r.cust_id','r.booking_no','r.explanation','b.acct_desc')
-            ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
-                foreach ($chunk as $row) {
-                    $docId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
-
-                    $ws->setCellValue("A{$r}", $row->sales_date);
-                    $ws->setCellValue("B{$r}", $docId); $r++;
-
-                    $ws->setCellValue("A{$r}", "SV - {$row->cs_no} - {$row->cust_id} - {$row->explanation}");
-                    $ws->setCellValue("B{$r}", "S.I.#: {$row->si_no}"); $r++;
-
-                    $ws->setCellValue("A{$r}", "OR#: {$row->booking_no}");
-                    $ws->setCellValue("B{$r}", $row->bank_name); $r++;
-
-                    $itemDebit=0; $itemCredit=0;
-                    foreach (json_decode($row->lines,true) as $ln) {
-                        $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
-                        $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                        $ws->setCellValue("F{$r}", (float)($ln['debit'] ?? 0));
-                        $ws->setCellValue("G{$r}", (float)($ln['credit'] ?? 0));
-                        $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                        $itemDebit  += (float)($ln['debit'] ?? 0);
-                        $itemCredit += (float)($ln['credit'] ?? 0);
-                        $r++;
+                    $lineCount++;
+                    if ($lineCount >= 25) {
+                        $rowsHtml .= '</table>';
+                        $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+                        $pdf->AddPage();
+                        $lineCount = 0;
+                        $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
                     }
-
-                    $ws->setCellValue("E{$r}", 'TOTAL');
-                    $ws->setCellValue("F{$r}", $itemDebit);
-                    $ws->setCellValue("G{$r}", $itemCredit);
-                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                    $r += 2;
-
-                    $done++; $progress($done);
                 }
-            });
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream); rewind($stream);
-        Storage::disk('local')->put($file, stream_get_contents($stream));
-        fclose($stream);
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+                $rowsHtml .= sprintf(
+                    '<tr><td></td><td colspan="4"></td>
+                       <td align="right"><b>%s</b></td>
+                       <td align="right"><b>%s</b></td>
+                     </tr>
+                     <tr><td colspan="7"><hr/></td></tr>
+                     <tr><td colspan="7"><br/></td></tr>',
+                    number_format($itemDebit,2),
+                    number_format($itemCredit,2)
+                );
+                $rowsHtml .= '</table>';
+                $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+
+                $done++; $progress($done);
+            }
+        });
+
+    Storage::disk('local')->put($file, $pdf->Output('accounts-receivable.pdf', 'S'));
+}
+
+private function buildExcel(string $file, callable $progress): void
+{
+    $co = $this->companyHeader();
+
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('Accounts Receivable Journal');
+
+    $r = 1;
+    $ws->setCellValue("A{$r}", 'ACCOUNTS RECEIVABLE JOURNAL'); $r++;
+    $ws->setCellValue("A{$r}", $co['name']);  $r++;
+    $ws->setCellValue("A{$r}", $co['tin']);   $r++;
+    $ws->setCellValue("A{$r}", $co['addr1']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr2']); $r+=2;
+
+    $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r+=2;
+    $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
+    foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(15);
+
+    $done = 0;
+    $this->applyFilters($this->baseQuery())
+        ->groupBy('r.id','r.sales_date','r.cs_no','r.si_no','r.cust_id','r.booking_no','r.explanation','b.acct_desc')
+        ->orderBy('r.id')
+        ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
+            foreach ($chunk as $row) {
+                $docId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+
+                $ws->setCellValue("A{$r}", $row->sales_date);
+                $ws->setCellValue("B{$r}", $docId); $r++;
+
+                $ws->setCellValue("A{$r}", "SV - {$row->cs_no} - {$row->cust_id} - {$row->explanation}");
+                $ws->setCellValue("B{$r}", "S.I.#: {$row->si_no}"); $r++;
+
+                $ws->setCellValue("A{$r}", "OR#: {$row->booking_no}");
+                $ws->setCellValue("B{$r}", $row->bank_name); $r++;
+
+                $itemDebit=0; $itemCredit=0;
+                foreach (json_decode($row->lines,true) as $ln) {
+                    $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
+                    $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
+                    $ws->setCellValue("F{$r}", (float)($ln['debit'] ?? 0));
+                    $ws->setCellValue("G{$r}", (float)($ln['credit'] ?? 0));
+                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                    $itemDebit  += (float)($ln['debit'] ?? 0);
+                    $itemCredit += (float)($ln['credit'] ?? 0);
+                    $r++;
+                }
+
+                $ws->setCellValue("E{$r}", 'TOTAL');
+                $ws->setCellValue("F{$r}", $itemDebit);
+                $ws->setCellValue("G{$r}", $itemCredit);
+                $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                $r += 2;
+
+                $done++; $progress($done);
+            }
+        });
+
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream); rewind($stream);
+    Storage::disk('local')->put($file, stream_get_contents($stream));
+    fclose($stream);
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
+
 }

@@ -132,221 +132,265 @@ public function handle(): void
 
     /** ---------- Writers ---------- */
 
-    private function buildPdf(string $file, callable $progress): void
-    {
-        $cid = (int) $this->companyId;
-        
-        $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetMargins(10, 10, 10);
-        $pdf->SetAutoPageBreak(true, 12);
-        $pdf->setImageScale(1.25);
-        $pdf->SetFont('helvetica', '', 8);
-        $pdf->AddPage();
+/**
+ * Company-aware header block.
+ * ✅ company_id=2 => AMEROP
+ * ✅ default => SUCDEN
+ */
+private function companyHeader(): array
+{
+    $cid = (int) $this->companyId;
 
-        $hdr = <<<HTML
-          <table width="100%" cellspacing="0" cellpadding="0">
-            <tr><td align="right"><b>SUCDEN PHILIPPINES, INC.</b><br/>
-              <span style="font-size:9px">TIN- 000-105-267-000</span><br/>
-              <span style="font-size:9px">Unit 2202 The Podium West Tower, 12 ADB Ave</span><br/>
-              <span style="font-size:9px">Ortigas Center Mandaluyong City</span></td></tr>
-            <tr><td><hr/></td></tr>
-          </table>
-          <h2>CASH RECEIPTS JOURNAL</h2>
-          <div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
-          <br/>
-          <table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
-        HTML;
-        $pdf->writeHTML($hdr, true, false, false, false, '');
+    if ($cid === 2) {
+        return [
+            'name'  => 'AMEROP PHILIPPINES, INC.',
+            'tin'   => 'TIN- 762-592-927-000',
+            'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
+            'addr2' => 'Brgy. Mandalagan, Bacolod City',
+        ];
+    }
 
-        $done = 0;
-        $lineCount = 0;
+    return [
+        'name'  => 'SUCDEN PHILIPPINES, INC.',
+        'tin'   => 'TIN- 000-105-267-000',
+        'addr1' => 'Unit 2202 The Podium West Tower, 12 ADB Ave',
+        'addr2' => 'Ortigas Center Mandaluyong City',
+    ];
+}
 
-        DB::table('cash_receipts as r')
-            ->selectRaw("
-                r.id,
-                to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-                r.cr_no,
-                r.collection_receipt,
-                r.details,
-                bk.bank_name as bank_name,
-                json_agg(json_build_object(
-                    'acct_code', d.acct_code,
-                    'acct_desc', a.acct_desc,
-                    'debit', d.debit,
-                    'credit', d.credit
-                ) ORDER BY d.id) as lines
-            ")
-->leftJoin('bank as bk', function ($j) use ($cid) {
-    $j->on('bk.bank_id', '=', 'r.bank_id')
-      ->where('bk.company_id', '=', $cid);
-})
-            ->join('cash_receipt_details as d', function ($j) {
-                // d.transaction_id is VARCHAR in your schema — cast it to BIGINT to match r.id
-                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-            })
-->leftJoin('account_code as a', function ($j) use ($cid) {
-    $j->on('a.acct_code', '=', 'd.acct_code')
-      ->where('a.company_id', '=', $cid);
-})
-->where('r.company_id', $cid)
-            ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
-            ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
-            ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
-                foreach ($chunk as $row) {
-                    $crbId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-                    $block = <<<HTML
-                      <table width="100%" cellspacing="0" cellpadding="1">
-                        <tr><td>{$crbId}</td><td colspan="6"></td></tr>
-                        <tr><td>{$row->receipt_date}</td><td colspan="6"></td></tr>
-                        <tr><td><b>RV - {$row->cr_no}</b></td><td colspan="6">OR#: {$row->collection_receipt}</td></tr>
-                        <tr><td>{$row->bank_name}</td><td colspan="6">&nbsp;&nbsp;&nbsp;{$row->details}</td></tr>
-                      </table>
-                    HTML;
-                    $pdf->writeHTML($block, true, false, false, false, '');
 
-                    $itemDebit=0; $itemCredit=0;
-                    $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
 
-                    foreach (json_decode($row->lines, true) as $ln) {
-                        $itemDebit  += (float)($ln['debit'] ?? 0);
-                        $itemCredit += (float)($ln['credit'] ?? 0);
-                        $rowsHtml .= sprintf(
-                            '<tr>
-                               <td>&nbsp;&nbsp;&nbsp;%s</td>
-                               <td colspan="4">%s</td>
-                               <td align="right">%s</td>
-                               <td align="right">%s</td>
-                             </tr>',
-                            e($ln['acct_code'] ?? ''),
-                            e($ln['acct_desc'] ?? ''),
-                            number_format((float)($ln['debit'] ?? 0), 2),
-                            number_format((float)($ln['credit'] ?? 0), 2)
-                        );
 
-                        $lineCount++;
-                        if ($lineCount >= 25) {
-                            $rowsHtml .= '</table>';
-                            $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-                            $pdf->AddPage();
-                            $lineCount = 0;
-                            $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
-                        }
-                    }
+private function buildPdf(string $file, callable $progress): void
+{
+    $cid = (int) $this->companyId;
+    $co  = $this->companyHeader();
+
+    $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+    $pdf->SetMargins(10, 10, 10);
+    $pdf->SetAutoPageBreak(true, 12);
+    $pdf->setImageScale(1.25);
+    $pdf->SetFont('helvetica', '', 8);
+    $pdf->AddPage();
+
+    $hdr = <<<HTML
+<table width="100%" cellspacing="0" cellpadding="0">
+  <tr>
+    <td align="right"><b>{$co['name']}</b><br/>
+      <span style="font-size:9px">{$co['tin']}</span><br/>
+      <span style="font-size:9px">{$co['addr1']}</span><br/>
+      <span style="font-size:9px">{$co['addr2']}</span>
+    </td>
+  </tr>
+  <tr><td><hr/></td></tr>
+</table>
+<h2>CASH RECEIPTS JOURNAL</h2>
+<div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
+<br/>
+<table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
+HTML;
+
+    $pdf->writeHTML($hdr, true, false, false, false, '');
+
+    $done = 0;
+    $lineCount = 0;
+
+    DB::table('cash_receipts as r')
+        ->selectRaw("
+            r.id,
+            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+            r.cr_no,
+            r.collection_receipt,
+            r.details,
+            bk.bank_name as bank_name,
+            json_agg(json_build_object(
+                'acct_code', d.acct_code,
+                'acct_desc', a.acct_desc,
+                'debit', d.debit,
+                'credit', d.credit
+            ) ORDER BY d.id) as lines
+        ")
+        ->leftJoin('bank as bk', function ($j) use ($cid) {
+            $j->on('bk.bank_id', '=', 'r.bank_id')
+              ->where('bk.company_id', '=', $cid);
+        })
+        ->join('cash_receipt_details as d', function ($j) {
+            $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+        })
+        ->leftJoin('account_code as a', function ($j) use ($cid) {
+            $j->on('a.acct_code', '=', 'd.acct_code')
+              ->where('a.company_id', '=', $cid);
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
+        ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
+        ->orderBy('r.id')
+        ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
+            foreach ($chunk as $row) {
+                $crbId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+
+                $block = <<<HTML
+<table width="100%" cellspacing="0" cellpadding="1">
+  <tr><td>{$crbId}</td><td colspan="6"></td></tr>
+  <tr><td>{$row->receipt_date}</td><td colspan="6"></td></tr>
+  <tr><td><b>RV - {$row->cr_no}</b></td><td colspan="6">OR#: {$row->collection_receipt}</td></tr>
+  <tr><td>{$row->bank_name}</td><td colspan="6">&nbsp;&nbsp;&nbsp;{$row->details}</td></tr>
+</table>
+HTML;
+                $pdf->writeHTML($block, true, false, false, false, '');
+
+                $itemDebit=0; $itemCredit=0;
+                $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+
+                foreach (json_decode($row->lines, true) as $ln) {
+                    $itemDebit  += (float)($ln['debit'] ?? 0);
+                    $itemCredit += (float)($ln['credit'] ?? 0);
 
                     $rowsHtml .= sprintf(
-                        '<tr><td></td><td colspan="4"></td>
-                           <td align="right"><b>%s</b></td>
-                           <td align="right"><b>%s</b></td>
-                         </tr>
-                         <tr><td colspan="7"><hr/></td></tr>
-                         <tr><td colspan="7"><br/></td></tr>',
-                        number_format($itemDebit,2),
-                        number_format($itemCredit,2)
+                        '<tr>
+                           <td>&nbsp;&nbsp;&nbsp;%s</td>
+                           <td colspan="4">%s</td>
+                           <td align="right">%s</td>
+                           <td align="right">%s</td>
+                         </tr>',
+                        e($ln['acct_code'] ?? ''),
+                        e($ln['acct_desc'] ?? ''),
+                        number_format((float)($ln['debit'] ?? 0), 2),
+                        number_format((float)($ln['credit'] ?? 0), 2)
                     );
-                    $rowsHtml .= '</table>';
-                    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
 
-                    $done++; $progress($done);
-                }
-            });
-
-        // write to disk
-        Storage::disk('local')->put($file, $pdf->Output('cash-receipts.pdf', 'S'));
-    }
-
-    private function buildExcel(string $file, callable $progress): void
-    {
-        $cid = (int) $this->companyId; 
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('Cash Receipts Book');
-
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'CASH RECEIPTS BOOK'); $r++;
-        $ws->setCellValue("A{$r}", 'SUCDEN PHILIPPINES, INC.'); $r++;
-        $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
-        $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
-        $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r += 2;
-        $ws->setCellValue("A{$r}", 'CASH RECEIPTS JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
-        $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
-
-        $done = 0;
-
-        DB::table('cash_receipts as r')
-            ->selectRaw("
-                r.id,
-                to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-                r.cr_no,
-                r.collection_receipt,
-                r.details,
-                bk.bank_name as bank_name,
-                json_agg(json_build_object(
-                    'acct_code', d.acct_code,
-                    'acct_desc', a.acct_desc,
-                    'debit', d.debit,
-                    'credit', d.credit
-                ) ORDER BY d.id) as lines
-            ")
-->leftJoin('bank as bk', function ($j) use ($cid) {
-    $j->on('bk.bank_id', '=', 'r.bank_id')
-      ->where('bk.company_id', '=', $cid);
-})
-            ->join('cash_receipt_details as d', function ($j) {
-                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-            })
-->leftJoin('account_code as a', function ($j) use ($cid) {
-    $j->on('a.acct_code', '=', 'd.acct_code')
-      ->where('a.company_id', '=', $cid);
-})
-->where('r.company_id', $cid)
-            ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
-            ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
-            ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
-                foreach ($chunk as $row) {
-                    $crbId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
-
-                    $ws->setCellValue("A{$r}", $row->receipt_date);
-                    $ws->setCellValue("B{$r}", $crbId); $r++;
-
-                    $ws->setCellValue("A{$r}", "RV - {$row->cr_no}");
-                    $ws->setCellValue("B{$r}", "OR#: {$row->collection_receipt}"); $r++;
-
-                    $ws->setCellValue("A{$r}", $row->bank_name);
-                    $ws->setCellValue("B{$r}", $row->details); $r++;
-
-                    $itemDebit=0; $itemCredit=0;
-                    foreach (json_decode($row->lines,true) as $ln) {
-                        $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
-                        $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                        $ws->setCellValue("F{$r}", (float)($ln['debit'] ?? 0));
-                        $ws->setCellValue("G{$r}", (float)($ln['credit'] ?? 0));
-                        $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                        $itemDebit  += (float)($ln['debit'] ?? 0);
-                        $itemCredit += (float)($ln['credit'] ?? 0);
-                        $r++;
+                    $lineCount++;
+                    if ($lineCount >= 25) {
+                        $rowsHtml .= '</table>';
+                        $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+                        $pdf->AddPage();
+                        $lineCount = 0;
+                        $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
                     }
-                    $ws->setCellValue("E{$r}", 'TOTAL');
-                    $ws->setCellValue("F{$r}", $itemDebit);
-                    $ws->setCellValue("G{$r}", $itemCredit);
-                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                    $r += 2;
-
-                    $done++; $progress($done);
                 }
-            });
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream); rewind($stream);
-        Storage::disk('local')->put($file, stream_get_contents($stream));
-        fclose($stream);
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+                $rowsHtml .= sprintf(
+                    '<tr><td></td><td colspan="4"></td>
+                       <td align="right"><b>%s</b></td>
+                       <td align="right"><b>%s</b></td>
+                     </tr>
+                     <tr><td colspan="7"><hr/></td></tr>
+                     <tr><td colspan="7"><br/></td></tr>',
+                    number_format($itemDebit,2),
+                    number_format($itemCredit,2)
+                );
+
+                $rowsHtml .= '</table>';
+                $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+
+                $done++; $progress($done);
+            }
+        });
+
+    Storage::disk('local')->put($file, $pdf->Output('cash-receipts.pdf', 'S'));
+}
+
+
+private function buildExcel(string $file, callable $progress): void
+{
+    $cid = (int) $this->companyId;
+    $co  = $this->companyHeader();
+
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('Cash Receipts Book');
+
+    $r = 1;
+    $ws->setCellValue("A{$r}", 'CASH RECEIPTS BOOK'); $r++;
+    $ws->setCellValue("A{$r}", $co['name']); $r++;
+    $ws->setCellValue("A{$r}", $co['tin']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr1']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
+
+    $ws->setCellValue("A{$r}", 'CASH RECEIPTS JOURNAL'); $r++;
+    $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
+    $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
+
+    $done = 0;
+
+    DB::table('cash_receipts as r')
+        ->selectRaw("
+            r.id,
+            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+            r.cr_no,
+            r.collection_receipt,
+            r.details,
+            bk.bank_name as bank_name,
+            json_agg(json_build_object(
+                'acct_code', d.acct_code,
+                'acct_desc', a.acct_desc,
+                'debit', d.debit,
+                'credit', d.credit
+            ) ORDER BY d.id) as lines
+        ")
+        ->leftJoin('bank as bk', function ($j) use ($cid) {
+            $j->on('bk.bank_id', '=', 'r.bank_id')
+              ->where('bk.company_id', '=', $cid);
+        })
+        ->join('cash_receipt_details as d', function ($j) {
+            $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+        })
+        ->leftJoin('account_code as a', function ($j) use ($cid) {
+            $j->on('a.acct_code', '=', 'd.acct_code')
+              ->where('a.company_id', '=', $cid);
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
+        ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
+        ->orderBy('r.id')
+        ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
+            foreach ($chunk as $row) {
+                $crbId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+
+                $ws->setCellValue("A{$r}", $row->receipt_date);
+                $ws->setCellValue("B{$r}", $crbId); $r++;
+
+                $ws->setCellValue("A{$r}", "RV - {$row->cr_no}");
+                $ws->setCellValue("B{$r}", "OR#: {$row->collection_receipt}"); $r++;
+
+                $ws->setCellValue("A{$r}", $row->bank_name);
+                $ws->setCellValue("B{$r}", $row->details); $r++;
+
+                $itemDebit=0; $itemCredit=0;
+                foreach (json_decode($row->lines,true) as $ln) {
+                    $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
+                    $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
+                    $ws->setCellValue("F{$r}", (float)($ln['debit'] ?? 0));
+                    $ws->setCellValue("G{$r}", (float)($ln['credit'] ?? 0));
+                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+
+                    $itemDebit  += (float)($ln['debit'] ?? 0);
+                    $itemCredit += (float)($ln['credit'] ?? 0);
+                    $r++;
+                }
+
+                $ws->setCellValue("E{$r}", 'TOTAL');
+                $ws->setCellValue("F{$r}", $itemDebit);
+                $ws->setCellValue("G{$r}", $itemCredit);
+                $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                $r += 2;
+
+                $done++; $progress($done);
+            }
+        });
+
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream);
+    rewind($stream);
+    Storage::disk('local')->put($file, stream_get_contents($stream));
+    fclose($stream);
+
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
+
 }

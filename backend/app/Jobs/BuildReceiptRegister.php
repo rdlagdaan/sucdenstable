@@ -180,287 +180,295 @@ class BuildReceiptRegister implements ShouldQueue
 
     /** ---------- Writers ---------- */
 
-    private function buildPdf(string $file, int $cid, string $start, string $end, callable $progress): void
-    {
-        $pdf = new \TCPDF('L','mm','LETTER', true, 'UTF-8', false);
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetMargins(10, 10, 10);
-        $pdf->SetAutoPageBreak(true, 10);
-        $pdf->setCellPadding(0);
-        $pdf->setCellHeightRatio(1.0);
-        $pdf->SetFont('helvetica', '', 8);
+private function buildPdf(string $file, int $cid, string $start, string $end, callable $progress): void
+{
+    $pdf = new \TCPDF('L','mm','LETTER', true, 'UTF-8', false);
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+    $pdf->SetMargins(10, 10, 10);
+    $pdf->SetAutoPageBreak(true, 10);
+    $pdf->setCellPadding(0);
+    $pdf->setCellHeightRatio(1.0);
+    $pdf->SetFont('helvetica', '', 8);
 
-        $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
-        $yearDesc  = Carbon::parse($start)->year;
+    $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
+    $yearDesc  = Carbon::parse($start)->year;
 
-        $addHeader = function() use ($pdf, $monthDesc, $yearDesc) {
-            $pdf->AddPage();
-            $pdf->writeHTML(
-                '<h2 style="margin:0;">RECEIPT REGISTER</h2>'.
-                '<div style="margin:0 0 4px 0;"><b>For the Month of '.$monthDesc.' '.$yearDesc.'</b></div>'.
-                '<table width="100%" border="1" cellpadding="3" cellspacing="0" style="border-collapse:collapse;line-height:1;">
-                    <tr>
-                      <td width="8%"  align="center"><b>Date</b></td>
-                      <td width="11%" align="center"><b>Receipt Voucher</b></td>
-                      <td width="12%" align="center"><b>Bank</b></td>
-                      <td width="22%" align="center" colspan="2"><b>Customer</b></td>
-                      <td width="28%" align="center" colspan="2"><b>Particular</b></td>
-                      <td width="9%"  align="center"><b>Collection Receipt</b></td>
-                      <td width="10%" align="center"><b>Amount</b></td>
-                    </tr>
-                 </table>',
-                true, false, false, false, ''
-            );
-        };
+    // ✅ same simple company header as check register
+    $companyName = ($cid === 2) ? 'AMEROP PHILIPPINES, INC' : 'SUCDEN PHILIPPINES, INC';
 
-        $addHeader();
+    $addHeader = function() use ($pdf, $monthDesc, $yearDesc, $companyName) {
+        $pdf->AddPage();
+        $pdf->writeHTML(
+            '<div style="text-align:right; margin:0;"><b>'.htmlspecialchars($companyName, ENT_QUOTES|ENT_SUBSTITUTE, 'UTF-8').'</b></div>'.
+            '<h2 style="margin:0;">RECEIPT REGISTER</h2>'.
+            '<div style="margin:0 0 4px 0;"><b>For the Month of '.$monthDesc.' '.$yearDesc.'</b></div>'.
+            '<table width="100%" border="1" cellpadding="3" cellspacing="0" style="border-collapse:collapse;line-height:1;">
+                <tr>
+                  <td width="8%"  align="center"><b>Date</b></td>
+                  <td width="11%" align="center"><b>Receipt Voucher</b></td>
+                  <td width="12%" align="center"><b>Bank</b></td>
+                  <td width="22%" align="center" colspan="2"><b>Customer</b></td>
+                  <td width="28%" align="center" colspan="2"><b>Particular</b></td>
+                  <td width="9%"  align="center"><b>Collection Receipt</b></td>
+                  <td width="10%" align="center"><b>Amount</b></td>
+                </tr>
+             </table>',
+            true, false, false, false, ''
+        );
+    };
 
-        $openRowsTable = fn() => '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;line-height:1;"><tbody>';
-        $rowsHtml = $openRowsTable();
+    $addHeader();
 
-        $pageTotal   = 0.0;
-        $grandTotal  = 0.0;
-        $linesOnPage = 0;
-        $done        = 0;
+    $openRowsTable = fn() => '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;line-height:1;"><tbody>';
+    $rowsHtml = $openRowsTable();
 
-        $q = DB::table('cash_receipts as r')
-            ->selectRaw("
-                to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-                r.cr_no,
-                r.details,
-                r.collection_receipt,
-                r.receipt_amount,
-                COALESCE(c.cust_name, r.cust_id) as cust_name,
-                COALESCE(b.bank_name, r.bank_id) as bank_name
-            ")
-            ->leftJoin('customer_list as c', function ($j) use ($cid) {
-                $j->on('c.cust_id', '=', 'r.cust_id');
-                if (Schema::hasColumn('customer_list', 'company_id')) {
-                    $j->where('c.company_id', '=', $cid);
-                }
-            })
-            ->leftJoin('bank as b', function ($j) use ($cid) {
-                $j->on('b.bank_id', '=', 'r.bank_id');
-                if (Schema::hasColumn('bank', 'company_id')) {
-                    $j->where('b.company_id', '=', $cid);
-                }
-            })
-            ->where('r.company_id', $cid)
-            ->whereBetween('r.receipt_date', [$start, $end]);
+    $pageTotal   = 0.0;
+    $grandTotal  = 0.0;
+    $linesOnPage = 0;
+    $done        = 0;
 
-        if ($this->query) {
-            $needle = '%'.$this->escapeLike($this->query).'%';
-            $q->where(function($w) use($needle) {
-                $w->where('c.cust_name','ILIKE',$needle)
-                  ->orWhere('r.details','ILIKE',$needle)
-                  ->orWhere('r.cr_no','ILIKE',$needle)
-                  ->orWhere('r.collection_receipt','ILIKE',$needle)
-                  ->orWhere('r.bank_id','ILIKE',$needle)
-                  ->orWhere('b.bank_name','ILIKE',$needle);
-            });
-        }
+    $q = DB::table('cash_receipts as r')
+        ->selectRaw("
+            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+            r.cr_no,
+            r.details,
+            r.collection_receipt,
+            r.receipt_amount,
+            COALESCE(c.cust_name, r.cust_id) as cust_name,
+            COALESCE(b.bank_name, r.bank_id) as bank_name
+        ")
+        ->leftJoin('customer_list as c', function ($j) use ($cid) {
+            $j->on('c.cust_id', '=', 'r.cust_id');
+            if (Schema::hasColumn('customer_list', 'company_id')) {
+                $j->where('c.company_id', '=', $cid);
+            }
+        })
+        ->leftJoin('bank as b', function ($j) use ($cid) {
+            $j->on('b.bank_id', '=', 'r.bank_id');
+            if (Schema::hasColumn('bank', 'company_id')) {
+                $j->where('b.company_id', '=', $cid);
+            }
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.receipt_date', [$start, $end]);
 
-        $q->orderBy('r.cr_no', 'asc')
-          ->orderBy('r.receipt_date', 'asc')
-          ->chunk(300, function($chunk) use (&$rowsHtml, $openRowsTable, $addHeader, $pdf, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
-              foreach ($chunk as $row) {
-                  $amt = (float)$row->receipt_amount;
-                  $pageTotal  += $amt;
-                  $grandTotal += $amt;
-                  $linesOnPage++;
+    if ($this->query) {
+        $needle = '%'.$this->escapeLike($this->query).'%';
+        $q->where(function($w) use($needle) {
+            $w->where('c.cust_name','ILIKE',$needle)
+              ->orWhere('r.details','ILIKE',$needle)
+              ->orWhere('r.cr_no','ILIKE',$needle)
+              ->orWhere('r.collection_receipt','ILIKE',$needle)
+              ->orWhere('r.bank_id','ILIKE',$needle)
+              ->orWhere('b.bank_name','ILIKE',$needle);
+        });
+    }
 
-                  $rowsHtml .= sprintf(
-                      '<tr>
-                         <td width="8%%">%s</td>
-                         <td width="11%%">%s</td>
-                         <td width="12%%">%s</td>
-                         <td width="22%%" colspan="2">%s</td>
-                         <td width="28%%" colspan="2">%s</td>
-                         <td width="9%%">%s</td>
-                         <td width="10%%" align="right">%s</td>
-                       </tr>',
-                      e($row->receipt_date ?? ''),
-                      e($row->cr_no ?? ''),
-                      e($row->bank_name ?? ''),
-                      e($row->cust_name ?? ''),
-                      e($row->details ?? ''),
-                      e($row->collection_receipt ?? ''),
-                      number_format($amt, 2)
+    $q->orderBy('r.cr_no', 'asc')
+      ->orderBy('r.receipt_date', 'asc')
+      ->chunk(300, function($chunk) use (&$rowsHtml, $openRowsTable, $addHeader, $pdf, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
+          foreach ($chunk as $row) {
+              $amt = (float)$row->receipt_amount;
+              $pageTotal  += $amt;
+              $grandTotal += $amt;
+              $linesOnPage++;
+
+              $rowsHtml .= sprintf(
+                  '<tr>
+                     <td width="8%%">%s</td>
+                     <td width="11%%">%s</td>
+                     <td width="12%%">%s</td>
+                     <td width="22%%" colspan="2">%s</td>
+                     <td width="28%%" colspan="2">%s</td>
+                     <td width="9%%">%s</td>
+                     <td width="10%%" align="right">%s</td>
+                   </tr>',
+                  e($row->receipt_date ?? ''),
+                  e($row->cr_no ?? ''),
+                  e($row->bank_name ?? ''),
+                  e($row->cust_name ?? ''),
+                  e($row->details ?? ''),
+                  e($row->collection_receipt ?? ''),
+                  number_format($amt, 2)
+              );
+
+              if ($linesOnPage >= 40) {
+                  $rowsHtml .= '</tbody></table>';
+                  $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+                  $pdf->writeHTML(
+                      '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
+                         <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
+                       </table>',
+                      true, false, false, false, ''
                   );
 
-                  if ($linesOnPage >= 40) {
-                      $rowsHtml .= '</tbody></table>';
-                      $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-                      $pdf->writeHTML(
-                          '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
-                             <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
-                           </table>',
-                          true, false, false, false, ''
-                      );
-
-                      $linesOnPage = 0;
-                      $pageTotal   = 0.0;
-                      $addHeader();
-                      $rowsHtml = $openRowsTable();
-                  }
-
-                  $done++; $progress($done);
+                  $linesOnPage = 0;
+                  $pageTotal   = 0.0;
+                  $addHeader();
+                  $rowsHtml = $openRowsTable();
               }
-          });
 
-        $rowsHtml .= '</tbody></table>';
-        $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+              $done++; $progress($done);
+          }
+      });
 
-        $pdf->writeHTML(
-            '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
-               <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
-               <tr><td align="right"><b>GRAND TOTAL AMOUNT: '.number_format($grandTotal,2).'</b></td></tr>
-             </table>',
-            true, false, false, false, ''
-        );
+    $rowsHtml .= '</tbody></table>';
+    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
 
-        $pdf->SetY(-16);
-        $pdf->writeHTML(
-            '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
-               <tr>
-                 <td>Print Date: '.now()->format('M d, Y').'</td>
-                 <td>Print Time: '.now()->format('h:i:s a').'</td>
-                 <td align="right">'.$pdf->getAliasNumPage().'/'.$pdf->getAliasNbPages().'</td>
-               </tr>
-             </table>',
-            true, false, false, false, ''
-        );
+    $pdf->writeHTML(
+        '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
+           <tr><td align="right"><b>PAGE TOTAL AMOUNT: '.number_format($pageTotal,2).'</b></td></tr>
+           <tr><td align="right"><b>GRAND TOTAL AMOUNT: '.number_format($grandTotal,2).'</b></td></tr>
+         </table>',
+        true, false, false, false, ''
+    );
 
-        Storage::disk('local')->put($file, $pdf->Output('receipt-register.pdf', 'S'));
+    $pdf->SetY(-16);
+    $pdf->writeHTML(
+        '<table width="100%" cellpadding="0" cellspacing="0" style="line-height:1;">
+           <tr>
+             <td>Print Date: '.now()->format('M d, Y').'</td>
+             <td>Print Time: '.now()->format('h:i:s a').'</td>
+             <td align="right">'.$pdf->getAliasNumPage().'/'.$pdf->getAliasNbPages().'</td>
+           </tr>
+         </table>',
+        true, false, false, false, ''
+    );
+
+    Storage::disk('local')->put($file, $pdf->Output('receipt-register.pdf', 'S'));
+}
+
+private function buildExcel(string $file, int $cid, string $start, string $end, callable $progress): void
+{
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('Receipt Register');
+
+    $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
+    $yearDesc  = Carbon::parse($start)->year;
+
+    // ✅ same simple company header as check register
+    $companyName = ($cid === 2) ? 'AMEROP PHILIPPINES, INC' : 'SUCDEN PHILIPPINES, INC';
+
+    $r = 1;
+    $ws->setCellValue("A{$r}", $companyName); $r++;
+    $ws->setCellValue("A{$r}", 'RECEIPT REGISTER'); $r++;
+    $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
+
+    $ws->fromArray(['Date','Receipt Voucher','Bank','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
+    $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
+    $r++;
+
+    foreach (range('A','I') as $col) $ws->getColumnDimension($col)->setWidth(18);
+    $ws->getColumnDimension('D')->setWidth(28);
+    $ws->getColumnDimension('E')->setWidth(4);
+    $ws->getColumnDimension('F')->setWidth(30);
+    $ws->getColumnDimension('G')->setWidth(4);
+    $ws->getColumnDimension('C')->setWidth(22);
+
+    $pageTotal = 0.0; $grandTotal = 0.0; $linesOnPage = 0; $done = 0;
+
+    $q = DB::table('cash_receipts as r')
+        ->selectRaw("
+            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+            r.cr_no,
+            r.details,
+            r.collection_receipt,
+            r.receipt_amount,
+            COALESCE(c.cust_name, r.cust_id) as cust_name,
+            COALESCE(b.bank_name, r.bank_id) as bank_name
+        ")
+        ->leftJoin('customer_list as c', function ($j) use ($cid) {
+            $j->on('c.cust_id', '=', 'r.cust_id');
+            if (Schema::hasColumn('customer_list', 'company_id')) {
+                $j->where('c.company_id', '=', $cid);
+            }
+        })
+        ->leftJoin('bank as b', function ($j) use ($cid) {
+            $j->on('b.bank_id', '=', 'r.bank_id');
+            if (Schema::hasColumn('bank', 'company_id')) {
+                $j->where('b.company_id', '=', $cid);
+            }
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.receipt_date', [$start, $end]);
+
+    if ($this->query) {
+        $needle = '%'.$this->escapeLike($this->query).'%';
+        $q->where(function($w) use($needle) {
+            $w->where('c.cust_name','ILIKE',$needle)
+              ->orWhere('r.details','ILIKE',$needle)
+              ->orWhere('r.cr_no','ILIKE',$needle)
+              ->orWhere('r.collection_receipt','ILIKE',$needle)
+              ->orWhere('r.bank_id','ILIKE',$needle)
+              ->orWhere('b.bank_name','ILIKE',$needle);
+        });
     }
 
-    private function buildExcel(string $file, int $cid, string $start, string $end, callable $progress): void
-    {
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('Receipt Register');
+    $q->orderBy('r.cr_no', 'asc')
+      ->orderBy('r.receipt_date', 'asc')
+      ->chunk(300, function($chunk) use (&$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
+          foreach ($chunk as $row) {
+              $amt = (float)$row->receipt_amount;
+              $pageTotal  += $amt;
+              $grandTotal += $amt;
+              $linesOnPage++;
 
-        $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
-        $yearDesc  = Carbon::parse($start)->year;
+              $ws->fromArray([
+                  $row->receipt_date ?? '',
+                  $row->cr_no ?? '',
+                  $row->bank_name ?? '',
+                  $row->cust_name ?? '', '',
+                  $row->details ?? '', '',
+                  $row->collection_receipt ?? '',
+                  $amt
+              ], null, "A{$r}");
 
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'RECEIPT REGISTER'); $r++;
-        $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
+              // keep bank as string (avoid excel numeric mangling)
+              $ws->getCell("C{$r}")->setValueExplicit((string)($row->bank_name ?? ''), DataType::TYPE_STRING);
 
-        $ws->fromArray(['Date','Receipt Voucher','Bank','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
-        $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
-        $r++;
+              $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+              $r++;
 
-        foreach (range('A','I') as $col) $ws->getColumnDimension($col)->setWidth(18);
-        $ws->getColumnDimension('D')->setWidth(28);
-        $ws->getColumnDimension('E')->setWidth(4);
-        $ws->getColumnDimension('F')->setWidth(30);
-        $ws->getColumnDimension('G')->setWidth(4);
-        $ws->getColumnDimension('C')->setWidth(22);
-
-        $pageTotal = 0.0; $grandTotal = 0.0; $linesOnPage = 0; $done = 0;
-
-        $q = DB::table('cash_receipts as r')
-            ->selectRaw("
-                to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-                r.cr_no,
-                r.details,
-                r.collection_receipt,
-                r.receipt_amount,
-                COALESCE(c.cust_name, r.cust_id) as cust_name,
-                COALESCE(b.bank_name, r.bank_id) as bank_name
-            ")
-            ->leftJoin('customer_list as c', function ($j) use ($cid) {
-                $j->on('c.cust_id', '=', 'r.cust_id');
-                if (Schema::hasColumn('customer_list', 'company_id')) {
-                    $j->where('c.company_id', '=', $cid);
-                }
-            })
-            ->leftJoin('bank as b', function ($j) use ($cid) {
-                $j->on('b.bank_id', '=', 'r.bank_id');
-                if (Schema::hasColumn('bank', 'company_id')) {
-                    $j->where('b.company_id', '=', $cid);
-                }
-            })
-            ->where('r.company_id', $cid)
-            ->whereBetween('r.receipt_date', [$start, $end]);
-
-        if ($this->query) {
-            $needle = '%'.$this->escapeLike($this->query).'%';
-            $q->where(function($w) use($needle) {
-                $w->where('c.cust_name','ILIKE',$needle)
-                  ->orWhere('r.details','ILIKE',$needle)
-                  ->orWhere('r.cr_no','ILIKE',$needle)
-                  ->orWhere('r.collection_receipt','ILIKE',$needle)
-                  ->orWhere('r.bank_id','ILIKE',$needle)
-                  ->orWhere('b.bank_name','ILIKE',$needle);
-            });
-        }
-
-        $q->orderBy('r.cr_no', 'asc')
-          ->orderBy('r.receipt_date', 'asc')
-          ->chunk(300, function($chunk) use (&$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
-              foreach ($chunk as $row) {
-                  $amt = (float)$row->receipt_amount;
-                  $pageTotal  += $amt;
-                  $grandTotal += $amt;
-                  $linesOnPage++;
-
-                  $ws->fromArray([
-                      $row->receipt_date ?? '',
-                      $row->cr_no ?? '',
-                      $row->bank_name ?? '',
-                      $row->cust_name ?? '', '',
-                      $row->details ?? '', '',
-                      $row->collection_receipt ?? '',
-                      $amt
-                  ], null, "A{$r}");
-
-                  // keep bank as string (avoid excel numeric mangling)
-                  $ws->getCell("C{$r}")->setValueExplicit((string)($row->bank_name ?? ''), DataType::TYPE_STRING);
-
+              if ($linesOnPage >= 45) {
+                  $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
+                  $ws->setCellValue("I{$r}", $pageTotal);
                   $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                  $r += 2;
+
+                  $linesOnPage = 0;
+                  $pageTotal   = 0.0;
+
+                  $ws->fromArray(['Date','Receipt Voucher','Bank','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
+                  $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
                   $r++;
-
-                  if ($linesOnPage >= 45) {
-                      $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
-                      $ws->setCellValue("I{$r}", $pageTotal);
-                      $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                      $r += 2;
-
-                      $linesOnPage = 0;
-                      $pageTotal   = 0.0;
-
-                      $ws->fromArray(['Date','Receipt Voucher','Bank','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
-                      $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
-                      $r++;
-                  }
-
-                  $done++; $progress($done);
               }
-          });
 
-        $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
-        $ws->setCellValue("I{$r}", $pageTotal);
-        $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-        $r++;
+              $done++; $progress($done);
+          }
+      });
 
-        $ws->setCellValue("H{$r}", 'GRAND TOTAL AMOUNT:');
-        $ws->setCellValue("I{$r}", $grandTotal);
-        $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+    $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
+    $ws->setCellValue("I{$r}", $pageTotal);
+    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+    $r++;
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream);
-        rewind($stream);
+    $ws->setCellValue("H{$r}", 'GRAND TOTAL AMOUNT:');
+    $ws->setCellValue("I{$r}", $grandTotal);
+    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
 
-        Storage::disk('local')->put($file, stream_get_contents($stream));
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream);
+    rewind($stream);
 
-        fclose($stream);
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+    Storage::disk('local')->put($file, stream_get_contents($stream));
+
+    fclose($stream);
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
 
     private function escapeLike(string $s): string
     {

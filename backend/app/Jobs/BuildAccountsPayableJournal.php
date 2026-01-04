@@ -134,16 +134,42 @@ if ($cid <= 0) {
 
     /** ---------- Writers ---------- */
 
-private function buildPdf(string $file, callable $progress): void
+/**
+ * ✅ Company-aware header block
+ * - company_id=2 => AMEROP
+ * - default => SUCDEN
+ */
+private function companyHeader(): array
 {
     $cid = (int) $this->companyId;
 
-    // --- Custom PDF with legacy-like header/footer ---
-    $startDate = $this->startDate;
-    $endDate   = $this->endDate;
+    if ($cid === 2) {
+        return [
+            'name'  => 'AMEROP PHILIPPINES, INC.',
+            'tin'   => 'TIN- 762-592-927-000',
+            'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
+            'addr2' => 'Brgy. Mandalagan, Bacolod City',
+        ];
+    }
 
-    $pdf = new class($startDate, $endDate) extends \TCPDF {
-        public function __construct(public string $startDate, public string $endDate)
+    return [
+        'name'  => 'SUCDEN PHILIPPINES, INC.',
+        'tin'   => 'TIN- 000-105-267-000',
+        'addr1' => 'Unit 2202 The Podium West Tower, 12 ADB Ave',
+        'addr2' => 'Ortigas Center Mandaluyong City',
+    ];
+}
+
+
+
+
+private function buildPdf(string $file, callable $progress): void
+{
+    $cid = (int) $this->companyId;
+    $co  = $this->companyHeader();
+
+    $pdf = new class($co) extends \TCPDF {
+        public function __construct(public array $co)
         {
             parent::__construct('P', 'mm', 'LETTER', true, 'UTF-8', false);
         }
@@ -151,13 +177,18 @@ private function buildPdf(string $file, callable $progress): void
         public function Header()
         {
             $this->SetY(10);
+            $name  = $this->co['name']  ?? '';
+            $tin   = $this->co['tin']   ?? '';
+            $addr1 = $this->co['addr1'] ?? '';
+            $addr2 = $this->co['addr2'] ?? '';
+
             $htmlHeader = ''
                 . '<table border="0" cellspacing="0" cellpadding="0" width="100%">'
                 . '  <tr><td align="right">'
-                . '    <font size="12"><b>SUCDEN PHILIPPINES, INC.</b></font><br/>'
-                . '    <font size="6">TIN- 000-105-267-000</font><br/>'
-                . '    <font size="6">Unit 2202 The Podium West Tower, 12 ADB Ave</font><br/>'
-                . '    <font size="6">Ortigas Center Mandaluyong City</font>'
+                . '    <font size="12"><b>' . htmlspecialchars($name, ENT_QUOTES, 'UTF-8') . '</b></font><br/>'
+                . '    <font size="6">' . htmlspecialchars($tin, ENT_QUOTES, 'UTF-8') . '</font><br/>'
+                . '    <font size="6">' . htmlspecialchars($addr1, ENT_QUOTES, 'UTF-8') . '</font><br/>'
+                . '    <font size="6">' . htmlspecialchars($addr2, ENT_QUOTES, 'UTF-8') . '</font>'
                 . '  </td></tr>'
                 . '  <tr><td align="right"><hr/></td></tr>'
                 . '</table>';
@@ -271,7 +302,7 @@ HTML;
             'b.acct_desc'
         )
         ->orderBy('r.id')
-        ->chunk(200, function ($chunk) use (&$done, $progress, &$tbl, &$ctr, &$lctr, $startDate, $endDate) {
+        ->chunk(200, function ($chunk) use (&$done, $progress, &$tbl, &$ctr, &$lctr) {
             foreach ($chunk as $row) {
                 $done++;
                 $progress($done);
@@ -340,27 +371,24 @@ HTML;
     Storage::disk('local')->put($file, $pdf->Output('accounts-payable.pdf', 'S'));
 }
 
-
 private function buildExcel(string $file, callable $progress): void
 {
     $cid = (int) $this->companyId;
+    $co  = $this->companyHeader();
 
     $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
     $ws = $wb->getActiveSheet();
     $ws->setTitle('Accounts Payable Journal');
 
-    // Header (simple, you can style later like legacy)
     $r = 1;
     $ws->setCellValue("A{$r}", 'ACCOUNTS PAYABLE JOURNAL'); $r++;
-    $ws->setCellValue("A{$r}", 'SUCDEN PHILIPPINES, INC.'); $r++;
-    $ws->setCellValue("A{$r}", 'TIN- 000-105-267-000'); $r++;
-    $ws->setCellValue("A{$r}", 'Unit 2202 The Podium West Tower, 12 ADB Ave'); $r++;
-    $ws->setCellValue("A{$r}", 'Ortigas Center Mandaluyong City'); $r += 2;
+    $ws->setCellValue("A{$r}", $co['name']);  $r++;
+    $ws->setCellValue("A{$r}", $co['tin']);   $r++;
+    $ws->setCellValue("A{$r}", $co['addr1']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
+
     $ws->setCellValue("A{$r}", 'ACCOUNTS PAYABLE JOURNAL'); $r++;
-    $ws->setCellValue(
-        "A{$r}",
-        "For the period covering: {$this->startDate} to {$this->endDate}"
-    );
+    $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}");
     $r += 2;
 
     $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}");
@@ -447,7 +475,6 @@ private function buildExcel(string $file, callable $progress): void
                     $row->explanation
                 ])));
 
-                // Entry header rows (legacy-like)
                 $ws->setCellValue("A{$r}", $row->purchase_date);
                 $ws->setCellValue("B{$r}", $row->id);
                 $r++;
@@ -479,7 +506,6 @@ private function buildExcel(string $file, callable $progress): void
                     $r++;
                 }
 
-                // Totals per entry
                 $ws->setCellValue("E{$r}", "TOTAL");
                 $ws->setCellValue("F{$r}", $itemTotalDebit);
                 $ws->setCellValue("G{$r}", $itemTotalCredit);
@@ -501,7 +527,6 @@ private function buildExcel(string $file, callable $progress): void
     $wb->disconnectWorksheets();
     unset($writer);
 }
-
 
 
 
