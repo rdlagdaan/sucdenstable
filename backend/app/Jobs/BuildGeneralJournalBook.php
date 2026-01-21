@@ -230,120 +230,158 @@ private function companyHeader(int $cid): array
      */
 private function buildPdf(string $path, callable $progress, int $cid): void
 {
-    $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
-    $pdf->setPrintHeader(false);
-    $pdf->setPrintFooter(false);
-    $pdf->SetMargins(10, 10, 10);
-    $pdf->SetAutoPageBreak(true, 12);
-    $pdf->setImageScale(1.25);
+    @ini_set('memory_limit', '512M');
+
+    $co = $this->companyHeader($cid);
+
+    // ✅ force mm/dd/yyyy display in header period
+    $from = \Carbon\Carbon::parse($this->startDate)->format('m/d/Y');
+    $to   = \Carbon\Carbon::parse($this->endDate)->format('m/d/Y');
+
+    $pdf = new class($co, $from, $to) extends \TCPDF {
+        public function __construct(
+            public array $co,
+            public string $from,
+            public string $to
+        ) {
+            parent::__construct('P', 'mm', 'LETTER', true, 'UTF-8', false);
+        }
+
+        public function Header()
+        {
+            $name  = (string)($this->co['name']  ?? '');
+            $tin   = (string)($this->co['tin']   ?? '');
+            $addr1 = (string)($this->co['addr1'] ?? '');
+            $addr2 = (string)($this->co['addr2'] ?? '');
+
+            // Top-right company block
+            $this->SetY(8);
+            $this->SetFont('helvetica', 'B', 11);
+            $this->Cell(0, 5, $name, 0, 1, 'R');
+
+            $this->SetFont('helvetica', '', 8);
+            $this->Cell(0, 4, $tin, 0, 1, 'R');
+            $this->Cell(0, 4, $addr1, 0, 1, 'R');
+            $this->Cell(0, 4, $addr2, 0, 1, 'R');
+
+            // Divider line
+            $y = $this->GetY() + 3;
+            $this->Line(10, $y, 206, $y);
+
+            // Title
+            $this->SetY($y + 6);
+            $this->SetFont('helvetica', 'B', 16);
+            $this->Cell(0, 7, 'GENERAL JOURNAL', 0, 1, 'L');
+
+            // ✅ Period + Debit/Credit on SAME LINE
+            $this->SetFont('helvetica', 'B', 10);
+            $periodY = $this->GetY();
+
+            $this->SetXY(10, $periodY);
+            $this->Cell(140, 6, "For the period covering {$this->from} — {$this->to}", 0, 0, 'L');
+
+            $this->SetXY(150, $periodY);
+            $this->Cell(28, 6, 'Debit', 0, 0, 'R');
+            $this->Cell(28, 6, 'Credit', 0, 0, 'R');
+
+            // underline under the header row
+            $y2 = $periodY + 9;
+            $this->Line(10, $y2, 206, $y2);
+
+            $this->Ln(12);
+            $this->SetFont('helvetica', '', 8);
+        }
+
+        public function Footer()
+        {
+            $this->SetY(-15);
+            $this->SetFont('helvetica', 'I', 8);
+
+            $currentDate = date('M d, Y');
+            $currentTime = date('h:i:sa');
+            $pageText = $this->getAliasNumPage() . '/' . $this->getAliasNbPages();
+
+            $this->Cell(70, 5, "Print Date: {$currentDate}", 0, 0, 'L');
+            $this->Cell(60, 5, $pageText, 0, 0, 'C');
+            $this->Cell(70, 5, "Print Time: {$currentTime}", 0, 1, 'L');
+        }
+    };
+
+    // ✅ repeat Header() every page (no HTML header tables => no $cellspacingx error)
+    $pdf->setPrintHeader(true);
+
+    // Top margin big enough so body never overlaps header
+    $pdf->SetHeaderMargin(5);
+    $pdf->SetMargins(10, 52, 10);
+    $pdf->SetAutoPageBreak(true, 16);
+
     $pdf->SetFont('helvetica', '', 8);
     $pdf->AddPage();
 
-    $co = $this->companyHeader($cid);
-    $name  = htmlspecialchars($co['name'],  ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    $tin   = htmlspecialchars($co['tin'],   ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    $addr1 = htmlspecialchars($co['addr1'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    $addr2 = htmlspecialchars($co['addr2'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-
-    $hdr = <<<HTML
-<table width="100%" cellspacing="0" cellpadding="0">
-  <tr><td align="right"><b>{$name}</b><br/>
-    <span style="font-size:9px">{$tin}</span><br/>
-    <span style="font-size:9px">{$addr1}</span><br/>
-    <span style="font-size:9px">{$addr2}</span></td></tr>
-  <tr><td><hr/></td></tr>
-</table>
-
-<h2>GENERAL JOURNAL</h2>
-<div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
-<br/>
-
-<table width="100%" cellspacing="0" cellpadding="1">
-  <tr>
-    <td width="15%"></td>
-    <td width="55%"></td>
-    <td width="15%" align="right"><b>Debit</b></td>
-    <td width="15%" align="right"><b>Credit</b></td>
-  </tr>
-</table>
-HTML;
-
-    $pdf->writeHTML($hdr, true, false, false, false, '');
-
     $done = 0;
-    $lineCount = 0;
 
     $q = $this->applyFilters($this->baseQuery($cid), $cid)
         ->groupBy('r.id','r.gen_acct_date','r.ga_no','r.explanation')
         ->orderBy('r.id');
 
-    $q->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
-        foreach ($chunk as $row) {
-            $gjId = 'GLGJ-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+    $q->chunk(200, function ($chunk) use (&$done, $progress, $pdf) {
 
-            $block = <<<HTML
-<table width="100%" cellspacing="0" cellpadding="1">
-  <tr>
-    <td width="25%"><b>{$gjId}</b></td>
-    <td width="75%"><b>JE - {$row->ga_no}</b></td>
-  </tr>
-  <tr>
-    <td width="25%">{$row->gen_date}</td>
-    <td width="75%">{$row->explanation}</td>
-  </tr>
-</table>
-HTML;
-            $pdf->writeHTML($block, true, false, false, false, '');
+        foreach ($chunk as $row) {
+
+            $gjId = 'GLGJ-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+
+            // ✅ lines already have MM/DD/YYYY alias gen_date from baseQuery
+            $pdf->writeHTML(
+                '<table width="100%" cellspacing="0" cellpadding="1">'
+              . '<tr><td width="25%"><b>'.e($gjId).'</b></td><td width="75%"><b>JE - '.e($row->ga_no).'</b></td></tr>'
+              . '<tr><td width="25%">'.e($row->gen_date).'</td><td width="75%">'.e($row->explanation).'</td></tr>'
+              . '</table>',
+                true, false, false, false, ''
+            );
+
+            $itemDebit  = 0.0;
+            $itemCredit = 0.0;
 
             $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
-            $itemDebit = 0; $itemCredit = 0;
-
-            foreach (json_decode($row->lines, true) as $ln) {
+            foreach ((json_decode($row->lines, true) ?: []) as $ln) {
                 $debit  = (float)($ln['debit'] ?? 0);
                 $credit = (float)($ln['credit'] ?? 0);
+
                 $itemDebit  += $debit;
                 $itemCredit += $credit;
 
                 $rowsHtml .= sprintf(
                     '<tr>
-                       <td width="15%%">&nbsp;&nbsp;&nbsp;%s</td>
-                       <td width="55%%">%s</td>
-                       <td width="15%%" align="right">%s</td>
-                       <td width="15%%" align="right">%s</td>
+                        <td width="15%%">&nbsp;&nbsp;&nbsp;%s</td>
+                        <td width="55%%">%s</td>
+                        <td width="15%%" align="right">%s</td>
+                        <td width="15%%" align="right">%s</td>
                      </tr>',
                     e($ln['acct_code'] ?? ''),
                     e($ln['acct_desc'] ?? ''),
-                    number_format($debit, 2),
-                    number_format($credit, 2)
+                    $debit  == 0.0 ? '' : number_format($debit, 2),
+                    $credit == 0.0 ? '' : number_format($credit, 2)
                 );
-
-                $lineCount++;
-                if ($lineCount >= 28) {
-                    $rowsHtml .= '</table>';
-                    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-                    $pdf->AddPage();
-                    $lineCount = 0;
-                    $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
-                }
             }
 
             $rowsHtml .= sprintf(
                 '<tr>
-                   <td width="15%%"></td>
-                   <td width="55%%" align="right"><b>TOTAL</b></td>
-                   <td width="15%%" align="right"><b>%s</b></td>
-                   <td width="15%%" align="right"><b>%s</b></td>
+                    <td width="15%%"></td>
+                    <td width="55%%" align="right"><b>TOTAL</b></td>
+                    <td width="15%%" align="right"><b>%s</b></td>
+                    <td width="15%%" align="right"><b>%s</b></td>
                  </tr>
                  <tr><td colspan="4"><hr/></td></tr>
                  <tr><td colspan="4"><br/></td></tr>',
                 number_format($itemDebit, 2),
                 number_format($itemCredit, 2)
             );
-            $rowsHtml .= '</table>';
 
+            $rowsHtml .= '</table>';
             $pdf->writeHTML($rowsHtml, true, false, false, false, '');
 
-            $done++; $progress($done);
+            $done++;
+            $progress($done);
         }
     });
 

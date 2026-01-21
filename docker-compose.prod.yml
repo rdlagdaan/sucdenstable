@@ -29,6 +29,8 @@ services:
       start_period: 25s
     ports:
       - "8686:8686"
+    volumes:                              # ← ADD THIS BLOCK
+      - ./docker/php/conf.d/99-memory.ini:/usr/local/etc/php/conf.d/99-memory.ini:ro
     restart: unless-stopped
     networks: [app-network]
 
@@ -48,6 +50,8 @@ services:
         php artisan migrate --force &&
         php artisan queue:work --queue=default --sleep=1 --tries=3 --timeout=120
       "
+    volumes:                              # ← ADD THIS BLOCK
+      - ./docker/php/conf.d/99-memory.ini:/usr/local/etc/php/conf.d/99-memory.ini:ro
     restart: unless-stopped
     networks: [ app-network ]
 
@@ -59,6 +63,14 @@ services:
       - "3001:80"      
     restart: unless-stopped
     networks: [app-network]
+
+  #frontend:
+  #  image: sucden-frontend:latest
+  #  ports:
+  #    - "3001:80"
+  #  restart: unless-stopped
+  #  networks: [app-network]
+
 
 networks:
   app-network: {}

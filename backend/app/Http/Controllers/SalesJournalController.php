@@ -46,7 +46,7 @@ class MySalesVoucherPDF extends \TCPDF {
         <table border="0"><tr>
           <td width="70%">
             <table border="1" cellpadding="5"><tr>
-              <td><font size="8">Prepared:<br><br><br><br><br>administrator</font></td>
+              <td><font size="8">Prepared:<br><br><br><br><br></font></td>
               <td><font size="8">Accted by:<br><br><br><br><br></font></td>
               <td><font size="8">Checked:<br><br><br><br><br></font></td>
               <td><font size="8">Approved:<br><br><br><br><br></font></td>
@@ -229,9 +229,9 @@ $exists = AccountCode::where('acct_code', $payload['acct_code'])
         if (!$exists) return response()->json(['message' => 'Invalid or inactive account.'], 422);
 
         // Duplicate acct_code in same transaction?
-        $dup = CashSalesDetail::where('transaction_id',$payload['transaction_id'])
-            ->where('acct_code',$payload['acct_code'])->exists();
-        if ($dup) return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
+        //$dup = CashSalesDetail::where('transaction_id',$payload['transaction_id'])
+        //    ->where('acct_code',$payload['acct_code'])->exists();
+        //if ($dup) return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
 
         $detail = CashSalesDetail::create($payload);
 
@@ -285,13 +285,13 @@ if (array_key_exists('acct_code', $apply) && $apply['acct_code'] !== $detail->ac
         return response()->json(['message' => 'Invalid or inactive account.'], 422);
     }
 
-    $dup = CashSalesDetail::where('transaction_id', $payload['transaction_id'])
-        ->where('acct_code', $apply['acct_code'])
-        ->exists();
+    //$dup = CashSalesDetail::where('transaction_id', $payload['transaction_id'])
+    //    ->where('acct_code', $apply['acct_code'])
+    //    ->exists();
 
-    if ($dup) {
-        return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
-    }
+    //if ($dup) {
+    //    return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
+    //}
 }
 
 

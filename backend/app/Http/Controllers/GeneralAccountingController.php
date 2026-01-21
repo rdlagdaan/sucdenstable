@@ -43,7 +43,7 @@ class MyJournalVoucherPDF extends \TCPDF
         <table border="0"><tr>
           <td width="70%">
             <table border="1" cellpadding="5"><tr>
-              <td><font size="8">Prepared:<br><br><br><br><br>administrator</font></td>
+              <td><font size="8">Prepared:<br><br><br><br><br></font></td>
               <td><font size="8">Checked:<br><br><br><br><br></font></td>
               <td><font size="8">Approved:<br><br><br><br><br></font></td>
               <td><font size="8">Posted by:<br><br><br><br><br></font></td>
@@ -147,6 +147,14 @@ public function show($id, Request $req)
             $data['ga_no'] = $next->getData()->ga_no ?? null;
         }
 
+
+        // ✅ Default workstation_id to client IP if not provided
+        // (Details will inherit this value if they don't send workstation_id)
+        if (empty($data['workstation_id'])) {
+            $data['workstation_id'] = (string) $req->ip();
+        }
+
+
         $data['gen_acct_amount'] = 0;
         $data['sum_debit'] = 0;
         $data['sum_credit'] = 0;
@@ -194,14 +202,17 @@ public function saveDetail(Request $req)
     // Optional: require approval for adding details too
     // $this->requireEditApproval((int)$main->id);
 
-    // 3) Ensure workstation_id (DB NOT NULL)
-    if (empty($payload['workstation_id'])) {
-        if (!empty($main->workstation_id)) {
-            $payload['workstation_id'] = $main->workstation_id;
-        } else {
-            return response()->json(['message' => 'Workstation is required for journal details.'], 422);
-        }
+
+// 3) Ensure workstation_id (DB NOT NULL)
+// Prefer payload -> header -> client IP
+if (empty($payload['workstation_id'])) {
+    if (!empty($main->workstation_id)) {
+        $payload['workstation_id'] = $main->workstation_id;
+    } else {
+        $payload['workstation_id'] = (string) $req->ip();
     }
+}
+
 
     // 4) Validate debit/credit XOR and >0
     $d = (float)($payload['debit'] ?? 0);
@@ -220,14 +231,9 @@ public function saveDetail(Request $req)
         return response()->json(['message' => 'Invalid or inactive account.'], 422);
     }
 
-    // 6) Prevent duplicate acct_code inside same transaction (optionally also scope by company)
-    $dup = GeneralAccountingDetail::where('transaction_id', (int)$payload['transaction_id'])
-        ->where('acct_code', $payload['acct_code'])
-        ->exists();
+// 6) Allow duplicate acct_code lines (legacy-style journals often repeat accounts)
+// (No duplicate blocking)
 
-    if ($dup) {
-        return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
-    }
 
     // 7) Set FK field (your table uses both naming styles)
     $payload['general_accounting_id'] = (int)$payload['transaction_id'];
@@ -304,15 +310,8 @@ public function updateDetail(Request $req)
             return response()->json(['message' => 'Invalid or inactive account.'], 422);
         }
 
-        $dup = GeneralAccountingDetail::where('transaction_id', (int)$main->id)
-            ->where('company_id', $companyId)
-            ->where('acct_code', $apply['acct_code'])
-            ->where('id', '<>', (int)$row->id)
-            ->exists();
+// Allow duplicate acct_code lines (no duplicate blocking)
 
-        if ($dup) {
-            return response()->json(['message' => 'Duplicate account code for this transaction.'], 422);
-        }
     }
 
     $row->update($apply);
@@ -405,7 +404,7 @@ public function list(Request $req)
                 $k->where('acct_code','like',"%$q%")->orWhere('acct_desc','like',"%$q%");
             }))
             ->orderBy('acct_desc')
-            ->limit(200)
+            ->limit(2000)
             ->get(['acct_code','acct_desc']);
 
         return response()->json($rows);
@@ -770,10 +769,18 @@ public function updateMainNoApproval(Request $req)
         abort(403, 'Cancelled or deleted journal cannot be updated.');
     }
 
-    $main->update([
-        'gen_acct_date' => $data['gen_acct_date'],
-        'explanation'   => $data['explanation'],
-    ]);
+$update = [
+    'gen_acct_date' => $data['gen_acct_date'],
+    'explanation'   => $data['explanation'],
+];
+
+// ✅ If workstation_id is still empty (older records), set it to client IP once
+if (empty($main->workstation_id)) {
+    $update['workstation_id'] = (string) $req->ip();
+}
+
+$main->update($update);
+
 
     return response()->json([
         'ok'            => true,

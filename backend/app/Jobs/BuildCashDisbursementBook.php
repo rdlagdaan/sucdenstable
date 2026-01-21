@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Schema;
+use Carbon\Carbon;
 use Throwable;
 
 class BuildCashDisbursementBook implements ShouldQueue
@@ -47,7 +48,6 @@ class BuildCashDisbursementBook implements ShouldQueue
         $cid = (int) ($this->companyId ?? 0);
         $uid = (int) ($this->userId ?? 0);
 
-        // ✅ only delete within same tenant scope
         $prefix = "cash_disbursement_book_c{$cid}_u{$uid}_";
 
         $files = collect($disk->files('reports'))
@@ -75,7 +75,6 @@ class BuildCashDisbursementBook implements ShouldQueue
             'company_id' => $this->companyId,
         ]);
 
-        // ✅ Option A: hard-require company scope
         $cid = (int) ($this->companyId ?? 0);
         if ($cid <= 0) {
             $this->patchState([
@@ -87,7 +86,6 @@ class BuildCashDisbursementBook implements ShouldQueue
         }
 
         try {
-            // Pre-count for progress (SCOPED)
             $total = DB::table('cash_disbursement as r')
                 ->where('r.company_id', $cid)
                 ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
@@ -105,7 +103,6 @@ class BuildCashDisbursementBook implements ShouldQueue
             $stamp = now()->format('Ymd_His') . '_' . Str::uuid();
             $ext   = $this->format === 'pdf' ? 'pdf' : 'xls';
 
-            // ✅ tenant-safe filename
             $uid  = (int) ($this->userId ?? 0);
             $path = "{$dir}/cash_disbursement_book_c{$cid}_u{$uid}_{$stamp}.{$ext}";
 
@@ -132,306 +129,382 @@ class BuildCashDisbursementBook implements ShouldQueue
         }
     }
 
+    /**
+     * ✅ Company-aware header block
+     * - company_id=2 => AMEROP
+     * - default => SUCDEN
+     */
+    private function companyHeader(): array
+    {
+        $cid = (int) ($this->companyId ?? 0);
 
-/**
- * ✅ Company-aware header block
- * - company_id=2 => AMEROP
- * - default => SUCDEN
- */
-private function companyHeader(): array
-{
-    $cid = (int) ($this->companyId ?? 0);
+        if ($cid === 2) {
+            return [
+                'name'  => 'AMEROP PHILIPPINES, INC.',
+                'tin'   => 'TIN- 762-592-927-000',
+                'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
+                'addr2' => 'Brgy. Mandalagan, Bacolod City',
+            ];
+        }
 
-    if ($cid === 2) {
         return [
-            'name'  => 'AMEROP PHILIPPINES, INC.',
-            'tin'   => 'TIN- 762-592-927-000',
-            'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
-            'addr2' => 'Brgy. Mandalagan, Bacolod City',
+            'name'  => 'SUCDEN PHILIPPINES, INC.',
+            'tin'   => 'TIN- 000-105-267-000',
+            'addr1' => 'Unit 2202 The Podium West Tower, 12 ADB Ave',
+            'addr2' => 'Ortigas Center Mandaluyong City',
         ];
     }
 
-    return [
-        'name'  => 'SUCDEN PHILIPPINES, INC.',
-        'tin'   => 'TIN- 000-105-267-000',
-        'addr1' => 'Unit 2202 The Podium West Tower, 12 ADB Ave',
-        'addr2' => 'Ortigas Center Mandaluyong City',
-    ];
-}
-
-
-
-
     /** ---------- Writers ---------- */
 
-private function buildPdf(string $file, callable $progress): void
-{
-    $cid = (int) ($this->companyId ?? 0);
+    private function buildPdf(string $file, callable $progress): void
+    {
+        $cid = (int) ($this->companyId ?? 0);
 
-    // detect optional company_id columns for safe joins
-    $acctHasCompany   = Schema::hasColumn('account_code', 'company_id');
-    $vendHasCompany   = Schema::hasColumn('vendor_list', 'company_id');
-    $bankAcctHasComp  = $acctHasCompany; // same table
+        // detect optional company_id columns for safe joins
+        $acctHasCompany = Schema::hasColumn('account_code', 'company_id');
+        $vendHasCompany = Schema::hasColumn('vendor_list', 'company_id');
 
-    $pdf = new \TCPDF('P','mm','LETTER', true, 'UTF-8', false);
-    $pdf->setPrintHeader(false);
-    $pdf->setPrintFooter(false);
-    $pdf->SetMargins(10, 10, 10);
-    $pdf->SetAutoPageBreak(true, 12);
-    $pdf->setImageScale(1.25);
-    $pdf->SetFont('helvetica', '', 8);
-    $pdf->AddPage();
+        $co = $this->companyHeader();
 
-    $co = $this->companyHeader();
-    $name  = htmlspecialchars($co['name'],  ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    $tin   = htmlspecialchars($co['tin'],   ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    $addr1 = htmlspecialchars($co['addr1'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    $addr2 = htmlspecialchars($co['addr2'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        // ✅ Period format mm/dd/yyyy
+        $from = Carbon::parse($this->startDate)->format('m/d/Y');
+        $to   = Carbon::parse($this->endDate)->format('m/d/Y');
 
-    $hdr = <<<HTML
-      <table width="100%" cellspacing="0" cellpadding="0">
-        <tr><td align="right"><b>{$name}</b><br/>
-          <span style="font-size:9px">{$tin}</span><br/>
-          <span style="font-size:9px">{$addr1}</span><br/>
-          <span style="font-size:9px">{$addr2}</span></td></tr>
-        <tr><td><hr/></td></tr>
-      </table>
-      <h2>CASH DISBURSEMENTS JOURNAL</h2>
-      <div><b>For the period covering {$this->startDate} — {$this->endDate}</b></div>
-      <br/>
-      <table width="100%"><tr><td colspan="5"></td><td align="right"><b>Debit</b></td><td align="right"><b>Credit</b></td></tr></table>
-    HTML;
-
-    $pdf->writeHTML($hdr, true, false, false, false, '');
-
-    $done = 0;
-    $lineCount = 0;
-
-    DB::table('cash_disbursement as r')
-        ->selectRaw("
-            r.id,
-            to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
-            r.cd_no,
-            r.check_ref_no,
-            r.explanation,
-            COALESCE(b.acct_desc, r.bank_id) as bank_name,
-            v.vend_name as vend_name,
-            json_agg(json_build_object(
-                'acct_code', d.acct_code,
-                'acct_desc', COALESCE(a.acct_desc,''),
-                'debit', d.debit,
-                'credit', d.credit
-            ) ORDER BY d.id) as lines
-        ")
-        // ✅ Bank account join (company-scoped if possible)
-        ->leftJoin('account_code as b', function ($j) use ($cid, $bankAcctHasComp) {
-            $j->on('b.acct_code', '=', 'r.bank_id');
-            if ($bankAcctHasComp) {
-                $j->where('b.company_id', '=', $cid);
+        $pdf = new class($co, $from, $to) extends \TCPDF {
+            public function __construct(
+                public array $co,
+                public string $from,
+                public string $to
+            ) {
+                parent::__construct('P', 'mm', 'LETTER', true, 'UTF-8', false);
             }
-        })
-        // ✅ Details join (cast transaction_id)
-        ->join('cash_disbursement_details as d', function ($j) {
-            $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-        })
-        // ✅ Line account join (company-scoped if possible)
-        ->leftJoin('account_code as a', function ($j) use ($cid, $acctHasCompany) {
-            $j->on('a.acct_code', '=', 'd.acct_code');
-            if ($acctHasCompany) {
-                $j->where('a.company_id', '=', $cid);
+
+            public function Header()
+            {
+                $name  = (string)($this->co['name']  ?? '');
+                $tin   = (string)($this->co['tin']   ?? '');
+                $addr1 = (string)($this->co['addr1'] ?? '');
+                $addr2 = (string)($this->co['addr2'] ?? '');
+
+                // Top-right company block
+                $this->SetY(8);
+                $this->SetFont('helvetica', 'B', 11);
+                $this->Cell(0, 5, $name, 0, 1, 'R');
+
+                $this->SetFont('helvetica', '', 8);
+                $this->Cell(0, 4, $tin, 0, 1, 'R');
+                $this->Cell(0, 4, $addr1, 0, 1, 'R');
+                $this->Cell(0, 4, $addr2, 0, 1, 'R');
+
+                // Divider
+                $y = $this->GetY() + 3;
+                $this->Line(10, $y, 206, $y);
+
+                // Title
+                $this->SetY($y + 6);
+                $this->SetFont('helvetica', 'B', 16);
+                $this->Cell(0, 7, 'CASH DISBURSEMENTS JOURNAL', 0, 1, 'L');
+
+                // Period (mm/dd/yyyy)
+// Period + Debit/Credit on the SAME baseline
+$this->SetFont('helvetica', 'B', 10);
+
+// Remember Y position
+$yPeriod = $this->GetY();
+
+// Left: period text
+$this->SetXY(10, $yPeriod);
+$this->Cell(0, 6, "For the period covering {$this->from} — {$this->to}", 0, 0, 'L');
+
+// Right: Debit / Credit aligned with amount columns
+$this->SetXY(150, $yPeriod);
+$this->Cell(28, 6, 'Debit', 0, 0, 'R');
+$this->Cell(28, 6, 'Credit', 0, 1, 'R');
+
+// Space before body
+$this->Ln(2);
+$this->SetFont('helvetica', '', 8);
+
             }
-        })
-        // ✅ Vendor join (company-scoped if possible)
-        ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
-            $j->on('v.vend_code', '=', 'r.vend_id');
-            if ($vendHasCompany) {
-                $j->where('v.company_id', '=', $cid);
+
+            public function Footer()
+            {
+                $this->SetY(-15);
+                $this->SetFont('helvetica', 'I', 8);
+
+                $currentDate = date('M d, Y');
+                $currentTime = date('h:i:sa');
+                $pageText = $this->getAliasNumPage() . '/' . $this->getAliasNbPages();
+
+                $htmlFooter = ''
+                    . '<table border="0" width="100%" cellpadding="0" cellspacing="0">'
+                    . '  <tr>'
+                    . '    <td width="40%" align="left">'
+                    . '      <font size="8">Print Date: ' . $currentDate . '<br/>Print Time: ' . $currentTime . '</font>'
+                    . '    </td>'
+                    . '    <td width="20%" align="center">'
+                    . '      <font size="8">' . $pageText . '</font>'
+                    . '    </td>'
+                    . '    <td width="40%" align="right"></td>'
+                    . '  </tr>'
+                    . '</table>';
+
+                $this->writeHTML($htmlFooter, true, false, false, false, '');
             }
-        })
-        // ✅ REQUIRED tenant scope
-        ->where('r.company_id', $cid)
-        ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
-        ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name')
-        ->orderBy('r.id')
-        ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
-            foreach ($chunk as $row) {
-                $cdbId = 'APMC-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+        };
 
-                $block = <<<HTML
-                  <table width="100%" cellspacing="0" cellpadding="1">
-                    <tr><td>{$row->disburse_date}</td><td colspan="6">{$cdbId}</td></tr>
-                    <tr><td><b>CV# {$row->cd_no}</b></td><td colspan="6">Check#: {$row->check_ref_no}&nbsp;&nbsp;&nbsp;{$row->bank_name}</td></tr>
-                    <tr><td colspan="7">{$row->vend_name}&nbsp;&nbsp;&nbsp;{$row->explanation}</td></tr>
-                  </table>
-                HTML;
-                $pdf->writeHTML($block, true, false, false, false, '');
+        // ✅ Repeat header on every page
+        $pdf->setPrintHeader(true);
 
-                $itemDebit=0; $itemCredit=0;
-                $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+        // ✅ Big enough top margin so body never overlaps header
+        $pdf->SetHeaderMargin(5);
+        $pdf->SetMargins(10, 52, 10);
 
-                foreach (json_decode($row->lines, true) as $ln) {
-                    $itemDebit  += (float)($ln['debit'] ?? 0);
-                    $itemCredit += (float)($ln['credit'] ?? 0);
+        // ✅ Let TCPDF paginate naturally (removes big white spaces from manual AddPage logic)
+        $pdf->SetAutoPageBreak(true, 16);
 
+        $pdf->setImageScale(1.25);
+        $pdf->SetFont('helvetica', '', 8);
+        $pdf->AddPage('P', 'LETTER');
+
+        $done = 0;
+
+        DB::table('cash_disbursement as r')
+            ->selectRaw("
+                r.id,
+                to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
+                r.cd_no,
+                r.check_ref_no,
+                r.explanation,
+                COALESCE(b.acct_desc, r.bank_id) as bank_name,
+                COALESCE(v.vend_name, r.vend_id) as vend_name,
+                json_agg(json_build_object(
+                    'acct_code', d.acct_code,
+                    'acct_desc', COALESCE(a.acct_desc,''),
+                    'debit', d.debit,
+                    'credit', d.credit
+                ) ORDER BY d.id) as lines
+            ")
+            ->leftJoin('account_code as b', function ($j) use ($cid, $acctHasCompany) {
+                $j->on('b.acct_code', '=', 'r.bank_id');
+                if ($acctHasCompany) $j->where('b.company_id', '=', $cid);
+            })
+            ->join('cash_disbursement_details as d', function ($j) {
+                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+            })
+            ->leftJoin('account_code as a', function ($j) use ($cid, $acctHasCompany) {
+                $j->on('a.acct_code', '=', 'd.acct_code');
+                if ($acctHasCompany) $j->where('a.company_id', '=', $cid);
+            })
+            ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
+                $j->on('v.vend_code', '=', 'r.vend_id');
+                if ($vendHasCompany) $j->where('v.company_id', '=', $cid);
+            })
+            ->where('r.company_id', $cid)
+            ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
+            ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name','r.vend_id','r.bank_id')
+            ->orderBy('r.id')
+            ->chunk(200, function($chunk) use (&$done, $progress, $pdf) {
+                foreach ($chunk as $row) {
+                    $done++;
+                    $progress($done);
+
+                    $cdbId = 'APMC-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+
+                    $disbDate   = htmlspecialchars((string)$row->disburse_date, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                    $bankName   = htmlspecialchars((string)$row->bank_name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                    $vendName   = htmlspecialchars((string)$row->vend_name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                    $explain    = htmlspecialchars((string)$row->explanation, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                    $cdNo       = htmlspecialchars((string)$row->cd_no, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                    $checkRef   = htmlspecialchars((string)$row->check_ref_no, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                    $cdbIdSafe  = htmlspecialchars((string)$cdbId, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+                    // Voucher header block (nobr so it doesn't split awkwardly)
+                    $block = <<<HTML
+<table width="100%" cellspacing="0" cellpadding="1" nobr="true">
+  <tr>
+    <td width="18%">{$disbDate}</td>
+    <td width="82%" colspan="6">{$cdbIdSafe}</td>
+  </tr>
+  <tr>
+    <td width="18%"><b>CV# {$cdNo}</b></td>
+    <td width="82%" colspan="6">Check#: {$checkRef}&nbsp;&nbsp;&nbsp;&nbsp;{$bankName}</td>
+  </tr>
+  <tr>
+    <td width="100%" colspan="7">{$vendName}&nbsp;&nbsp;&nbsp;&nbsp;{$explain}</td>
+  </tr>
+</table>
+HTML;
+
+                    $pdf->writeHTML($block, true, false, false, false, '');
+
+                    $itemDebit = 0.0;
+                    $itemCredit = 0.0;
+
+                    $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+
+                    foreach ((json_decode($row->lines, true) ?: []) as $ln) {
+                        $acctCode = htmlspecialchars((string)($ln['acct_code'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                        $acctDesc = htmlspecialchars((string)($ln['acct_desc'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                        $debit    = (float)($ln['debit'] ?? 0);
+                        $credit   = (float)($ln['credit'] ?? 0);
+
+                        $itemDebit  += $debit;
+                        $itemCredit += $credit;
+
+                        $rowsHtml .= sprintf(
+                            '<tr>
+                               <td width="18%%">&nbsp;&nbsp;&nbsp;%s</td>
+                               <td width="52%%" colspan="4">%s</td>
+                               <td width="15%%" align="right">%s</td>
+                               <td width="15%%" align="right">%s</td>
+                             </tr>',
+                            $acctCode,
+                            $acctDesc,
+                            number_format($debit, 2),
+                            number_format($credit, 2)
+                        );
+                    }
+
+                    // Totals + divider (keeps it tight, no forced page breaks)
                     $rowsHtml .= sprintf(
                         '<tr>
-                           <td>&nbsp;&nbsp;&nbsp;%s</td>
-                           <td colspan="4">%s</td>
-                           <td align="right">%s</td>
-                           <td align="right">%s</td>
-                         </tr>',
-                        e($ln['acct_code'] ?? ''),
-                        e($ln['acct_desc'] ?? ''),
-                        number_format((float)($ln['debit'] ?? 0), 2),
-                        number_format((float)($ln['credit'] ?? 0), 2)
+                           <td></td><td colspan="4"></td>
+                           <td align="right"><b>%s</b></td>
+                           <td align="right"><b>%s</b></td>
+                         </tr>
+                         <tr><td colspan="7"><hr/></td></tr>
+                         <tr><td colspan="7" style="line-height:6px;">&nbsp;</td></tr>',
+                        number_format($itemDebit, 2),
+                        number_format($itemCredit, 2)
                     );
 
-                    $lineCount++;
-                    if ($lineCount >= 25) {
-                        $rowsHtml .= '</table>';
-                        $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-                        $pdf->AddPage();
-                        $lineCount = 0;
-                        $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+                    $rowsHtml .= '</table>';
+
+                    $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+                }
+            });
+
+        Storage::disk('local')->put($file, $pdf->Output('cash-disbursements.pdf', 'S'));
+    }
+
+    private function buildExcel(string $file, callable $progress): void
+    {
+        $cid = (int) ($this->companyId ?? 0);
+
+        $acctHasCompany = Schema::hasColumn('account_code', 'company_id');
+        $vendHasCompany = Schema::hasColumn('vendor_list', 'company_id');
+
+        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $ws = $wb->getActiveSheet();
+        $ws->setTitle('Cash Disbursements Journal');
+
+        $co = $this->companyHeader();
+
+        // ✅ Period format mm/dd/yyyy
+        $from = Carbon::parse($this->startDate)->format('m/d/Y');
+        $to   = Carbon::parse($this->endDate)->format('m/d/Y');
+
+        $r = 1;
+        $ws->setCellValue("A{$r}", 'CASH DISBURSEMENTS JOURNAL'); $r++;
+        $ws->setCellValue("A{$r}", $co['name']);  $r++;
+        $ws->setCellValue("A{$r}", $co['tin']);   $r++;
+        $ws->setCellValue("A{$r}", $co['addr1']); $r++;
+        $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
+
+        $ws->setCellValue("A{$r}", "For the period covering: {$from} — {$to}"); $r += 2;
+        $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
+
+        foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(18);
+
+        $done = 0;
+
+        DB::table('cash_disbursement as r')
+            ->selectRaw("
+                r.id,
+                to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
+                r.cd_no,
+                r.check_ref_no,
+                r.explanation,
+                COALESCE(b.acct_desc, r.bank_id) as bank_name,
+                COALESCE(v.vend_name, r.vend_id) as vend_name,
+                json_agg(json_build_object(
+                    'acct_code', d.acct_code,
+                    'acct_desc', COALESCE(a.acct_desc,''),
+                    'debit', d.debit,
+                    'credit', d.credit
+                ) ORDER BY d.id) as lines
+            ")
+            ->leftJoin('account_code as b', function ($j) use ($cid, $acctHasCompany) {
+                $j->on('b.acct_code', '=', 'r.bank_id');
+                if ($acctHasCompany) $j->where('b.company_id', '=', $cid);
+            })
+            ->join('cash_disbursement_details as d', function ($j) {
+                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+            })
+            ->leftJoin('account_code as a', function ($j) use ($cid, $acctHasCompany) {
+                $j->on('a.acct_code', '=', 'd.acct_code');
+                if ($acctHasCompany) $j->where('a.company_id', '=', $cid);
+            })
+            ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
+                $j->on('v.vend_code', '=', 'r.vend_id');
+                if ($vendHasCompany) $j->where('v.company_id', '=', $cid);
+            })
+            ->where('r.company_id', $cid)
+            ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
+            ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name','r.vend_id','r.bank_id')
+            ->orderBy('r.id')
+            ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
+                foreach ($chunk as $row) {
+                    $done++;
+                    $progress($done);
+
+                    $cdbId = 'APMC-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+
+                    $ws->setCellValue("A{$r}", $row->disburse_date);
+                    $ws->setCellValue("B{$r}", $cdbId); $r++;
+
+                    $ws->setCellValue("A{$r}", "CV# {$row->cd_no}");
+                    $ws->setCellValue("B{$r}", "Check#: {$row->check_ref_no} — {$row->bank_name}"); $r++;
+
+                    $ws->setCellValue("A{$r}", $row->vend_name);
+                    $ws->setCellValue("B{$r}", $row->explanation); $r++;
+
+                    $itemDebit = 0.0;
+                    $itemCredit = 0.0;
+
+                    foreach (json_decode($row->lines, true) ?: [] as $ln) {
+                        $debit  = (float)($ln['debit'] ?? 0);
+                        $credit = (float)($ln['credit'] ?? 0);
+
+                        $itemDebit  += $debit;
+                        $itemCredit += $credit;
+
+                        $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
+                        $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
+                        $ws->setCellValue("F{$r}", $debit);
+                        $ws->setCellValue("G{$r}", $credit);
+                        $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                        $r++;
                     }
-                }
 
-                $rowsHtml .= sprintf(
-                    '<tr><td></td><td colspan="4"></td>
-                       <td align="right"><b>%s</b></td>
-                       <td align="right"><b>%s</b></td>
-                     </tr>
-                     <tr><td colspan="7"><hr/></td></tr>
-                     <tr><td colspan="7"><br/></td></tr>',
-                    number_format($itemDebit,2),
-                    number_format($itemCredit,2)
-                );
-                $rowsHtml .= '</table>';
-                $pdf->writeHTML($rowsHtml, true, false, false, false, '');
-
-                $done++; $progress($done);
-            }
-        });
-
-    Storage::disk('local')->put($file, $pdf->Output('cash-disbursements.pdf', 'S'));
-}
-
-
-private function buildExcel(string $file, callable $progress): void
-{
-    $cid = (int) ($this->companyId ?? 0);
-
-    // detect optional company_id columns for safe joins
-    $acctHasCompany = Schema::hasColumn('account_code', 'company_id');
-    $vendHasCompany = Schema::hasColumn('vendor_list', 'company_id');
-
-    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-    $ws = $wb->getActiveSheet();
-    $ws->setTitle('Cash Disbursement Book');
-
-    $co = $this->companyHeader();
-
-    $r = 1;
-    $ws->setCellValue("A{$r}", 'CASH DISBURSEMENT BOOK'); $r++;
-    $ws->setCellValue("A{$r}", $co['name']);  $r++;
-    $ws->setCellValue("A{$r}", $co['tin']);   $r++;
-    $ws->setCellValue("A{$r}", $co['addr1']); $r++;
-    $ws->setCellValue("A{$r}", $co['addr2']); $r+=2;
-
-    $ws->setCellValue("A{$r}", 'CASH DISBURSEMENTS JOURNAL'); $r++;
-    $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r+=2;
-    $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
-    foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(15);
-
-    $done = 0;
-
-    DB::table('cash_disbursement as r')
-        ->selectRaw("
-            r.id,
-            to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
-            r.cd_no,
-            r.check_ref_no,
-            r.explanation,
-            COALESCE(b.acct_desc, r.bank_id) as bank_name,
-            v.vend_name as vend_name,
-            json_agg(json_build_object(
-                'acct_code', d.acct_code,
-                'acct_desc', COALESCE(a.acct_desc,''),
-                'debit', d.debit,
-                'credit', d.credit
-            ) ORDER BY d.id) as lines
-        ")
-        ->leftJoin('account_code as b', function ($j) use ($cid, $acctHasCompany) {
-            $j->on('b.acct_code', '=', 'r.bank_id');
-            if ($acctHasCompany) {
-                $j->where('b.company_id', '=', $cid);
-            }
-        })
-        ->join('cash_disbursement_details as d', function ($j) {
-            $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-        })
-        ->leftJoin('account_code as a', function ($j) use ($cid, $acctHasCompany) {
-            $j->on('a.acct_code', '=', 'd.acct_code');
-            if ($acctHasCompany) {
-                $j->where('a.company_id', '=', $cid);
-            }
-        })
-        ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
-            $j->on('v.vend_code', '=', 'r.vend_id');
-            if ($vendHasCompany) {
-                $j->where('v.company_id', '=', $cid);
-            }
-        })
-        ->where('r.company_id', $cid)
-        ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
-        ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name')
-        ->orderBy('r.id')
-        ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
-            foreach ($chunk as $row) {
-                $cdbId = 'APMC-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
-
-                $ws->setCellValue("A{$r}", $row->disburse_date);
-                $ws->setCellValue("B{$r}", $cdbId); $r++;
-
-                $ws->setCellValue("A{$r}", "CV# {$row->cd_no}");
-                $ws->setCellValue("B{$r}", "Check#: {$row->check_ref_no} --- {$row->bank_name}"); $r++;
-
-                $ws->setCellValue("A{$r}", $row->vend_name);
-                $ws->setCellValue("B{$r}", $row->explanation); $r++;
-
-                $itemDebit=0; $itemCredit=0;
-
-                foreach (json_decode($row->lines,true) as $ln) {
-                    $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
-                    $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                    $ws->setCellValue("F{$r}", (float)($ln['debit'] ?? 0));
-                    $ws->setCellValue("G{$r}", (float)($ln['credit'] ?? 0));
+                    $ws->setCellValue("E{$r}", 'TOTAL');
+                    $ws->setCellValue("F{$r}", $itemDebit);
+                    $ws->setCellValue("G{$r}", $itemCredit);
                     $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-
-                    $itemDebit  += (float)($ln['debit'] ?? 0);
-                    $itemCredit += (float)($ln['credit'] ?? 0);
-                    $r++;
+                    $r += 2;
                 }
+            });
 
-                $ws->setCellValue("E{$r}", 'TOTAL');
-                $ws->setCellValue("F{$r}", $itemDebit);
-                $ws->setCellValue("G{$r}", $itemCredit);
-                $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                $r += 2;
+        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+        $stream = fopen('php://temp', 'r+');
+        $writer->save($stream);
+        rewind($stream);
+        Storage::disk('local')->put($file, stream_get_contents($stream));
+        fclose($stream);
 
-                $done++; $progress($done);
-            }
-        });
-
-    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-    $stream = fopen('php://temp', 'r+');
-    $writer->save($stream);
-    rewind($stream);
-    Storage::disk('local')->put($file, stream_get_contents($stream));
-    fclose($stream);
-
-    $wb->disconnectWorksheets();
-    unset($writer);
-}
-
+        $wb->disconnectWorksheets();
+        unset($writer);
+    }
 }

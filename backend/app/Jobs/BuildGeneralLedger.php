@@ -52,20 +52,25 @@ if ($cid <= 0) {
 
 
 
-            $sdate = Carbon::parse($this->startDate)->startOfDay()->toDateString();
-            $edate = Carbon::parse($this->endDate)->endOfDay()->toDateString();
+// Use full timestamps so endOfDay is truly inclusive (prevents missing last-day movements)
+$sdate = Carbon::parse($this->startDate)->startOfDay()->toDateTimeString();
+$edate = Carbon::parse($this->endDate)->endOfDay()->toDateTimeString();
 
 // =================== BEGIN OVERWRITE: baseline dates ===================
 $openingAsOf = self::BASELINE_ASOF;              // 2024-12-31
-$fyStart     = Carbon::parse($openingAsOf)->addDay()->toDateString(); // 2025-01-01
+$fyStart     = Carbon::parse($openingAsOf)->addDay()->startOfDay()->toDateTimeString(); // 2025-01-01 00:00:00
 // =================== END OVERWRITE: baseline dates ===================
+// Normalize range (handles reversed inputs too)
+$rangeStart = min($this->startAccount, $this->endAccount);
+$rangeEnd   = max($this->startAccount, $this->endAccount);
+
 
             // 1) Accounts in range
             $accounts = DB::table('account_code as ac')
                 ->leftJoin('account_main as am', 'am.main_acct_code', '=', 'ac.main_acct_code')
 // =================== BEGIN OVERWRITE: accounts selectRaw (TB-consistent is_pnl) ===================
 ->selectRaw("
-    ac.acct_code,
+    trim(ac.acct_code) as acct_code,
     ac.acct_desc,
     ac.acct_number,
     ac.main_acct_code,
@@ -89,7 +94,7 @@ $fyStart     = Carbon::parse($openingAsOf)->addDay()->toDateString(); // 2025-01
 // =================== END OVERWRITE: accounts selectRaw (TB-consistent is_pnl) ===================
 
                 ->where('ac.active_flag', 1)
-                ->whereBetween('ac.acct_code', [$this->startAccount, $this->endAccount])
+->whereRaw("trim(ac.acct_code) between ? and ?", [$rangeStart, $rangeEnd])
 ->where('ac.company_id', $cid) // ✅ always scoped
                 ->orderBy('ac.acct_number')
                 ->get()
@@ -104,8 +109,8 @@ $fyStart     = Carbon::parse($openingAsOf)->addDay()->toDateString(); // 2025-01
 
             // 2) Beginning balances map (as of 2024-12-31)
 $openings = DB::table('beginning_balance as bb')
-    ->select('bb.account_code', 'bb.amount')
-    ->whereBetween('bb.account_code', [$this->startAccount, $this->endAccount])
+    ->selectRaw("trim(bb.account_code) as account_code, bb.amount")
+    ->whereRaw("trim(bb.account_code) between ? and ?", [$rangeStart, $rangeEnd])
 ->where('bb.company_id', $cid)
     ->get()
     ->keyBy('account_code')
@@ -145,23 +150,23 @@ if ($endYear >= self::FIRST_FLOW_YEAR) {
 }
 
 // --- Pre-movements (Balance Sheet) from FY start up to day before startDate ---
-$preEnd  = Carbon::parse($sdate)->subDay()->toDateString();
+$preEnd  = Carbon::parse($sdate)->subDay()->endOfDay()->toDateTimeString();
 $needPre = (strtotime($preEnd) >= strtotime($fyStart));
 
 $this->setStatus('running', 12, 'Calculating BS YTD pre-movements…');
 $preMovNet = collect();
 if ($needPre) {
-    $preMovNet = $this->sumMovements($fyStart, $preEnd); // net per acct (debit-credit)
+$preMovNet = $this->sumMovementsNetFromDC($fyStart, $preEnd);
 }
 
 // --- P&L pre-movements: Jan 1 of report year up to day before startDate ---
-$jan1OfYear = Carbon::parse($sdate)->startOfYear()->toDateString();
+$jan1OfYear = Carbon::parse($sdate)->startOfYear()->startOfDay()->toDateTimeString();
 $needPnlPre = (strtotime($preEnd) >= strtotime($jan1OfYear));
 
 $this->setStatus('running', 14, 'Calculating P&L YTD pre-movements…');
 $pnlPreMovNet = collect();
 if ($needPnlPre) {
-    $pnlPreMovNet = $this->sumMovements($jan1OfYear, $preEnd);
+$pnlPreMovNet = $this->sumMovementsNetFromDC($jan1OfYear, $preEnd);
 }
 
 // --- Baseline backout for P&L when report starts in baseline year (2024) and not January ---
@@ -174,7 +179,7 @@ $useBaselineBackout = Carbon::parse($sdate)->year === $baselineAsOfObj->year
 $baselineBackoutNet = collect();
 if ($useBaselineBackout) {
     $this->setStatus('running', 16, 'Calculating baseline backout (P&L)…');
-    $baselineBackoutNet = $this->sumMovements($sdate, $baselineAsOfObj->toDateString());
+$baselineBackoutNet = $this->sumMovementsNetFromDC($sdate, $baselineAsOfObj->endOfDay()->toDateTimeString());
 }
 
 // =================== END ADD: TB-consistent RE const + P&L/BS opening prep ===================
@@ -228,8 +233,11 @@ elseif (!empty($acct->is_pnl)) {
     }
 } else {
     // Balance Sheet: baseline + FY pre-movements (2025-01-01..start-1)
-    $opening = (float)($openings[$acctCode] ?? 0.0)
-             + (float)($preMovNet[$acctCode] ?? 0.0);
+$opening = (float)($openings[$acctCode] ?? 0.0);
+
+    if (!empty($preMovNet)) {
+        $opening += (float)($preMovNet[$acctCode] ?? 0.0);
+    }
 }
 // =================== END OVERWRITE: opening balance logic (match TB rules) ===================
 
@@ -358,102 +366,118 @@ foreach ($acctRows as $r) {
     /* --------------------------- data helpers --------------------------- */
 
 /**
- * Returns acct_code => net(debit-credit) for [from..to]
+ * Returns acct_code => ['debit' => x, 'credit' => y] for [from..to]
  * ✅ Includes ONLY header rows where is_cancel = 'n'
+ * ✅ ALWAYS company-scoped
  */
-/**
- * Returns acct_code => net(debit-credit) for [from..to]
- * ✅ Includes ONLY header rows where is_cancel = 'n'
- * ✅ ALWAYS company-scoped (no “companyId=0 means all”)
- */
-private function sumMovements(string $from, string $to)
+private function sumMovementsDC(string $from, string $to)
 {
     $companyId = (int) $this->companyId;
+    if ($companyId <= 0) return collect();
 
-    // hard safety (should already be guarded in handle(), but keep fail-safe)
-    if ($companyId <= 0) {
-        return collect();
-    }
+    $fromDate = \Carbon\Carbon::parse($from)->toDateString();
+    $toDate   = \Carbon\Carbon::parse($to)->toDateString();
+
+    $sa = min($this->startAccount, $this->endAccount);
+    $ea = max($this->startAccount, $this->endAccount);
 
     $sql = "
     with src as (
         -- General Accounting
-        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
+        select trim(d.acct_code) as acct_code, sum(d.debit) deb, sum(d.credit) cred
         from general_accounting ga
-        join general_accounting_details d
-          on (d.transaction_id)::bigint = ga.id
-        where ga.gen_acct_date between :s and :e
+        join general_accounting_details d on (d.transaction_id)::bigint = ga.id
+        where ga.gen_acct_date::date between :s and :e
           and ga.is_cancel = 'n'
           and ga.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by trim(d.acct_code)
 
         union all
 
         -- Cash Disbursement
-        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
+        select trim(d.acct_code) as acct_code, sum(d.debit) deb, sum(d.credit) cred
         from cash_disbursement h
         join cash_disbursement_details d on d.transaction_id = h.id
-        where h.disburse_date between :s and :e
+        where h.disburse_date::date between :s and :e
           and h.is_cancel = 'n'
           and h.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by trim(d.acct_code)
 
         union all
 
         -- Cash Receipts
-        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
+        select trim(d.acct_code) as acct_code, sum(d.debit) deb, sum(d.credit) cred
         from cash_receipts h
         join cash_receipt_details d on (d.transaction_id)::bigint = h.id
-        where h.receipt_date between :s and :e
+        where h.receipt_date::date between :s and :e
           and h.is_cancel = 'n'
           and h.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by trim(d.acct_code)
 
         union all
 
         -- Cash Purchase
-        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
+        select trim(d.acct_code) as acct_code, sum(d.debit) deb, sum(d.credit) cred
         from cash_purchase h
         join cash_purchase_details d on d.transaction_id = h.id
-        where h.purchase_date between :s and :e
+        where h.purchase_date::date between :s and :e
           and h.is_cancel = 'n'
           and h.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by trim(d.acct_code)
 
         union all
 
         -- Cash Sales
-        select d.acct_code, sum(d.debit) deb, sum(d.credit) cred
+        select trim(d.acct_code) as acct_code, sum(d.debit) deb, sum(d.credit) cred
         from cash_sales h
         join cash_sales_details d on (d.transaction_id)::bigint = h.id
-        where h.sales_date between :s and :e
+        where h.sales_date::date between :s and :e
           and h.is_cancel = 'n'
           and h.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by trim(d.acct_code)
     )
-    select acct_code, sum(deb) - sum(cred) as net
+    select acct_code, coalesce(sum(deb),0) as debit, coalesce(sum(cred),0) as credit
     from src
     group by acct_code
     ";
 
     $bindings = [
-        's'   => $from,
-        'e'   => $to,
-        'sa'  => $this->startAccount,
-        'ea'  => $this->endAccount,
-        'cid' => $companyId, // ✅ ALWAYS bind cid (no conditional)
+        's'   => $fromDate,
+        'e'   => $toDate,
+        'sa'  => $sa,
+        'ea'  => $ea,
+        'cid' => $companyId,
     ];
 
     $rows = DB::select($sql, $bindings);
 
-    return collect($rows)
-        ->keyBy('acct_code')
-        ->map(fn($r) => (float) $r->net);
+    return collect($rows)->keyBy('acct_code')->map(function ($r) {
+        return [
+            'debit'  => (float)($r->debit ?? 0.0),
+            'credit' => (float)($r->credit ?? 0.0),
+        ];
+    });
+}
+
+/**
+ * Net movements derived from DC movements:
+ * returns acct_code => (debit - credit)
+ * Uses the exact same source as the period DC calculation.
+ */
+private function sumMovementsNetFromDC(string $from, string $to)
+{
+    $dc = $this->sumMovementsDC($from, $to);
+
+    return $dc->map(function ($r) {
+        $d = (float)($r['debit'] ?? 0.0);
+        $c = (float)($r['credit'] ?? 0.0);
+        return $d - $c;
+    });
 }
 
 // =================== BEGIN ADD: RE helper methods (copied from TB) ===================
@@ -569,10 +593,17 @@ private function periodRows(string $from, string $to): array
 {
     $companyId = (int) $this->companyId;
 
-    // hard safety (should already be guarded in handle(), but keep fail-safe)
     if ($companyId <= 0) {
         return [];
     }
+
+    // Compare DATE-to-DATE (safe even if your columns are timestamp)
+    $fromDate = \Carbon\Carbon::parse($from)->toDateString();
+    $toDate   = \Carbon\Carbon::parse($to)->toDateString();
+
+    // Normalize account range
+    $sa = min($this->startAccount, $this->endAccount);
+    $ea = max($this->startAccount, $this->endAccount);
 
     $sql = "
     select * from (
@@ -584,17 +615,17 @@ private function periodRows(string $from, string $to): array
           ga.ga_no as reference_no,
           null::text as party,
           ga.explanation,
-          d.acct_code,
+          trim(d.acct_code) as acct_code,
           sum(d.debit)  as debit,
           sum(d.credit) as credit
         from general_accounting ga
         join general_accounting_details d
           on (d.transaction_id)::bigint = ga.id
-        where ga.gen_acct_date between :s and :e
+        where ga.gen_acct_date::date between :s and :e
           and ga.is_cancel = 'n'
           and ga.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by ga.id, ga.gen_acct_date, ga.ga_no, ga.explanation, d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by ga.id, ga.gen_acct_date, ga.ga_no, ga.explanation, trim(d.acct_code)
 
         union all
 
@@ -606,7 +637,7 @@ private function periodRows(string $from, string $to): array
           h.cd_no as reference_no,
           v.vend_name as party,
           h.explanation,
-          d.acct_code,
+          trim(d.acct_code) as acct_code,
           sum(d.debit)  as debit,
           sum(d.credit) as credit
         from cash_disbursement h
@@ -614,11 +645,11 @@ private function periodRows(string $from, string $to): array
         left join vendor_list v
           on v.vend_code = h.vend_id
          and v.company_id::text = h.company_id::text
-        where h.disburse_date between :s and :e
+        where h.disburse_date::date between :s and :e
           and h.is_cancel = 'n'
           and h.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by h.id, h.disburse_date, h.cd_no, v.vend_name, h.explanation, d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by h.id, h.disburse_date, h.cd_no, v.vend_name, h.explanation, trim(d.acct_code)
 
         union all
 
@@ -630,7 +661,7 @@ private function periodRows(string $from, string $to): array
           h.cr_no as reference_no,
           c.cust_name as party,
           h.details as explanation,
-          d.acct_code,
+          trim(d.acct_code) as acct_code,
           sum(d.debit)  as debit,
           sum(d.credit) as credit
         from cash_receipts h
@@ -638,11 +669,11 @@ private function periodRows(string $from, string $to): array
         left join customer_list c
           on c.cust_id = h.cust_id
          and c.company_id::text = h.company_id::text
-        where h.receipt_date between :s and :e
+        where h.receipt_date::date between :s and :e
           and h.is_cancel = 'n'
           and h.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by h.id, h.receipt_date, h.cr_no, c.cust_name, h.details, d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by h.id, h.receipt_date, h.cr_no, c.cust_name, h.details, trim(d.acct_code)
 
         union all
 
@@ -654,7 +685,7 @@ private function periodRows(string $from, string $to): array
           h.cp_no as reference_no,
           v.vend_name as party,
           h.explanation,
-          d.acct_code,
+          trim(d.acct_code) as acct_code,
           sum(d.debit)  as debit,
           sum(d.credit) as credit
         from cash_purchase h
@@ -662,11 +693,11 @@ private function periodRows(string $from, string $to): array
         left join vendor_list v
           on v.vend_code = h.vend_id
          and v.company_id::text = h.company_id::text
-        where h.purchase_date between :s and :e
+        where h.purchase_date::date between :s and :e
           and h.is_cancel = 'n'
           and h.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by h.id, h.purchase_date, h.cp_no, v.vend_name, h.explanation, d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by h.id, h.purchase_date, h.cp_no, v.vend_name, h.explanation, trim(d.acct_code)
 
         union all
 
@@ -678,7 +709,7 @@ private function periodRows(string $from, string $to): array
           h.cs_no as reference_no,
           c.cust_name as party,
           h.explanation,
-          d.acct_code,
+          trim(d.acct_code) as acct_code,
           sum(d.debit)  as debit,
           sum(d.credit) as credit
         from cash_sales h
@@ -686,25 +717,26 @@ private function periodRows(string $from, string $to): array
         left join customer_list c
           on c.cust_id = h.cust_id
          and c.company_id::text = h.company_id::text
-        where h.sales_date between :s and :e
+        where h.sales_date::date between :s and :e
           and h.is_cancel = 'n'
           and h.company_id = :cid
-          and d.acct_code between :sa and :ea
-        group by h.id, h.sales_date, h.cs_no, c.cust_name, h.explanation, d.acct_code
+          and trim(d.acct_code) between :sa and :ea
+        group by h.id, h.sales_date, h.cs_no, c.cust_name, h.explanation, trim(d.acct_code)
     ) as u
     order by u.acct_code, u.post_date, u.batch_no
     ";
 
     $bindings = [
-        's'   => $from,
-        'e'   => $to,
-        'sa'  => $this->startAccount,
-        'ea'  => $this->endAccount,
-        'cid' => $companyId, // ✅ ALWAYS bind cid (no conditional)
+        's'   => $fromDate,
+        'e'   => $toDate,
+        'sa'  => $sa,
+        'ea'  => $ea,
+        'cid' => $companyId,
     ];
 
     return DB::select($sql, $bindings);
 }
+
 
     /* --------------------------- writers --------------------------- */
 
@@ -1030,7 +1062,7 @@ private function writeXls(array $report, string $sdate, string $edate): array
 
         $companyHdr = [
             'name'  => 'SUCDEN PHILIPPINES, INC.',
-            'tin'   => 'TIN-000-105-2567-000',
+            'tin'   => 'TIN-000-105-267-000',
             'addr1' => 'Unit 2202 The Podium West Tower',
             'addr2' => 'Ortigas Center, Mandaluyong City',
         ];

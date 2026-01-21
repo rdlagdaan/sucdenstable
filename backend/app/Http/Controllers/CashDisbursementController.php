@@ -56,7 +56,7 @@ public function Header() {
         <table border="0"><tr>
           <td width="70%">
             <table border="1" cellpadding="5"><tr>
-              <td><font size="8">Prepared:<br><br><br><br><br>administrator</font></td>
+              <td><font size="8">Prepared:<br><br><br><br><br></font></td>
               <td><font size="8">Checked:<br><br><br><br><br></font></td>
               <td><font size="8">Noted by:<br><br><br><br><br></font></td>
               <td><font size="8">Posted by:<br><br><br><br><br></font></td>
@@ -189,10 +189,10 @@ $exists = AccountCode::where('acct_code', $payload['acct_code'])
 
         if (!$exists) return response()->json(['message'=>'Invalid or inactive account.'], 422);
 
-        $dup = CashDisbursementDetail::where('transaction_id',$payload['transaction_id'])
-            ->where('acct_code',$payload['acct_code'])
-            ->exists();
-        if ($dup) return response()->json(['message'=>'Duplicate account code for this transaction.'], 422);
+        //$dup = CashDisbursementDetail::where('transaction_id',$payload['transaction_id'])
+        //    ->where('acct_code',$payload['acct_code'])
+        //    ->exists();
+        //if ($dup) return response()->json(['message'=>'Duplicate account code for this transaction.'], 422);
 
 
         $detail = CashDisbursementDetail::create([
@@ -249,9 +249,9 @@ $exists = AccountCode::where('acct_code', $apply['acct_code'])
     ->exists();
 
             if (!$exists) return response()->json(['message'=>'Invalid or inactive account.'], 422);
-            $dup = CashDisbursementDetail::where('transaction_id',$payload['transaction_id'])
-                ->where('acct_code',$apply['acct_code'])->exists();
-            if ($dup) return response()->json(['message'=>'Duplicate account code for this transaction.'], 422);
+            //$dup = CashDisbursementDetail::where('transaction_id',$payload['transaction_id'])
+            //    ->where('acct_code',$apply['acct_code'])->exists();
+            //if ($dup) return response()->json(['message'=>'Duplicate account code for this transaction.'], 422);
         }
 
         $detail->update($apply);

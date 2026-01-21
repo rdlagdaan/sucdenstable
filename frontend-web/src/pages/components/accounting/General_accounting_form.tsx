@@ -719,6 +719,7 @@ const handleDeleteTxn = async () => {
         await napi.post('/ga/update-detail', {
           id: row.id,
           transaction_id: mainId,
+          company_id: user?.company_id,
           acct_code: code,
           debit: row.debit || 0,
           credit: row.credit || 0,
@@ -1013,7 +1014,7 @@ return (
       <ToastContainer position="top-right" autoClose={3000} />
 
       <div className="bg-yellow-50 shadow-md rounded-lg p-6 space-y-4 border border-yellow-400">
-        <h2 className="text-xl font-bold text-green-800 mb-2">GENERAL ACCOUNTING — JOURNAL ENTRY</h2>
+        <h2 className="text-xl font-bold text-green-800 mb-2">GENERAL ACCOUNTING : JOURNAL ENTRY</h2>
 
         {/* Header form */}
         <div className="grid grid-cols-3 gap-4">
@@ -1278,7 +1279,11 @@ return (
                     if (!row?.id) { src.splice(rowIndex,1); setTableData([...src]); return; }
                     const ok = await Swal.fire({ title:'Delete this line?', icon:'warning', showCancelButton:true });
                     if (!ok.isConfirmed) return;
-                    await napi.post('/ga/delete-detail',{ id: row.id, transaction_id: mainId });
+await napi.post('/ga/delete-detail', {
+  id: row.id,
+  transaction_id: mainId,
+  company_id: user?.company_id,   // ✅ REQUIRED by backend
+});
                     src.splice(rowIndex,1);
                     setTableData([...src]);
                     toast.success('Row deleted');
