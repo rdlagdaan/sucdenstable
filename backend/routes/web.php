@@ -718,6 +718,8 @@ Route::get('/api/purchase-journal/check-pdf/{id}', [PurchaseJournalController::c
 
     // Print/download
     Route::get('/api/cash-disbursement/form-pdf/{id}', [\App\Http\Controllers\CashDisbursementController::class, 'formPdf']);
+    Route::get('/api/cash-disbursement/check-pdf/{id}', [\App\Http\Controllers\CashDisbursementController::class, 'checkPdf']);
+
     Route::get('/api/cash-disbursement/form-excel/{id}', [\App\Http\Controllers\CashDisbursementController::class, 'formExcel']);
 
     // Unbalanced helpers

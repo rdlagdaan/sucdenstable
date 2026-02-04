@@ -97,6 +97,8 @@ type DetailRow = {
 };
 
 type ReceiptListRow = {
+  exported_at?: string | null;
+  exported_by?: number | string | null;
   id: number | string;
   cr_no: string;
   cust_id: string;
@@ -106,7 +108,9 @@ type ReceiptListRow = {
   bank_id?: string;
   collection_receipt?: string;
   is_cancel?: 'y' | 'n';
+  
 };
+
 
 /* ---------------- component ---------------- */
 
@@ -127,7 +131,9 @@ export default function CashReceiptsForm() {
   const [collectionReceipt, setCollectionReceipt] = useState('');
   const [_locked, setLocked] = useState(false);       // header lock
   const [gridLocked, setGridLocked] = useState(true); // grid lock (separate)
-const [isCancelled, setIsCancelled] = useState(false); // true if is_cancel === 'c'
+const [isExported, setIsExported] = useState(false);
+
+  const [isCancelled, setIsCancelled] = useState(false); // true if is_cancel === 'c'
 const [isDeleted, setIsDeleted] = useState(false);     // true if is_cancel === 'd'
 
   // totals (for Balanced pill + Total Debit/Credit display)
@@ -167,7 +173,15 @@ const [_keyapprovalExpiresAt, setApprovalExpiresAt] = useState<string | null>(nu
  
  const canExport = isSaved && !isCancelled && !isDeleted;
 
-  
+  // ✅ Same spreadsheet rule as Cash Disbursement:
+// - Before export: editable once selected/saved
+// - After export: locked unless edit approval is active
+const canEditNow =
+  isSaved &&
+  !isCancelled &&
+  !isDeleted &&
+  (!isExported || approvedActive);
+
 
   const txDropdownItems = useMemo<DropdownItem[]>(() =>
     (txOptions || []).map(o => ({
@@ -262,9 +276,9 @@ if (isActive) {
   hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
 } else {
   // ✅ If not active, force view mode (prevents “history hides Request to Edit”)
-  setLocked(true);
-  setGridLocked(true);
-  hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+  //setLocked(true);
+  //setGridLocked(true);
+  //hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
 }
 
 
@@ -412,6 +426,9 @@ const ensureAccountInSource = useCallback((code: string, desc?: string) => {
         params: { company_id: companyId },
       });
       const m = data.main ?? data;
+
+ const exported = !!m.exported_at;
+setIsExported(exported);     
       setMainId(m.id);
       setCrNo(m.cr_no || '');
       setCustId(String(m.cust_id || ''));
@@ -491,6 +508,20 @@ setReceiptAmount(sumC);
 
 
       setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
+      
+// 🔒 Same rule as Cash Disbursement:
+// - before export: editable
+// - after export: locked unless approval is active
+if (exported && !approvedActive) {
+setGridLocked(true);
+hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+} else if (!isCancelled && !isDeleted) {
+// editable only if not cancelled/deleted
+setGridLocked(false);
+hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
+}      
+      
+      
       setLocked(true);
       //setGridLocked(!!((m.is_cancel || m.is_cancelled) === 'y'));
       toast.success('Receipt loaded.');
@@ -499,13 +530,16 @@ setReceiptAmount(sumC);
     }
   }, [companyId, customers, findDesc, ensureAccountInSource]);
 
-  const handleSelectTransaction = async (selId: string) => {
-    if (!selId) return;
-    setSearchId(selId);
-    await loadReceipt(selId);
-    setGridLocked(true);
-    hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
-  };
+const handleSelectTransaction = async (selId: string) => {
+  if (!selId) return;
+  setSearchId(selId);
+
+  await loadReceipt(selId);
+
+  // ✅ DO NOT force-lock here.
+  // loadReceipt() + canEditNow will determine readOnly correctly.
+};
+
 
   /* --------- main actions --------- */
   const handleSaveMain = async () => {
@@ -933,8 +967,11 @@ const handleOpenPdf = () => {
   const url = `/api/cash-receipt/form-pdf/${mainId}?company_id=${encodeURIComponent(companyId||'')}`;
   setPdfUrl(url);
   setShowPdf(true);
-};
 
+  // reload shortly after to reflect exported_at lock
+  setTimeout(() => { if (mainId) loadReceipt(mainId); }, 800);
+};
+//setTimeout(() => { if (mainId) loadReceipt(mainId); }, 800);
   const handleDownloadExcel = async () => {
     if (!mainId) return toast.info('Save or select a receipt first.');
     const res = await napi.get(`/cash-receipt/form-excel/${mainId}`, {
@@ -946,6 +983,9 @@ const handleOpenPdf = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  setTimeout(() => { if (mainId) loadReceipt(mainId); }, 800);
+
+  
   };
 
 // add this helper ABOVE your return (anywhere in the component scope)
@@ -954,10 +994,11 @@ const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
   const cellProps: Partial<Handsontable.CellProperties> = {};
 
   // If grid is locked (view mode), everything is read-only
-  if (gridLocked) {
-    cellProps.readOnly = true;
-    return cellProps as Handsontable.CellProperties;
-  }
+if (!canEditNow) {
+  cellProps.readOnly = true;
+  return cellProps as Handsontable.CellProperties;
+}
+
 
   const src =
     (hotRef.current?.hotInstance?.getSourceData() as DetailRow[]) ?? tableData;
@@ -1011,6 +1052,8 @@ const canSaveMainNoApproval =
         columnWidths={['60px','90px','250px','110px','110px','110px']}
         dropdownPositionStyle={{ width: '750px' }}
         inputClassName="p-2 text-sm bg-white"
+        searchInputClassName="bg-yellow-100 border-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+
       />
     </div>
 
@@ -1031,6 +1074,8 @@ const canSaveMainNoApproval =
         columnWidths={['140px','520px']}
         dropdownPositionStyle={{ width: '700px' }}
         inputClassName="p-2 text-sm bg-white"
+        searchInputClassName="bg-yellow-100 border-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+
       />
     </div>
 
@@ -1059,6 +1104,8 @@ const canSaveMainNoApproval =
         columnWidths={['100px','350px']}
         dropdownPositionStyle={{ width: '500px' }}
         inputClassName="p-2 text-sm bg-white"
+        searchInputClassName="bg-yellow-100 border-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+
       />
     </div>
 
@@ -1074,6 +1121,9 @@ const canSaveMainNoApproval =
         columnWidths={['80px','200px']}
         dropdownPositionStyle={{ width: '280px' }}
         inputClassName="p-2 text-sm bg-white"
+        searchInputClassName="bg-yellow-100 border-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+
+
       />
     </div>
 
@@ -1160,7 +1210,9 @@ const canSaveMainNoApproval =
   </div>
 )}
 
+{isExported && !approvedActive && !isCancelled && !isDeleted && (
 
+<div className="text-sm mt-2 text-red-700 font-semibold"> This receipt has been printed/downloaded and is locked. Request edit approval to modify details. </div> )}
 
             {/* optional tiny approval status text */}
 {approvalStatus !== 'none' && (
@@ -1270,10 +1322,12 @@ const canSaveMainNoApproval =
 
         {isSaved && (
           <HotTable
+
+
             className="hot-enhanced hot-zebra"
             ref={hotRef}
             data={tableData}
-            readOnly={gridLocked}
+            readOnly={!canEditNow}
             colHeaders={['Account Code','Account Description','Debit','Credit']}
             columns={[
               {
@@ -1288,15 +1342,16 @@ const canSaveMainNoApproval =
                 strict: true,
                 allowInvalid: false,
                 visibleRows: 12,
-                readOnly: gridLocked,
+                readOnly: !canEditNow,
                 renderer: (inst, td, row, col, prop, value, cellProps) => {
                   const display = onlyCode(String(value ?? ''));
                   Handsontable.renderers.TextRenderer(inst, td, row, col, prop, display, cellProps);
                 },
               },
               { data: 'acct_desc', readOnly: true },
-              { data: 'debit',  type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked },
-              { data: 'credit', type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked },
+{ data: 'debit',  type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: !canEditNow },
+{ data: 'credit', type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: !canEditNow },
+
             ]}
 
             /* 🔒 Per-row lock: if workstation_id === 'BANK', the entire row is read-only

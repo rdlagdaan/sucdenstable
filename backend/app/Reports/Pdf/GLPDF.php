@@ -23,7 +23,7 @@ class GLPDF extends TCPDF
         // Default (company_id != 2)
         $this->companyHeader = [
             'name'  => 'SUCDEN PHILIPPINES, INC.',
-            'tin'   => 'TIN-000-105-2567-000',
+            'tin'   => 'TIN-000-105-267-000',
             'addr1' => 'Unit 2202 The Podium West Tower',
             'addr2' => 'Ortigas Center, Mandaluyong City',
         ];

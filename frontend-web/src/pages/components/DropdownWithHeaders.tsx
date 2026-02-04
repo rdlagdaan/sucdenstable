@@ -23,6 +23,7 @@ interface Props {
   customKey?: string;
   inputClassName?: string;
   columnKeys?: string[]; // NEW: explicit keys for each column
+  searchInputClassName?: string; // NEW: optional class for the dropdown search input
 
 }
 
@@ -70,6 +71,8 @@ export default function DropdownWithHeaders({
   headers = ['Code', 'Label', 'Description'],
   columnKeys,
   dropdownPositionStyle,
+  searchInputClassName,
+
   columnWidths: inputColumnWidths,
   customKey = '',
   inputClassName,
@@ -102,20 +105,46 @@ export default function DropdownWithHeaders({
   const isPbnDropdown = headers.includes('PBN #');
 
   // 🔎 NEW: local filtering of items using the `search` prop
+  // 🔎 local filtering of items using the `search` prop
+  // - supports amount search even if value is formatted with commas (e.g. "20,000.00")
+  // - also supports typing numbers only (e.g. "20000") to match "20,000.00"
   const displayedItems = useMemo(() => {
-    const term = (search || '').trim().toLowerCase();
-    if (!term) return items;
+    const termRaw = (search || '').trim().toLowerCase();
+    if (!termRaw) return items;
 
-    // match if ANY string/number field contains the term
-    return items.filter((it) =>
-      Object.values(it).some((val) => {
-        if (typeof val === 'string' || typeof val === 'number') {
-          return String(val).toLowerCase().includes(term);
-        }
+    const termDigits = termRaw.replace(/[^0-9.\-]/g, ''); // keep numeric characters only
+
+    const valueMatches = (val: any) => {
+      if (val == null) return false;
+
+      // numbers
+      if (typeof val === 'number') {
+        const s = String(val).toLowerCase();
+        if (s.includes(termRaw)) return true;
+        if (termDigits && s.replace(/[^0-9.\-]/g, '').includes(termDigits)) return true;
         return false;
-      })
-    );
+      }
+
+      // strings
+      if (typeof val === 'string') {
+        const s = val.toLowerCase();
+        if (s.includes(termRaw)) return true;
+
+        // numeric-friendly compare (remove commas, currency, spaces, etc.)
+        const sDigits = s.replace(/[^0-9.\-]/g, '');
+        if (termDigits && sDigits.includes(termDigits)) return true;
+
+        return false;
+      }
+
+      return false;
+    };
+
+    // match if ANY string/number field contains the term (or numeric-normalized match)
+    return items.filter((it) => Object.values(it).some(valueMatches));
   }, [items, search]);
+
+
 
   // Use displayed items (if any) to compute widths so the header stays tight
   const widthBase = displayedItems.length ? displayedItems : items;
@@ -190,7 +219,7 @@ export default function DropdownWithHeaders({
                           onKeyDown={(e) => {
                             if (e.key === ' ' || e.key === 'Tab') e.stopPropagation();
                           }}
-                          className="w-full border px-2 py-2 rounded"
+                          className={`w-full border px-2 py-2 rounded ${searchInputClassName || ''}`}
                         />
                       </div>
                     )}

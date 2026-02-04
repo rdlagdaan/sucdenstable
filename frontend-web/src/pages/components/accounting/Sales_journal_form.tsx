@@ -79,6 +79,8 @@ export default function SalesJournalForm() {
 
   // cancelled state (like GA)
   const [isCancelled, setIsCancelled] = useState(false);
+  // exported state (lock after print/download)
+  const [isExported, setIsExported] = useState(false);
 
   // grid lock (separate from header lock)
   const [gridLocked, setGridLocked] = useState(true);
@@ -396,6 +398,7 @@ export default function SalesJournalForm() {
     setGridLocked(false);
     setHotEnabled(false);
     setIsCancelled(false);
+    setIsExported(false);
     setTableData([emptyRow()]);
 
     // reset approval states
@@ -866,7 +869,7 @@ const handleSaveMainNoApproval = async () => {
 
   // autosave detail
   const handleAutoSave = async (row: SalesDetailRow, rowIndex: number) => {
-    if (!mainId || isCancelled) return;
+    if (!mainId || isCancelled || isExported) return;
     if (!isRowValid(row)) return;
 
     const code = onlyCode(row.acct_code);
@@ -926,6 +929,8 @@ const handleSaveMainNoApproval = async () => {
       setExplanation(m.explanation ?? '');
       setSiNo(m.si_no ?? '');
       setIsCancelled(m.is_cancel === 'c' || m.is_cancel === 'y');
+      // exported lock
+      setIsExported(!!m.exported_at);
 
       const details = (data.details || []).map((d: any) => ({
         id: d.id,
@@ -942,9 +947,18 @@ const handleSaveMainNoApproval = async () => {
       );
       setHotEnabled(true);
       setLocked(true);
-      setGridLocked(true);
+      // ✅ your rule: editable immediately on select unless CANCELLED or EXPORTED
+setGridLocked((m.is_cancel === 'c' || m.is_cancel === 'y') || !!m.exported_at);
 
-      await refreshApprovalStatus(m.id);
+
+      //await refreshApprovalStatus(m.id);
+
+      // if exported, force lock regardless of approval status
+      //if (!!m.exported_at) {
+      //  setLocked(true);
+      //  setGridLocked(true);
+      //}
+
       await Promise.all([
         refreshApprovalForAction(m.id, 'cancel', setCancelApproval),
         refreshApprovalForAction(m.id, 'uncancel', setUncancelApproval),
@@ -1046,6 +1060,7 @@ const handleSaveMainNoApproval = async () => {
     setLocked(false);
     setGridLocked(false);
     setIsCancelled(false);
+    setIsExported(false);   
     setTableData([emptyRow(), emptyRow(), emptyRow(), emptyRow()]);
     setHotEnabled(false);
 
@@ -1107,10 +1122,16 @@ const handleSaveMainNoApproval = async () => {
 
     const url = `/api/sales/form-pdf/${mainId}?company_id=${encodeURIComponent(
       user?.company_id || '',
-    )}&t=${Date.now()}`;
+    )}&user_id=${encodeURIComponent(user?.id || '')}&t=${Date.now()}`;
 
     setPdfUrl(url);
     setShowPdf(true);
+    // ✅ immediately reflect exported lock in UI (backend marks exported on PDF)
+    setIsExported(true);
+    setLocked(true);
+    setGridLocked(true);
+
+
   };
 
   const handleDownloadExcel = async () => {
@@ -1119,7 +1140,7 @@ const handleSaveMainNoApproval = async () => {
 
     const res = await napi.get(`/sales/form-excel/${mainId}`, {
       responseType: 'blob',
-      params: { company_id: user?.company_id || '' },
+      params: { company_id: user?.company_id || '', user_id: user?.id || '' },
     });
     const name =
       res.headers['content-disposition']?.match(
@@ -1138,6 +1159,12 @@ const handleSaveMainNoApproval = async () => {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    // ✅ immediately reflect exported lock in UI (backend marks exported on Excel)
+    setIsExported(true);
+    setLocked(true);
+    setGridLocked(true);
+
+
   };
 
   return (
@@ -1257,6 +1284,14 @@ const handleSaveMainNoApproval = async () => {
                 CANCELLED
               </div>
             )}
+
+            {isExported && (
+              <div className="px-2 py-0.5 rounded bg-slate-700 text-white">
+                EXPORTED
+              </div>
+            )}
+
+
           </div>
         </div>
 
@@ -1414,7 +1449,7 @@ const handleSaveMainNoApproval = async () => {
                 strict: true,
                 allowInvalid: false,
                 visibleRows: 12,
-                readOnly: gridLocked || isCancelled,
+                readOnly: gridLocked || isCancelled || isExported,
                 renderer: (
                   inst,
                   td,
@@ -1441,13 +1476,13 @@ const handleSaveMainNoApproval = async () => {
                 data: 'debit',
                 type: 'numeric',
                 numericFormat: { pattern: '0,0.00' },
-                readOnly: gridLocked || isCancelled,
+                readOnly: gridLocked || isCancelled || isExported,
               },
               {
                 data: 'credit',
                 type: 'numeric',
                 numericFormat: { pattern: '0,0.00' },
-                readOnly: gridLocked || isCancelled,
+                readOnly: gridLocked || isCancelled || isExported,
               },
             ]}
             afterBeginEditing={afterBeginEditingOpenAll}
@@ -1529,7 +1564,7 @@ const handleSaveMainNoApproval = async () => {
                 remove_row: {
                   name: '🗑️ Remove row',
                   callback: async (_key, selection) => {
-                    if (gridLocked || isCancelled) return;
+                    if (gridLocked || isCancelled || isExported) return;
                     const hot = hotRef.current?.hotInstance;
                     const rowIndex = selection[0].start.row;
                     const src =
@@ -1680,9 +1715,15 @@ const handleSaveMainNoApproval = async () => {
                     window.open(
                       `/api/sales/check-pdf/${mainId}?company_id=${encodeURIComponent(
                         user?.company_id || '',
-                      )}&t=${Date.now()}`,
+                      )}&user_id=${encodeURIComponent(user?.id || '')}&t=${Date.now()}`,
                       '_blank',
                     );
+                    // ✅ immediately reflect exported lock in UI (backend marks exported on check PDF)
+                    setIsExported(true);
+                    setLocked(true);
+                    setGridLocked(true);
+
+
                   }}
                   className={`flex w-full items-center gap-3 px-3 py-2 text-sm ${
                     mainId && !isCancelled

@@ -18,7 +18,7 @@ type Account = {
   normal_bal?: string | null;
   acct_type?: string | null;
   cash_disbursement_flag?: string | null; // '1' or ''
-  bank_id?: string | null;                // or numeric id if you’ve aligned it
+  bank_id?: string | null;
   vessel_flag?: string | null;            // '1' or ''
   booking_no?: string | null;
   ap_ar?: string | null;
@@ -29,7 +29,13 @@ type Account = {
 };
 
 type PagePayload<T> = {
-  data: T[]; current_page: number; per_page: number; total: number; last_page: number; from: number|null; to: number|null;
+  data: T[];
+  current_page: number;
+  per_page: number;
+  total: number;
+  last_page: number;
+  from: number | null;
+  to: number | null;
 };
 
 type Meta = {
@@ -49,15 +55,18 @@ const AccountsWindow: React.FC = () => {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [lastPage, setLastPage] = useState(1);
-  const [from, setFrom] = useState<number|null>(null);
-  const [to, setTo] = useState<number|null>(null);
+  const [from, setFrom] = useState<number | null>(null);
+  const [to, setTo] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // ✅ list filter toggle: checked = active, unchecked = inactive
+  const [showActiveOnly, setShowActiveOnly] = useState(true);
+
   // form state
-  const [editingId, setEditingId] = useState<number|null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [main_acct, setMainAcct] = useState('');
   const [main_acct_code, setMainAcctCode] = useState('');
-  const [acct_code, setAcctCode] = useState(''); // can show suggestion; server is final authority
+  const [acct_code, setAcctCode] = useState('');
   const [acct_desc, setAcctDesc] = useState('');
   const [fs, setFs] = useState('');
   const [acct_group, setAcctGroup] = useState('');
@@ -65,49 +74,73 @@ const AccountsWindow: React.FC = () => {
   const [acct_group_sub2, setAcctGroupSub2] = useState('');
   const [normal_bal, setNormalBal] = useState('');
   const [acct_type, setAcctType] = useState('');
-  const [cash_disbursement_flag, setCDF] = useState(false); // toggle → '1' or ''
+  const [cash_disbursement_flag, setCDF] = useState(false);
   const [vessel_flag, setVF] = useState(false);
   const [active_flag, setActive] = useState(true);
   const [exclude, setExclude] = useState(false);
-  const [bank_id, setBankId] = useState(''); // optional
+  const [bank_id, setBankId] = useState('');
   const [booking_no, setBookingNo] = useState('');
   const [ap_ar, setApAr] = useState('');
 
   // meta (distincts)
   const [meta, setMeta] = useState<Meta>({
-    fs: [], acct_group: [], acct_group_sub1: [], acct_group_sub2: [], normal_bal: [], acct_type: [],
+    fs: [],
+    acct_group: [],
+    acct_group_sub1: [],
+    acct_group_sub2: [],
+    normal_bal: [],
+    acct_type: [],
   });
 
   // account_main lookup (simple client cache)
-  const [mainOptions, setMainOptions] = useState<Array<{id:number; main_acct:string; main_acct_code:string}>>([]);
+  const [mainOptions, setMainOptions] = useState<Array<{ id: number; main_acct: string; main_acct_code: string }>>([]);
   const [mainSearch, setMainSearch] = useState('');
   const [showMainManager, setShowMainManager] = useState(false);
 
   const companyHeader = useMemo(() => {
     const cid =
       localStorage.getItem('company_id') ??
-      JSON.parse(localStorage.getItem('auth') || '{}')?.company_id ?? '';
+      JSON.parse(localStorage.getItem('auth') || '{}')?.company_id ??
+      '';
     return { 'X-Company-ID': cid || '' };
   }, []);
 
-  const load = async (opts?: { page?: number; q?: string }) => {
+  const load = async (opts?: { page?: number; q?: string; activeOnly?: boolean }) => {
     setLoading(true);
     try {
       const nextPage = opts?.page ?? page;
       const q = opts?.q ?? search;
+      const activeOnly = opts?.activeOnly ?? showActiveOnly;
+
       const res = await napi.get('/references/accounts', {
-        params: { search: q, page: nextPage, per_page: PER_PAGE },
+        params: {
+          search: q,
+          page: nextPage,
+          per_page: PER_PAGE,
+          active_flag: activeOnly ? 1 : 0,
+        },
         headers: companyHeader,
       });
+
       const payload: PagePayload<Account> | Account[] = res.data;
+
       if (Array.isArray(payload)) {
-        setRows(payload); setTotal(payload.length); setLastPage(1);
-        setFrom(payload.length ? 1 : 0); setTo(payload.length);
+        setRows(payload);
+        setTotal(payload.length);
+        setLastPage(1);
+        setFrom(payload.length ? 1 : 0);
+        setTo(payload.length);
       } else {
-        setRows(payload.data ?? []); setTotal(payload.total ?? 0); setLastPage(payload.last_page ?? 1);
-        setFrom(payload.from ?? null); setTo(payload.to ?? null); setPage(payload.current_page ?? nextPage);
+        setRows(payload.data ?? []);
+        setTotal(payload.total ?? 0);
+        setLastPage(payload.last_page ?? 1);
+        setFrom(payload.from ?? null);
+        setTo(payload.to ?? null);
+        setPage(payload.current_page ?? nextPage);
       }
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const loadMeta = async () => {
@@ -123,7 +156,9 @@ const AccountsWindow: React.FC = () => {
       headers: companyHeader,
     });
     const payload: PagePayload<any> = res.data;
-    setMainOptions(payload?.data?.map((r:any)=>({ id:r.id, main_acct:r.main_acct, main_acct_code:r.main_acct_code })) ?? []);
+    setMainOptions(
+      payload?.data?.map((r: any) => ({ id: r.id, main_acct: r.main_acct, main_acct_code: r.main_acct_code })) ?? []
+    );
   };
 
   const fetchNextCode = async (mac: string) => {
@@ -134,108 +169,210 @@ const AccountsWindow: React.FC = () => {
         headers: companyHeader,
       });
       setAcctCode(res.data?.next_code || '');
-    } catch { setAcctCode(''); }
+    } catch {
+      setAcctCode('');
+    }
   };
 
-  useEffect(() => { load({ page: 1 }); /* eslint-disable */ }, []);
+  // ✅ PRINT: prints active if checkbox checked, inactive if unchecked
+  const handlePrint = async () => {
+    setLoading(true);
+    try {
+      const res = await napi.get('/references/accounts', {
+        params: {
+          search,
+          page: 1,
+          per_page: 100000,
+          active_flag: showActiveOnly ? 1 : 0,
+        },
+        headers: companyHeader,
+      });
+
+      const payload: any = res.data;
+      const list: Account[] = Array.isArray(payload) ? payload : payload?.data ?? [];
+
+      const title = showActiveOnly ? 'ACTIVE ACCOUNTS' : 'INACTIVE ACCOUNTS';
+      const printedAt = new Date().toLocaleString();
+
+      const esc = (s: any) =>
+        (s ?? '')
+          .toString()
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+
+      const html = `
+        <html>
+          <head>
+            <title>${title}</title>
+            <style>
+              body { font-family: Arial, sans-serif; font-size: 12px; padding: 12px; }
+              h2 { margin: 0 0 6px 0; }
+              .meta { margin: 0 0 12px 0; color: #444; }
+              table { width: 100%; border-collapse: collapse; }
+              th, td { border: 1px solid #000; padding: 6px; text-align: left; }
+              th { background: #f2f2f2; }
+            </style>
+          </head>
+          <body>
+            <h2>${title}</h2>
+            <div class="meta">Printed: ${esc(printedAt)}</div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Acct #</th>
+                  <th>Acct Code</th>
+                  <th>Description</th>
+                  <th>Main Account</th>
+                  <th>Main Code</th>
+                  <th>Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${list.map(r => `
+                  <tr>
+                    <td>${esc(r.acct_number)}</td>
+                    <td>${esc(r.acct_code)}</td>
+                    <td>${esc(r.acct_desc)}</td>
+                    <td>${esc(r.main_acct)}</td>
+                    <td>${esc(r.main_acct_code)}</td>
+                    <td>${esc(r.acct_type)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+
+            <script>
+              window.onload = function(){ window.print(); window.close(); }
+            </script>
+          </body>
+        </html>
+      `;
+
+      const w = window.open('', '_blank', 'width=1100,height=700');
+      if (!w) {
+        alert('Pop-up blocked. Please allow pop-ups for printing.');
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    } catch (err: any) {
+      alert(err?.response?.data?.message ?? 'Print failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load({ page: 1, activeOnly: showActiveOnly }); /* eslint-disable */ }, []);
   useEffect(() => { loadMeta(); /* eslint-disable */ }, []);
   useEffect(() => { lookupMain(mainSearch); /* eslint-disable */ }, [mainSearch]);
 
-  const onSearch = async () => { setPage(1); await load({ page: 1, q: search }); };
+  // ✅ reload list when Active checkbox changes
+  useEffect(() => {
+    load({ page: 1, q: search, activeOnly: showActiveOnly });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showActiveOnly]);
+
+  const onSearch = async () => {
+    setPage(1);
+    await load({ page: 1, q: search, activeOnly: showActiveOnly });
+  };
 
   const resetForm = () => {
     setEditingId(null);
-    setMainAcct(''); setMainAcctCode('');
-    setAcctCode(''); setAcctDesc('');
-    setFs(''); setAcctGroup(''); setAcctGroupSub1(''); setAcctGroupSub2('');
-    setNormalBal(''); setAcctType('');
-    setCDF(false); setVF(false); setActive(true); setExclude(false);
-    setBankId(''); setBookingNo(''); setApAr('');
+    setMainAcct('');
+    setMainAcctCode('');
+    setAcctCode('');
+    setAcctDesc('');
+    setFs('');
+    setAcctGroup('');
+    setAcctGroupSub1('');
+    setAcctGroupSub2('');
+    setNormalBal('');
+    setAcctType('');
+    setCDF(false);
+    setVF(false);
+    setActive(true);
+    setExclude(false);
+    setBankId('');
+    setBookingNo('');
+    setApAr('');
   };
 
+  const handleCreate = async () => {
+    setLoading(true);
+    try {
+      const payload = {
+        main_acct,
+        main_acct_code,
+        acct_code,
+        acct_desc,
+        fs: fs || null,
+        acct_group: acct_group || null,
+        acct_group_sub1: acct_group_sub1 || null,
+        acct_group_sub2: acct_group_sub2 || null,
+        normal_bal: normal_bal || null,
+        acct_type: acct_type || null,
+        cash_disbursement_flag: cash_disbursement_flag ? '1' : '',
+        vessel_flag: vessel_flag ? '1' : '',
+        active_flag: active_flag ? 1 : 0,
+        exclude: exclude ? 1 : 0,
+        bank_id: bank_id || null,
+        booking_no: booking_no || null,
+        ap_ar: ap_ar || null,
+      };
 
- // ===== [ACCOUNTS_HANDLERS_CREATE_UPDATE_START] =====
-const handleCreate = async () => {
-  setLoading(true);
-  try {
-    const payload = {
-      main_acct,
-      main_acct_code,
-      acct_code, // server can validate/override
-      acct_desc,
-      fs: fs || null,
-      acct_group: acct_group || null,
-      acct_group_sub1: acct_group_sub1 || null,
-      acct_group_sub2: acct_group_sub2 || null,
-      normal_bal: normal_bal || null,
-      acct_type: acct_type || null,
-      cash_disbursement_flag: cash_disbursement_flag ? '1' : '',
-      vessel_flag: vessel_flag ? '1' : '',
-      active_flag: active_flag ? 1 : 0,
-      exclude: exclude ? 1 : 0,
-      bank_id: bank_id || null,
-      booking_no: booking_no || null,
-      ap_ar: ap_ar || null,
-    };
+      await napi.post('/references/accounts', payload, { headers: companyHeader });
+      resetForm();
+      await load({ page: 1, activeOnly: showActiveOnly });
+    } catch (err: any) {
+      alert(err?.response?.data?.message ?? 'Add failed');
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    await napi.post('/references/accounts', payload, { headers: companyHeader });
-    resetForm();
-    await load({ page: 1 }); // show newest on first page
-  } catch (err:any) {
-    alert(err?.response?.data?.message ?? 'Add failed');
-  } finally {
-    setLoading(false);
-  }
-};
+  const handleUpdate = async () => {
+    if (!editingId) return;
+    setLoading(true);
+    try {
+      const payload = {
+        main_acct,
+        main_acct_code,
+        acct_code,
+        acct_desc,
+        fs: fs || null,
+        acct_group: acct_group || null,
+        acct_group_sub1: acct_group_sub1 || null,
+        acct_group_sub2: acct_group_sub2 || null,
+        normal_bal: normal_bal || null,
+        acct_type: acct_type || null,
+        cash_disbursement_flag: cash_disbursement_flag ? '1' : '',
+        vessel_flag: vessel_flag ? '1' : '',
+        active_flag: active_flag ? 1 : 0,
+        exclude: exclude ? 1 : 0,
+        bank_id: bank_id || null,
+        booking_no: booking_no || null,
+        ap_ar: ap_ar || null,
+      };
 
-const handleUpdate = async () => {
-  if (!editingId) return;
-  setLoading(true);
-  try {
-    const payload = {
-      main_acct,
-      main_acct_code,
-      acct_code,
-      acct_desc,
-      fs: fs || null,
-      acct_group: acct_group || null,
-      acct_group_sub1: acct_group_sub1 || null,
-      acct_group_sub2: acct_group_sub2 || null,
-      normal_bal: normal_bal || null,
-      acct_type: acct_type || null,
-      cash_disbursement_flag: cash_disbursement_flag ? '1' : '',
-      vessel_flag: vessel_flag ? '1' : '',
-      active_flag: active_flag ? 1 : 0,
-      exclude: exclude ? 1 : 0,
-      bank_id: bank_id || null,
-      booking_no: booking_no || null,
-      ap_ar: ap_ar || null,
-    };
+      await napi.put(`/references/accounts/${editingId}`, payload, { headers: companyHeader });
+      resetForm();
+      await load({ page, activeOnly: showActiveOnly });
+    } catch (err: any) {
+      alert(err?.response?.data?.message ?? 'Update failed');
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    await napi.put(`/references/accounts/${editingId}`, payload, { headers: companyHeader });
-    resetForm();
-    await load({ page }); // keep current page
-  } catch (err:any) {
-    alert(err?.response?.data?.message ?? 'Update failed');
-  } finally {
-    setLoading(false);
-  }
-};
-// ===== [ACCOUNTS_HANDLERS_CREATE_UPDATE_END] =====
- 
-
-
-
-
-
-// ===== [ACCOUNTS_ONSUBMIT_DELEGATE_START] =====
-const onSubmit = async (e: React.FormEvent) => {
-  e.preventDefault();
-  if (editingId) return handleUpdate();
-  return handleCreate();
-};
-// ===== [ACCOUNTS_ONSUBMIT_DELEGATE_END] =====
-
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (editingId) return handleUpdate();
+    return handleCreate();
+  };
 
   const onEdit = (r: Account) => {
     setEditingId(r.id);
@@ -264,12 +401,15 @@ const onSubmit = async (e: React.FormEvent) => {
     try {
       await napi.delete(`/references/accounts/${id}`, { headers: companyHeader });
       const nextPage = rows.length === 1 && page > 1 ? page - 1 : page;
-      await load({ page: nextPage });
-    } catch (e:any) { alert(e?.response?.data?.message ?? 'Delete failed'); }
-    finally { setLoading(false); }
+      await load({ page: nextPage, activeOnly: showActiveOnly });
+    } catch (e: any) {
+      alert(e?.response?.data?.message ?? 'Delete failed');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const selectMain = async (opt: {main_acct:string; main_acct_code:string}) => {
+  const selectMain = async (opt: { main_acct: string; main_acct_code: string }) => {
     setMainAcct(opt.main_acct);
     setMainAcctCode(opt.main_acct_code);
     await fetchNextCode(opt.main_acct_code);
@@ -277,17 +417,40 @@ const onSubmit = async (e: React.FormEvent) => {
 
   return (
     <div className="p-4">
-      {/* Search */}
-      <div className="flex items-center gap-2 mb-3">
+      {/* Search + Active filter + Print */}
+      <div className="flex items-center gap-3 mb-3">
         <input
           value={search}
-          onChange={(e)=>setSearch(e.target.value)}
+          onChange={(e) => setSearch(e.target.value)}
           placeholder="Search accounts (code, desc, main acct, type...)"
           className="border rounded px-3 py-2 text-sm w-[36rem] max-w-[60vw]"
         />
-        <button onClick={onSearch} className="px-3 py-2 rounded bg-blue-600 text-white text-sm hover:bg-blue-500">
+        <button
+          onClick={onSearch}
+          className="px-3 py-2 rounded bg-blue-600 text-white text-sm hover:bg-blue-500"
+        >
           Search
         </button>
+
+        <label className="flex items-center gap-2 text-sm select-none">
+          <input
+            type="checkbox"
+            checked={showActiveOnly}
+            onChange={(e) => setShowActiveOnly(e.target.checked)}
+          />
+          Active
+        </label>
+
+        <button
+          type="button"
+          onClick={handlePrint}
+          className="px-3 py-2 rounded bg-gray-800 text-white text-sm hover:bg-gray-700"
+          disabled={loading}
+          title={showActiveOnly ? 'Print Active Accounts' : 'Print Inactive Accounts'}
+        >
+          Print
+        </button>
+
         {loading && <span className="text-xs text-gray-500">Loading…</span>}
       </div>
 
@@ -298,19 +461,28 @@ const onSubmit = async (e: React.FormEvent) => {
           <div className="flex gap-2">
             <input
               value={mainSearch}
-              onChange={(e)=>setMainSearch(e.target.value)}
+              onChange={(e) => setMainSearch(e.target.value)}
               placeholder="Search Main Account…"
               className="border rounded px-3 py-2 w-full"
             />
-            <button type="button" onClick={()=>setShowMainManager(true)} className="px-3 py-2 bg-gray-700 text-white rounded">
+            <button
+              type="button"
+              onClick={() => setShowMainManager(true)}
+              className="px-3 py-2 bg-gray-700 text-white rounded"
+            >
               Manage
             </button>
           </div>
-          {/* Simple dropdown list */}
-          {mainSearch && mainOptions.length>0 && (
+
+          {mainSearch && mainOptions.length > 0 && (
             <div className="mt-1 border rounded max-h-40 overflow-auto bg-white shadow">
-              {mainOptions.map(o=>(
-                <button key={o.id} type="button" onClick={()=>selectMain(o)} className="block w-full text-left px-3 py-1 hover:bg-gray-100">
+              {mainOptions.map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => selectMain(o)}
+                  className="block w-full text-left px-3 py-1 hover:bg-gray-100"
+                >
                   {o.main_acct} <span className="text-gray-500">({o.main_acct_code})</span>
                 </button>
               ))}
@@ -318,114 +490,216 @@ const onSubmit = async (e: React.FormEvent) => {
           )}
         </div>
 
-<input
-  value={main_acct}
-  onChange={(e)=>setMainAcct(e.target.value.toUpperCase())}
-  placeholder="Main Account"
-  className="border rounded px-3 py-2 col-span-3"
-/>
+        <input
+          value={main_acct}
+          onChange={(e) => setMainAcct(e.target.value.toUpperCase())}
+          placeholder="Main Account"
+          className="border rounded px-3 py-2 col-span-3"
+        />
 
-<input
-  value={main_acct_code}
-  onChange={(e)=>{ setMainAcctCode(e.target.value); }}
-  onBlur={() => fetchNextCode(main_acct_code)}
-  placeholder="Main Account Code"
-  className="border rounded px-3 py-2 col-span-2"
-/>
+        <input
+          value={main_acct_code}
+          onChange={(e) => {
+            setMainAcctCode(e.target.value);
+          }}
+          onBlur={() => fetchNextCode(main_acct_code)}
+          placeholder="Main Account Code"
+          className="border rounded px-3 py-2 col-span-2"
+        />
 
         <div className="col-span-3 flex gap-2">
-          <input value={acct_code} onChange={(e)=>setAcctCode(e.target.value)} placeholder="Acct Code" className="border rounded px-3 py-2 w-full"/>
-          <button type="button" onClick={()=>fetchNextCode(main_acct_code)} className="px-3 py-2 bg-indigo-600 text-white rounded">Suggest</button>
+          <input
+            value={acct_code}
+            onChange={(e) => setAcctCode(e.target.value)}
+            placeholder="Acct Code"
+            className="border rounded px-3 py-2 w-full"
+          />
+          <button
+            type="button"
+            onClick={() => fetchNextCode(main_acct_code)}
+            className="px-3 py-2 bg-indigo-600 text-white rounded"
+          >
+            Suggest
+          </button>
         </div>
 
-        <input required value={acct_desc} onChange={(e)=>setAcctDesc(e.target.value)} placeholder="Account Description *" className="border rounded px-3 py-2 col-span-6"/>
+        <input
+          required
+          value={acct_desc}
+          onChange={(e) => setAcctDesc(e.target.value)}
+          placeholder="Account Description *"
+          className="border rounded px-3 py-2 col-span-6"
+        />
 
-        <select value={fs} onChange={(e)=>setFs(e.target.value)} className="border rounded px-3 py-2 col-span-2">
+        <select value={fs} onChange={(e) => setFs(e.target.value)} className="border rounded px-3 py-2 col-span-2">
           <option value="">FS</option>
-          {meta.fs.map(x=><option key={x} value={x}>{x}</option>)}
-        </select>
-        <select value={acct_group} onChange={(e)=>setAcctGroup(e.target.value)} className="border rounded px-3 py-2 col-span-2">
-          <option value="">Group</option>
-          {meta.acct_group.map(x=><option key={x} value={x}>{x}</option>)}
-        </select>
-        <select value={acct_group_sub1} onChange={(e)=>setAcctGroupSub1(e.target.value)} className="border rounded px-3 py-2 col-span-2">
-          <option value="">Sub-group 1</option>
-          {meta.acct_group_sub1.map(x=><option key={x} value={x}>{x}</option>)}
-        </select>
-        <select value={acct_group_sub2} onChange={(e)=>setAcctGroupSub2(e.target.value)} className="border rounded px-3 py-2 col-span-2">
-          <option value="">Sub-group 2</option>
-          {meta.acct_group_sub2.map(x=><option key={x} value={x}>{x}</option>)}
-        </select>
-        <select value={normal_bal} onChange={(e)=>setNormalBal(e.target.value)} className="border rounded px-3 py-2 col-span-2">
-          <option value="">Normal Bal</option>
-          {meta.normal_bal.map(x=><option key={x} value={x}>{x}</option>)}
-        </select>
-        <select value={acct_type} onChange={(e)=>setAcctType(e.target.value)} className="border rounded px-3 py-2 col-span-2">
-          <option value="">Acct Type</option>
-          {meta.acct_type.map(x=><option key={x} value={x}>{x}</option>)}
+          {meta.fs.map((x) => (
+            <option key={x} value={x}>
+              {x}
+            </option>
+          ))}
         </select>
 
-        <input value={bank_id} onChange={(e)=>setBankId(e.target.value)} placeholder="Bank ID (optional)" className="border rounded px-3 py-2 col-span-2"/>
-        <input value={booking_no} onChange={(e)=>setBookingNo(e.target.value)} placeholder="Booking No" className="border rounded px-3 py-2 col-span-2"/>
-        <input value={ap_ar} onChange={(e)=>setApAr(e.target.value)} placeholder="AP/AR" className="border rounded px-3 py-2 col-span-2"/>
+        <select
+          value={acct_group}
+          onChange={(e) => setAcctGroup(e.target.value)}
+          className="border rounded px-3 py-2 col-span-2"
+        >
+          <option value="">Group</option>
+          {meta.acct_group.map((x) => (
+            <option key={x} value={x}>
+              {x}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={acct_group_sub1}
+          onChange={(e) => setAcctGroupSub1(e.target.value)}
+          className="border rounded px-3 py-2 col-span-2"
+        >
+          <option value="">Sub-group 1</option>
+          {meta.acct_group_sub1.map((x) => (
+            <option key={x} value={x}>
+              {x}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={acct_group_sub2}
+          onChange={(e) => setAcctGroupSub2(e.target.value)}
+          className="border rounded px-3 py-2 col-span-2"
+        >
+          <option value="">Sub-group 2</option>
+          {meta.acct_group_sub2.map((x) => (
+            <option key={x} value={x}>
+              {x}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={normal_bal}
+          onChange={(e) => setNormalBal(e.target.value)}
+          className="border rounded px-3 py-2 col-span-2"
+        >
+          <option value="">Normal Bal</option>
+          {meta.normal_bal.map((x) => (
+            <option key={x} value={x}>
+              {x}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={acct_type}
+          onChange={(e) => setAcctType(e.target.value)}
+          className="border rounded px-3 py-2 col-span-2"
+        >
+          <option value="">Acct Type</option>
+          {meta.acct_type.map((x) => (
+            <option key={x} value={x}>
+              {x}
+            </option>
+          ))}
+        </select>
+
+        <input
+          value={bank_id}
+          onChange={(e) => setBankId(e.target.value)}
+          placeholder="Bank ID (optional)"
+          className="border rounded px-3 py-2 col-span-2"
+        />
+        <input
+          value={booking_no}
+          onChange={(e) => setBookingNo(e.target.value)}
+          placeholder="Booking No"
+          className="border rounded px-3 py-2 col-span-2"
+        />
+        <input
+          value={ap_ar}
+          onChange={(e) => setApAr(e.target.value)}
+          placeholder="AP/AR"
+          className="border rounded px-3 py-2 col-span-2"
+        />
 
         <div className="col-span-6 flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2"><input type="checkbox" checked={cash_disbursement_flag} onChange={(e)=>setCDF(e.target.checked)} /> Cash Disb Flag</label>
-          <label className="flex items-center gap-2"><input type="checkbox" checked={vessel_flag} onChange={(e)=>setVF(e.target.checked)} /> Vessel Flag</label>
-          <label className="flex items-center gap-2"><input type="checkbox" checked={active_flag} onChange={(e)=>setActive(e.target.checked)} /> Active</label>
-          <label className="flex items-center gap-2"><input type="checkbox" checked={exclude} onChange={(e)=>setExclude(e.target.checked)} /> Exclude</label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={cash_disbursement_flag} onChange={(e) => setCDF(e.target.checked)} /> Cash
+            Disb Flag
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={vessel_flag} onChange={(e) => setVF(e.target.checked)} /> Vessel Flag
+          </label>
+
+          {/* ✅ per-record active flag */}
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={active_flag} onChange={(e) => setActive(e.target.checked)} /> Active
+          </label>
+
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={exclude} onChange={(e) => setExclude(e.target.checked)} /> Exclude
+          </label>
         </div>
 
-<div className="col-span-6 flex items-center justify-end gap-2">
-  {/* Show New when editing to exit edit mode quickly */}
-  {editingId && (
-    <button
-      type="button"
-      onClick={resetForm}
-      className="px-3 py-2 bg-gray-200 rounded"
-      title="Exit edit mode and prepare a new record"
-    >
-      New
-    </button>
-  )}
+        <div className="col-span-6 flex items-center justify-end gap-2">
+          {editingId && (
+            <button
+              type="button"
+              onClick={resetForm}
+              className="px-3 py-2 bg-gray-200 rounded"
+              title="Exit edit mode and prepare a new record"
+            >
+              New
+            </button>
+          )}
 
-  <button
-    type="button"
-    onClick={() => {
-      setMainAcct(''); setMainAcctCode('');
-      setAcctCode(''); setAcctDesc('');
-      setFs(''); setAcctGroup(''); setAcctGroupSub1(''); setAcctGroupSub2('');
-      setNormalBal(''); setAcctType('');
-      setCDF(false); setVF(false); setActive(true); setExclude(false);
-      setBankId(''); setBookingNo(''); setApAr('');
-    }}
-    className="px-3 py-2 bg-gray-200 rounded"
-  >
-    Clear
-  </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMainAcct('');
+              setMainAcctCode('');
+              setAcctCode('');
+              setAcctDesc('');
+              setFs('');
+              setAcctGroup('');
+              setAcctGroupSub1('');
+              setAcctGroupSub2('');
+              setNormalBal('');
+              setAcctType('');
+              setCDF(false);
+              setVF(false);
+              setActive(true);
+              setExclude(false);
+              setBankId('');
+              setBookingNo('');
+              setApAr('');
+            }}
+            className="px-3 py-2 bg-gray-200 rounded"
+          >
+            Clear
+          </button>
 
-  {!editingId ? (
-    <button
-      type="submit"
-      className="px-3 py-2 bg-green-600 text-white rounded"
-      disabled={loading || !acct_desc || !main_acct_code || !main_acct}
-      title={!acct_desc || !main_acct || !main_acct_code ? 'Main Account, Main Code, and Description are required' : ''}
-    >
-      Add
-    </button>
-  ) : (
-    <button
-      type="submit"
-      className="px-3 py-2 bg-blue-600 text-white rounded"
-      disabled={loading || !acct_desc || !main_acct_code || !main_acct}
-    >
-      Update
-    </button>
-  )}
-</div>
-
-
-
+          {!editingId ? (
+            <button
+              type="submit"
+              className="px-3 py-2 bg-green-600 text-white rounded"
+              disabled={loading || !acct_desc || !main_acct_code || !main_acct}
+              title={!acct_desc || !main_acct || !main_acct_code ? 'Main Account, Main Code, and Description are required' : ''}
+            >
+              Add
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="px-3 py-2 bg-blue-600 text-white rounded"
+              disabled={loading || !acct_desc || !main_acct_code || !main_acct}
+            >
+              Update
+            </button>
+          )}
+        </div>
       </form>
 
       {/* Grid */}
@@ -443,7 +717,7 @@ const onSubmit = async (e: React.FormEvent) => {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r)=>(
+            {rows.map((r) => (
               <tr key={r.id} className="border-t">
                 <td className="p-2">{r.acct_number}</td>
                 <td className="p-2">{r.acct_code}</td>
@@ -453,28 +727,62 @@ const onSubmit = async (e: React.FormEvent) => {
                 <td className="p-2">{r.acct_type}</td>
                 <td className="p-2">
                   <div className="flex gap-2">
-                    <button onClick={()=>onEdit(r)} className="px-2 py-1 text-blue-600 hover:underline">Edit</button>
-                    <button onClick={()=>onDelete(r.id)} className="px-2 py-1 text-red-600 hover:underline">Delete</button>
+                    <button onClick={() => onEdit(r)} className="px-2 py-1 text-blue-600 hover:underline">
+                      Edit
+                    </button>
+                    <button onClick={() => onDelete(r.id)} className="px-2 py-1 text-red-600 hover:underline">
+                      Delete
+                    </button>
                   </div>
                 </td>
               </tr>
             ))}
-            {rows.length===0 && (<tr><td colSpan={7} className="p-4 text-center text-gray-500">No records</td></tr>)}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={7} className="p-4 text-center text-gray-500">
+                  No records
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
 
       {/* Pagination */}
       <div className="mt-3 flex items-center justify-between text-sm">
-        <div className="text-gray-600">
-          {total>0 ? <>Showing {from ?? 0}–{to ?? 0} of {total}</> : <>No results</>}
-        </div>
+        <div className="text-gray-600">{total > 0 ? <>Showing {from ?? 0}–{to ?? 0} of {total}</> : <>No results</>}</div>
         <div className="flex items-center gap-1">
-          <button onClick={()=>load({page:1})} className="px-2 py-1 border rounded disabled:opacity-40" disabled={page<=1}>First</button>
-          <button onClick={()=>load({page:page-1})} className="px-2 py-1 border rounded disabled:opacity-40" disabled={page<=1}>Prev</button>
-          <span className="px-2">{page} / {lastPage}</span>
-          <button onClick={()=>load({page:page+1})} className="px-2 py-1 border rounded disabled:opacity-40" disabled={page>=lastPage}>Next</button>
-          <button onClick={()=>load({page:lastPage})} className="px-2 py-1 border rounded disabled:opacity-40" disabled={page>=lastPage}>Last</button>
+          <button
+            onClick={() => load({ page: 1, activeOnly: showActiveOnly })}
+            className="px-2 py-1 border rounded disabled:opacity-40"
+            disabled={page <= 1}
+          >
+            First
+          </button>
+          <button
+            onClick={() => load({ page: page - 1, activeOnly: showActiveOnly })}
+            className="px-2 py-1 border rounded disabled:opacity-40"
+            disabled={page <= 1}
+          >
+            Prev
+          </button>
+          <span className="px-2">
+            {page} / {lastPage}
+          </span>
+          <button
+            onClick={() => load({ page: page + 1, activeOnly: showActiveOnly })}
+            className="px-2 py-1 border rounded disabled:opacity-40"
+            disabled={page >= lastPage}
+          >
+            Next
+          </button>
+          <button
+            onClick={() => load({ page: lastPage, activeOnly: showActiveOnly })}
+            className="px-2 py-1 border rounded disabled:opacity-40"
+            disabled={page >= lastPage}
+          >
+            Last
+          </button>
         </div>
       </div>
 
@@ -484,13 +792,17 @@ const onSubmit = async (e: React.FormEvent) => {
           title="Main Accounts"
           defaultWidth={640}
           defaultHeight={460}
-          onClose={async ()=>{ setShowMainManager(false); await lookupMain(mainSearch); }}
-        >
-          <MainAccountsWindow onSaved={async ()=>{
-            // when a new main acct is saved, refresh lookup list and suggest code
+          onClose={async () => {
+            setShowMainManager(false);
             await lookupMain(mainSearch);
-            if (main_acct_code) await fetchNextCode(main_acct_code);
-          }} />
+          }}
+        >
+          <MainAccountsWindow
+            onSaved={async () => {
+              await lookupMain(mainSearch);
+              if (main_acct_code) await fetchNextCode(main_acct_code);
+            }}
+          />
         </FloatingWindow>
       )}
     </div>

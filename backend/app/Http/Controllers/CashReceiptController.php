@@ -313,6 +313,24 @@ $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
 }
 
 
+private function requireDetailsEditable(Request $req, int $transactionId): void
+{
+    $row = CashReceipts::findOrFail($transactionId);
+
+    if (in_array($row->is_cancel, ['c','d'], true)) {
+        abort(409, 'Transaction is cancelled/deleted.');
+    }
+
+    // 🔓 Before export → freely editable
+    if (is_null($row->exported_at)) {
+        return;
+    }
+
+    // 🔒 After export → approval required
+    $this->requireApprovedEdit($req, $transactionId);
+}
+
+
 
     // === 3) Insert a detail row ===
     public function saveDetail(Request $req)
@@ -326,8 +344,8 @@ $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
             'user_id'        => ['nullable','integer'],
         ]);
         
-$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
-$this->requireApprovedEdit($req, (int)$payload['transaction_id']);
+//$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
+$this->requireDetailsEditable($req, (int)$payload['transaction_id']);
 
         $debit  = (float)($payload['debit']  ?? 0);
         $credit = (float)($payload['credit'] ?? 0);
@@ -383,8 +401,8 @@ $exists = AccountCode::where('acct_code', $payload['acct_code'])
             'credit'         => ['nullable','numeric'],
         ]);
 
-$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
-$this->requireApprovedEdit($req, (int)$payload['transaction_id']);
+//$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
+$this->requireDetailsEditable($req, (int)$payload['transaction_id']);
 $companyId = (int) CashReceipts::where('id', $payload['transaction_id'])->value('company_id');
 
         $detail = CashReceiptDetails::find($payload['id']);
@@ -429,8 +447,8 @@ $exists = AccountCode::where('acct_code', $apply['acct_code'])
             'transaction_id' => ['required','integer','exists:cash_receipts,id'],
         ]);
 
-$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
-$this->requireApprovedEdit($req, (int)$payload['transaction_id']);
+//$this->requireNotCancelledOrDeleted((int)$payload['transaction_id']);
+$this->requireDetailsEditable($req, (int)$payload['transaction_id']);
 
         $row = CashReceiptDetails::find($payload['id']);
         if ($row && ($row->workstation_id === 'BANK')) {
@@ -495,6 +513,7 @@ public function show($id, Request $req)
             ->when($q !== '', function ($qr) use ($qq) {
                 $qr->where(function ($w) use ($qq) {
                     $w->whereRaw('LOWER(r.cr_no) LIKE ?',               ["%{$qq}%"])
+                    ->orWhereRaw('CAST(r.receipt_amount AS TEXT) ILIKE ?', ["%{$qq}%"])
                       ->orWhereRaw('LOWER(r.cust_id) LIKE ?',           ["%{$qq}%"])
                       ->orWhereRaw('LOWER(r.collection_receipt) LIKE ?',["%{$qq}%"])
                       ->orWhereRaw('LOWER(c.cust_name) LIKE ?',         ["%{$qq}%"]);
@@ -821,6 +840,10 @@ EOD;
         }
 
         $pdfContent = $pdf->Output('receiptVoucher.pdf', 'S');
+CashReceipts::where('id', $id)->update([
+    'exported_at' => now(),
+    'exported_by' => auth()->id(),
+]);
 
         return response($pdfContent, 200)
             ->header('Content-Type', 'application/pdf')
@@ -951,6 +974,11 @@ $details = DB::table('cash_receipt_details as d')
 
         // Output buffer clean (Octane/Swoole safe)
         if (ob_get_length()) { ob_end_clean(); }
+
+CashReceipts::where('id', $id)->update([
+    'exported_at' => now(),
+    'exported_by' => auth()->id(),
+]);
 
         return response()->stream(function () use ($writer) {
             $writer->save('php://output');

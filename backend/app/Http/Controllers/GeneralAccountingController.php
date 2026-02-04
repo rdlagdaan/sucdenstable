@@ -195,10 +195,19 @@ public function saveDetail(Request $req)
     }
 
     // 2) Block edits if cancelled/deleted
+// ✅ Lock inserts when exported
+if (!empty($main->exported_at)) {
+    abort(403, 'This journal entry is already exported and is locked for editing.');
+}
+
     if (in_array((string)$main->is_cancel, ['c','d','y'], true)) {
         abort(403, 'Cancelled/deleted journal cannot be modified.');
     }
 
+// 2b) Block edits if exported (locked after print/download)
+if (!empty($main->exported_at)) {
+    abort(403, 'Exported journal cannot be modified.');
+}    
     // Optional: require approval for adding details too
     // $this->requireEditApproval((int)$main->id);
 
@@ -214,12 +223,13 @@ if (empty($payload['workstation_id'])) {
 }
 
 
-    // 4) Validate debit/credit XOR and >0
-    $d = (float)($payload['debit'] ?? 0);
-    $c = (float)($payload['credit'] ?? 0);
-    if (($d > 0 && $c > 0) || ($d <= 0 && $c <= 0)) {
-        return response()->json(['message' => 'Provide either debit OR credit (not both/zero).'], 422);
-    }
+// 4) Validate amounts: allow BOTH debit and credit > 0, but NOT both <= 0
+$d = (float)($payload['debit'] ?? 0);
+$c = (float)($payload['credit'] ?? 0);
+
+if ($d <= 0 && $c <= 0) {
+    return response()->json(['message' => 'Provide a debit and/or credit amount (> 0).'], 422);
+}
 
     // 5) Validate account is active FOR THIS COMPANY
     $acctOk = AccountCode::where('acct_code', $payload['acct_code'])
@@ -272,8 +282,15 @@ public function updateDetail(Request $req)
         abort(403, 'Cancelled/deleted journal cannot be modified.');
     }
 
+    // 2b) Block edits if exported (locked after print/download)
+if (!empty($main->exported_at)) {
+    abort(403, 'Exported journal cannot be modified.');
+}
     // 3) Approval gate (your existing behavior)
-    $this->requireEditApproval((int)$main->id);
+    // ✅ Editable on load; lock only when exported
+if (!empty($main->exported_at)) {
+    abort(403, 'This journal entry is already exported and is locked for editing.');
+}
 
     // 4) Tenant-safe detail lookup: id + transaction_id + company_id
     $row = GeneralAccountingDetail::where('id', (int)$payload['id'])
@@ -295,9 +312,11 @@ public function updateDetail(Request $req)
     $newDebit  = array_key_exists('debit',  $apply) ? (float)($apply['debit'] ?? 0) : (float)($row->debit ?? 0);
     $newCredit = array_key_exists('credit', $apply) ? (float)($apply['credit'] ?? 0) : (float)($row->credit ?? 0);
 
-    if (($newDebit > 0 && $newCredit > 0) || ($newDebit <= 0 && $newCredit <= 0)) {
-        return response()->json(['message' => 'Provide either debit OR credit (not both/zero).'], 422);
-    }
+// Allow BOTH debit and credit > 0, but NOT both <= 0
+if ($newDebit <= 0 && $newCredit <= 0) {
+    return response()->json(['message' => 'Provide a debit and/or credit amount (> 0).'], 422);
+}
+
 
     // 7) If changing acct_code: validate account active for THIS COMPANY + prevent duplicates
     if (array_key_exists('acct_code', $apply) && $apply['acct_code'] !== $row->acct_code) {
@@ -345,8 +364,15 @@ public function deleteDetail(Request $req)
         abort(403, 'Cancelled/deleted journal cannot be modified.');
     }
 
+// 2b) Block edits if exported (locked after print/download)
+if (!empty($main->exported_at)) {
+    abort(403, 'Exported journal cannot be modified.');
+}    
     // 3) Approval gate (your existing behavior)
-    $this->requireEditApproval((int)$main->id);
+    // ✅ Editable on load; lock only when exported
+if (!empty($main->exported_at)) {
+    abort(403, 'This journal entry is already exported and is locked for editing.');
+}
 
     // 4) Tenant-safe delete: scope by id + transaction_id + company_id
     $deleted = GeneralAccountingDetail::where('id', (int)$payload['id'])
@@ -514,6 +540,20 @@ $details = DB::table('general_accounting_details as d')
         return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
     }
 
+// ✅ Mark exported ONCE (lock after successful print)
+// Use query param user_id (same style as company_id)
+$exportedBy = $request->query('user_id');
+
+DB::table('general_accounting')
+    ->when($companyId, fn($q) => $q->where('company_id', $companyId))
+    ->where('id', $id)
+    ->whereNull('exported_at')
+    ->update([
+        'exported_at' => now(),
+        'exported_by' => $exportedBy ? (int)$exportedBy : null,
+    ]);
+
+    
     // 4) Build PDF exactly like the working Purchase flow (no streamDownload)
     $pdf = new MyJournalVoucherPDF('P','mm','LETTER', true, 'UTF-8', false);
     $pdf->setPrintHeader(true);
@@ -640,6 +680,20 @@ public function formExcel($id, Request $req)
         ], 422);
     }
 
+// ✅ Mark exported ONCE (lock after successful download)
+// Use query param user_id (same style as company_id)
+$exportedBy = $req->query('user_id');
+
+DB::table('general_accounting')
+    ->when($companyId, fn($q) => $q->where('company_id', $companyId))
+    ->where('id', $id)
+    ->whereNull('exported_at')
+    ->update([
+        'exported_at' => now(),
+        'exported_by' => $exportedBy ? (int)$exportedBy : null,
+    ]);
+
+
     // Details
 $details = DB::table('general_accounting_details as d')
     ->join('account_code as a', function ($j) use ($companyId) {
@@ -736,6 +790,13 @@ public function updateMain(Request $req)
 
     $main = GeneralAccounting::findOrFail($data['id']);
 
+ // Cannot update if cancelled/deleted/exported
+if (in_array((string)$main->is_cancel, ['c','d','y'], true)) {
+    abort(403, 'Cancelled or deleted journal cannot be updated.');
+}
+if (!empty($main->exported_at)) {
+    abort(403, 'Exported journal cannot be modified.');
+}   
     $main->gen_acct_date = $data['gen_acct_date'];
     $main->explanation   = $data['explanation'];
     $main->save();
@@ -768,6 +829,11 @@ public function updateMainNoApproval(Request $req)
     if (in_array($main->is_cancel, ['c','d','y'], true)) {
         abort(403, 'Cancelled or deleted journal cannot be updated.');
     }
+
+if (!empty($main->exported_at)) {
+    abort(403, 'Exported journal cannot be modified.');
+}
+
 
 $update = [
     'gen_acct_date' => $data['gen_acct_date'],

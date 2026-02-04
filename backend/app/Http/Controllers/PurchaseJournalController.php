@@ -92,6 +92,23 @@ class PurchaseJournalController extends Controller
     // ----------------------------
     // Cash Receipts baseline helpers
     // ----------------------------
+	
+	
+// ----------------------------
+// Export locking helper (Purchase Journal)
+// ----------------------------
+private function markExportedOnce(int $id, ?int $companyId = null): void
+{
+    $q = CashPurchase::where('id', $id);
+    if ($companyId) $q->where('company_id', $companyId);
+
+    // only set once
+    $q->whereNull('exported_at')->update([
+        'exported_at' => now(),
+    ]);
+}
+	
+	
     private function isCancelledFlag($flag): bool
     {
         $v = strtolower((string)($flag ?? ''));
@@ -108,6 +125,27 @@ class PurchaseJournalController extends Controller
             abort(422, 'Transaction is cancelled/deleted and cannot be modified.');
         }
     }
+
+private function requireEditable(int $transactionId, int $companyId): void
+{
+    $tx = CashPurchase::where('id', $transactionId)
+        ->where('company_id', $companyId)
+        ->first(['id', 'exported_at']);
+
+    if (!$tx) {
+        abort(404, 'Transaction not found.');
+    }
+
+    // ✅ RULE #1: If NOT exported, allow edit immediately (no approval)
+    if (is_null($tx->exported_at)) {
+        return;
+    }
+
+    // ✅ RULE #3: If exported, allow ONLY with active approval window
+    $this->requireApprovedEdit($transactionId, $companyId);
+}
+
+
 
 private function requireApprovedEdit(int $transactionId, int $companyId): void
 {
@@ -203,7 +241,7 @@ public function storeMain(Request $req)
         $tx = CashPurchase::findOrFail($data['id']);
 
         $this->requireNotCancelledOrDeleted((int)$tx->id, (int)$data['company_id']);
-        $this->requireApprovedEdit((int)$tx->id, (int)$data['company_id']);
+        $this->requireEditable((int)$tx->id, (int)$data['company_id']);
 
         $tx->update([
             'vend_id'       => $data['vend_id'],
@@ -233,7 +271,7 @@ public function storeMain(Request $req)
         ]);
 
         $this->requireNotCancelledOrDeleted((int)$payload['transaction_id'], (int)($payload['company_id'] ?? 0));
-        $this->requireApprovedEdit((int)$payload['transaction_id'], (int)($payload['company_id'] ?? 0));
+        $this->requireEditable((int)$payload['transaction_id'], (int)($payload['company_id'] ?? 0));
 
 
 
@@ -282,7 +320,7 @@ $exists = AccountCode::where('acct_code', $payload['acct_code'])
         $companyId = $tx ? (int)($tx->company_id ?? 0) : 0;
 
         $this->requireNotCancelledOrDeleted((int)$payload['transaction_id'], $companyId);
-        $this->requireApprovedEdit((int)$payload['transaction_id'], $companyId);
+$this->requireEditable((int)$payload['transaction_id'], $companyId);
 
 
         $detail = CashPurchaseDetail::find($payload['id']);
@@ -338,7 +376,7 @@ if (array_key_exists('acct_code', $apply) && $apply['acct_code'] !== $detail->ac
         $companyId = $tx ? (int)($tx->company_id ?? 0) : 0;
 
         $this->requireNotCancelledOrDeleted((int)$payload['transaction_id'], $companyId);
-        $this->requireApprovedEdit((int)$payload['transaction_id'], $companyId);
+        $this->requireEditable((int)$payload['transaction_id'], $companyId);
 
 
         CashPurchaseDetail::where('id',$payload['id'])->delete();
@@ -451,6 +489,7 @@ public function list(Request $req)
         ->get([
             'p.id',
             'p.cp_no',
+            'p.exported_at',
             'p.vend_id',
             'p.purchase_date',
             'p.purchase_amount',
@@ -723,6 +762,8 @@ EOD;
 EOD;
 
     $pdf->writeHTML($tbl, true, false, false, false, '');
+    // ✅ lock after successful export
+    $this->markExportedOnce((int)$id, $companyId ? (int)$companyId : null);
 
     $pdfContent = $pdf->Output('purchaseVoucher.pdf', 'S');
 
@@ -837,6 +878,8 @@ public function checkPdf(Request $request, $id)
     // 4) Amount in words
     $pdf->SetXY(20, 35);
     $pdf->MultiCell(160, 6, $amountWords, 0, 'L', false, 1);
+    // ✅ lock after successful export
+    $this->markExportedOnce((int)$id, $companyId ? (int)$companyId : null);
 
     $fileName   = 'check_' . (($header->cp_no ?? '') !== '' ? $header->cp_no : $id) . '.pdf';
     $pdfContent = $pdf->Output($fileName, 'S');
@@ -1023,6 +1066,9 @@ $header = DB::table('cash_purchase as cp')
     foreach (['A'=>18,'B'=>48,'C'=>16,'D'=>16] as $col=>$w) {
         $sheet->getColumnDimension($col)->setWidth($w);
     }
+
+    // ✅ lock after successful export
+    $this->markExportedOnce((int)$id, $companyId ? (int)$companyId : null);
 
     // 4) Stream as XLSX
     $filename = 'PurchaseVoucher_' . preg_replace('/[^\w\-]/','', (string)$header->cp_no) . '.xlsx';

@@ -205,12 +205,21 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
         ->selectRaw("
             to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
             r.cd_no,
-            r.disburse_amount,
+            COALESCE(bk.bank_amount, r.disburse_amount) as bank_amount,
             r.check_ref_no,
             r.explanation,
             b.bank_account_number,
             COALESCE(v.vend_name, r.vend_id) as vend_name
         ")
+        ->leftJoinSub(
+            DB::table('cash_disbursement_details')
+                ->selectRaw("transaction_id, credit as bank_amount")
+                ->where('workstation_id', 'BANK'),
+            'bk',
+            function ($j) {
+                $j->on('bk.transaction_id', '=', 'r.id');
+            }
+        )
         ->leftJoin('bank as b', function ($j) use ($cid) {
             $j->on('b.bank_id', '=', 'r.bank_id');
             if (Schema::hasColumn('bank', 'company_id')) {
@@ -229,7 +238,7 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
         ->orderBy('r.disburse_date', 'asc')
         ->chunk(300, function($chunk) use (&$rowsHtml, $openRowsTable, $addHeader, $pdf, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
             foreach ($chunk as $row) {
-                $amt = (float)$row->disburse_amount;
+                $amt = (float)($row->bank_amount ?? 0);
                 $pageTotal  += $amt;
                 $grandTotal += $amt;
                 $linesOnPage++;
@@ -331,12 +340,21 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
         ->selectRaw("
             to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
             r.cd_no,
-            r.disburse_amount,
+            COALESCE(bk.bank_amount, r.disburse_amount) as bank_amount,
             r.check_ref_no,
             r.explanation,
             b.bank_account_number,
             COALESCE(v.vend_name, r.vend_id) as vend_name
         ")
+        ->leftJoinSub(
+            DB::table('cash_disbursement_details')
+                ->selectRaw("transaction_id, credit as bank_amount")
+                ->where('workstation_id', 'BANK'),
+            'bk',
+            function ($j) {
+                $j->on('bk.transaction_id', '=', 'r.id');
+            }
+        )
         ->leftJoin('bank as b', function ($j) use ($cid) {
             $j->on('b.bank_id', '=', 'r.bank_id');
             if (Schema::hasColumn('bank', 'company_id')) {
@@ -355,7 +373,7 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
         ->orderBy('r.disburse_date', 'asc')
         ->chunk(300, function($chunk) use (&$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
             foreach ($chunk as $row) {
-                $amt = (float)$row->disburse_amount;
+                $amt = (float)($row->bank_amount ?? 0);
                 $pageTotal  += $amt;
                 $grandTotal += $amt;
                 $linesOnPage++;

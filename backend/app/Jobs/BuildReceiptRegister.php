@@ -207,7 +207,7 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
                 <tr>
                   <td width="8%"  align="center"><b>Date</b></td>
                   <td width="11%" align="center"><b>Receipt Voucher</b></td>
-                  <td width="12%" align="center"><b>Bank</b></td>
+                  <td width="12%" align="center"><b>Bank Account</b></td>
                   <td width="22%" align="center" colspan="2"><b>Customer</b></td>
                   <td width="28%" align="center" colspan="2"><b>Particular</b></td>
                   <td width="9%"  align="center"><b>Collection Receipt</b></td>
@@ -229,15 +229,15 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
     $done        = 0;
 
     $q = DB::table('cash_receipts as r')
-        ->selectRaw("
-            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-            r.cr_no,
-            r.details,
-            r.collection_receipt,
-            r.receipt_amount,
-            COALESCE(c.cust_name, r.cust_id) as cust_name,
-            COALESCE(b.bank_name, r.bank_id) as bank_name
-        ")
+->selectRaw("
+    to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+    r.cr_no,
+    r.details,
+    r.collection_receipt,
+    r.receipt_amount,
+    COALESCE(c.cust_name, r.cust_id) as cust_name,
+    COALESCE(b.bank_account_number, r.bank_id) as bank_account_number
+")
         ->leftJoin('customer_list as c', function ($j) use ($cid) {
             $j->on('c.cust_id', '=', 'r.cust_id');
             if (Schema::hasColumn('customer_list', 'company_id')) {
@@ -286,7 +286,7 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
                    </tr>',
                   e($row->receipt_date ?? ''),
                   e($row->cr_no ?? ''),
-                  e($row->bank_name ?? ''),
+                  e($row->bank_account_number ?? ''),
                   e($row->cust_name ?? ''),
                   e($row->details ?? ''),
                   e($row->collection_receipt ?? ''),
@@ -356,7 +356,7 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
     $ws->setCellValue("A{$r}", 'RECEIPT REGISTER'); $r++;
     $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
 
-    $ws->fromArray(['Date','Receipt Voucher','Bank','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
+    $ws->fromArray(['Date','Receipt Voucher','Bank Account','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
     $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
     $r++;
 
@@ -370,15 +370,15 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
     $pageTotal = 0.0; $grandTotal = 0.0; $linesOnPage = 0; $done = 0;
 
     $q = DB::table('cash_receipts as r')
-        ->selectRaw("
-            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-            r.cr_no,
-            r.details,
-            r.collection_receipt,
-            r.receipt_amount,
-            COALESCE(c.cust_name, r.cust_id) as cust_name,
-            COALESCE(b.bank_name, r.bank_id) as bank_name
-        ")
+->selectRaw("
+    to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+    r.cr_no,
+    r.details,
+    r.collection_receipt,
+    r.receipt_amount,
+    COALESCE(c.cust_name, r.cust_id) as cust_name,
+    COALESCE(b.bank_account_number, r.bank_id) as bank_account_number
+")
         ->leftJoin('customer_list as c', function ($j) use ($cid) {
             $j->on('c.cust_id', '=', 'r.cust_id');
             if (Schema::hasColumn('customer_list', 'company_id')) {
@@ -418,7 +418,7 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
               $ws->fromArray([
                   $row->receipt_date ?? '',
                   $row->cr_no ?? '',
-                  $row->bank_name ?? '',
+                  $row->bank_account_number ?? '',
                   $row->cust_name ?? '', '',
                   $row->details ?? '', '',
                   $row->collection_receipt ?? '',
@@ -426,7 +426,7 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
               ], null, "A{$r}");
 
               // keep bank as string (avoid excel numeric mangling)
-              $ws->getCell("C{$r}")->setValueExplicit((string)($row->bank_name ?? ''), DataType::TYPE_STRING);
+              $ws->getCell("C{$r}")->setValueExplicit((string)($row->bank_account_number ?? ''), DataType::TYPE_STRING);
 
               $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
               $r++;
@@ -440,7 +440,7 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
                   $linesOnPage = 0;
                   $pageTotal   = 0.0;
 
-                  $ws->fromArray(['Date','Receipt Voucher','Bank','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
+                  $ws->fromArray(['Date','Receipt Voucher','Bank Account','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
                   $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
                   $r++;
               }

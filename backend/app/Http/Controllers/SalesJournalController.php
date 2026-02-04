@@ -141,6 +141,10 @@ public function updateMainNoApproval(Request $req)
     ]);
 
     $tx = CashSales::findOrFail($data['id']);
+// ✅ exported lock
+$this->requireNotExported((int)$tx->id, (int)$data['company_id']);
+
+
 if ((int)$tx->company_id !== (int)$data['company_id']) {
     abort(403, 'Company mismatch.');
 }
@@ -178,7 +182,11 @@ if ((int)$tx->company_id !== (int)$data['company_id']) {
         ]);
 
         // 🔐 Require supervisor approval, like General Accounting
-        $this->requireEditApproval((int) $data['id']);
+        //$this->requireEditApproval((int) $data['id']);
+
+// ✅ exported lock (company is from main row, so fetch then check)
+$mainCheck = CashSales::findOrFail((int)$data['id']);
+$this->requireNotExported((int)$mainCheck->id, (int)$mainCheck->company_id);
 
         $main = CashSales::findOrFail($data['id']);
         $main->cust_id     = $data['cust_id'];
@@ -209,6 +217,8 @@ if ((int)$tx->company_id !== (int)$data['company_id']) {
             'user_id'        => ['nullable','integer'],
             'workstation_id' => ['nullable','string','max:25'],
         ]);
+// ✅ exported lock
+$this->requireNotExported((int)$payload['transaction_id'], (int)$payload['company_id']);
 
         // allow only one of debit/credit positive
         $debit  = (float)($payload['debit'] ?? 0);
@@ -255,7 +265,10 @@ $exists = AccountCode::where('acct_code', $payload['acct_code'])
         ]);
 
         // *** NEW: require supervisor approval for editing details ***
-        $this->requireEditApproval((int) $payload['transaction_id']);
+        //$this->requireEditApproval((int) $payload['transaction_id']);
+// ✅ exported lock (company from main)
+$mainCheck = CashSales::findOrFail((int)$payload['transaction_id']);
+$this->requireNotExported((int)$payload['transaction_id'], (int)$mainCheck->company_id);
 
         $detail = CashSalesDetail::find($payload['id']);
         if (!$detail) return response()->json(['message' => 'Detail not found.'], 404);
@@ -314,7 +327,10 @@ if (array_key_exists('acct_code', $apply) && $apply['acct_code'] !== $detail->ac
         ]);
 
         // *** NEW: require supervisor approval for deleting a detail ***
-        $this->requireEditApproval((int) $payload['transaction_id']);
+        //$this->requireEditApproval((int) $payload['transaction_id']);
+// ✅ exported lock (company from main)
+$mainCheck = CashSales::findOrFail((int)$payload['transaction_id']);
+$this->requireNotExported((int)$payload['transaction_id'], (int)$mainCheck->company_id);
 
         CashSalesDetail::where('id',$payload['id'])->delete();
         $totals = $this->recalcTotals($payload['transaction_id']);
@@ -481,6 +497,7 @@ public function softDeleteMain(Request $req)
     public function formPdf(Request $request, $id)
     {
         $companyId = $request->query('company_id');
+$exportedBy = $request->query('user_id');
 
         // --- Header info (scoped by company)
         $header = DB::table('cash_sales as cs')
@@ -630,6 +647,9 @@ EOD;
 
         $pdf->writeHTML($tbl, true, false, false, false, '');
 
+// ✅ mark exported once (printing locks the transaction)
+$this->markExportedOnce((int)$id, (int)$companyId, $exportedBy ? (int)$exportedBy : null);
+
         // --- Stream PDF to browser
         $pdfContent = $pdf->Output('salesVoucher.pdf', 'S');
 
@@ -640,6 +660,7 @@ EOD;
 public function checkPdf(Request $request, $id)
 {
     $companyId = $request->query('company_id');
+$exportedBy = $request->query('user_id');
 
     // --- Header info (reuse pattern from formPdf) ---
     $header = DB::table('cash_sales as cs')
@@ -758,6 +779,10 @@ public function checkPdf(Request $request, $id)
     $pdf->MultiCell(160, 6, $amountWords, 0, 'L', false, 1);
 
     $fileName   = 'check_' . ($header->cs_no ?? $id) . '.pdf';
+
+// ✅ mark exported once (printing check locks the transaction)
+$this->markExportedOnce((int)$id, (int)$companyId, $exportedBy ? (int)$exportedBy : null);
+
     $pdfContent = $pdf->Output($fileName, 'S');
 
     return response($pdfContent, 200)
@@ -769,6 +794,7 @@ public function checkPdf(Request $request, $id)
     public function formExcel(Request $request, $id)
     {
         $companyId = $request->query('company_id');
+$exportedBy = $request->query('user_id');
 
         // Header (scoped)
         $header = DB::table('cash_sales as cs')
@@ -861,6 +887,10 @@ $details = DB::table('cash_sales_details as d')
         $writer->save('php://output');
         $xlsData = ob_get_clean();
 
+// ✅ mark exported once (download locks the transaction)
+$this->markExportedOnce((int)$id, (int)$companyId, $exportedBy ? (int)$exportedBy : null);
+
+
         $fileName = 'SalesVoucher_' . ($header->cs_no ?? $id) . '.xlsx';
 
         return response($xlsData, 200)
@@ -868,6 +898,41 @@ $details = DB::table('cash_sales_details as d')
             ->header('Content-Disposition', 'attachment; filename="'.$fileName.'"')
             ->header('Content-Length', (string)strlen($xlsData));
     }
+
+// =================== BEGIN ADD: exported lock helpers ===================
+protected function markExportedOnce(int $id, ?int $companyId, ?int $userId): void
+{
+    if (!$companyId) return;
+
+    // Do not overwrite exported_at/exported_by once set
+    DB::table('cash_sales')
+        ->where('id', $id)
+        ->where('company_id', (int)$companyId)
+        ->whereNull('exported_at')
+        ->update([
+            'exported_at' => now(),
+            'exported_by' => $userId,
+            'updated_at'  => now(),
+        ]);
+}
+
+protected function requireNotExported(int $transactionId, ?int $companyId): void
+{
+    if (!$companyId) return;
+
+    $row = DB::table('cash_sales')
+        ->where('id', $transactionId)
+        ->where('company_id', (int)$companyId)
+        ->first(['exported_at']);
+
+    if ($row && !empty($row->exported_at)) {
+        abort(403, 'This transaction is already EXPORTED and cannot be modified.');
+    }
+}
+// =================== END ADD: exported lock helpers ===================
+
+
+
 
     // ---- helpers ----
     protected function recalcTotals(int $transactionId): array

@@ -57,10 +57,12 @@ public function Header() {
           <td width="70%">
             <table border="1" cellpadding="5"><tr>
               <td><font size="8">Prepared:<br><br><br><br><br></font></td>
+              <td><font size="8">Acted by:<br><br><br><br><br></font></td>
               <td><font size="8">Checked:<br><br><br><br><br></font></td>
-              <td><font size="8">Noted by:<br><br><br><br><br></font></td>
-              <td><font size="8">Posted by:<br><br><br><br><br></font></td>
-            </tr></table>
+              <td><font size="8">Approved:<br><br><br><br><br></font></td>
+<td><font size="8">Noted by:<br><br><br><br><br></font></td>
+<td><font size="8">Posted by:<br><br><br><br><br></font></td>            
+              </tr></table>
           </td>
           <td width="5%"></td>
           <td width="25%">
@@ -170,8 +172,7 @@ $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
 $txId = (int) $payload['transaction_id'];
 $companyId = CashDisbursement::where('id', $txId)->value('company_id');
 
-$this->requireNotCancelled($txId);
-$this->requireApprovedEdit($txId, $companyId ? (int)$companyId : null);
+$this->requireDetailsEditable($txId, $companyId ? (int)$companyId : null);
 
         $debit  = (float)($payload['debit']  ?? 0);
         $credit = (float)($payload['credit'] ?? 0);
@@ -225,10 +226,15 @@ $exists = AccountCode::where('acct_code', $payload['acct_code'])
 $txId = (int) $payload['transaction_id'];
 $companyId = CashDisbursement::where('id', $txId)->value('company_id');
 
-$this->requireNotCancelled($txId);
-$this->requireApprovedEdit($txId, $companyId ? (int)$companyId : null);
+$this->requireDetailsEditable($txId, $companyId ? (int)$companyId : null);
 
-        $detail = CashDisbursementDetail::find($payload['id']);
+$detail = CashDisbursementDetail::where('id', (int)$payload['id'])
+    ->where('transaction_id', (int)$payload['transaction_id'])
+    ->first();
+
+if (!$detail) {
+    return response()->json(['message'=>'Detail not found for this transaction.'], 404);
+}
         if (!$detail) return response()->json(['message'=>'Detail not found.'], 404);
 
         $apply = [];
@@ -273,10 +279,15 @@ $exists = AccountCode::where('acct_code', $apply['acct_code'])
 $txId = (int) $payload['transaction_id'];
 $companyId = CashDisbursement::where('id', $txId)->value('company_id');
 
-$this->requireNotCancelled($txId);
-$this->requireApprovedEdit($txId, $companyId ? (int)$companyId : null);
+$this->requireDetailsEditable($txId, $companyId ? (int)$companyId : null);
 
-        $row = CashDisbursementDetail::find($payload['id']);
+$row = CashDisbursementDetail::where('id', (int)$payload['id'])
+    ->where('transaction_id', (int)$payload['transaction_id'])
+    ->first();
+
+if (!$row) {
+    return response()->json(['message'=>'Detail not found for this transaction.'], 404);
+}
         if ($row && ($row->workstation_id === 'BANK')) {
             return response()->json(['message'=>'Cannot delete the bank line.'], 422);
         }
@@ -301,8 +312,16 @@ public function show($id, Request $req)
 {
     $companyId = $req->query('company_id');
 
-    $main = CashDisbursement::when($companyId, fn($q)=>$q->where('company_id',$companyId))
-        ->findOrFail($id);
+    $main = CashDisbursement::select([
+        'id','cd_no','vend_id','disburse_date','disburse_amount','pay_method',
+        'bank_id','explanation','is_cancel','check_ref_no',
+        'amount_in_words','workstation_id','user_id','company_id',
+        'sum_debit','sum_credit','is_balanced',
+        'exported_at','exported_by',
+        'created_at','updated_at',
+    ])
+    ->when($companyId, fn($q)=>$q->where('company_id',$companyId))
+    ->findOrFail($id);
 
     $details = CashDisbursementDetail::from('cash_disbursement_details as d')
         ->where('d.transaction_id', $main->id)
@@ -339,6 +358,29 @@ public function list(Request $req)
              : (Schema::hasColumn('vendor_list', 'vend_code') ? 'vend_code' : null);
 
     $rows = DB::table('cash_disbursement as d')
+        // ✅ BANK amount for dropdown list (must show BANK row, not header disburse_amount)
+        // BANK row is identified by workstation_id = 'BANK' and amount is typically CREDIT.
+        // We join one row per transaction_id.
+        ->leftJoinSub(
+            DB::table('cash_disbursement_details')
+                ->selectRaw("
+                    transaction_id,
+                    MAX(
+                        CASE
+                            WHEN workstation_id = 'BANK'
+                            THEN COALESCE(NULLIF(credit, 0), debit, 0)
+                            ELSE NULL
+                        END
+                    ) as bank_amount
+                ")
+                ->groupBy('transaction_id'),
+            'bk',
+            function ($j) {
+                $j->on('bk.transaction_id', '=', 'd.id');
+            }
+        )
+
+
         ->when($companyId, fn ($qr) => $qr->where('d.company_id', $companyId))
 
         // Join vendor_list only if a usable key exists
@@ -356,23 +398,36 @@ public function list(Request $req)
         })
 
         // Free-text filter
+        // Free-text filter
         ->when($q !== '', function ($qr) use ($q, $vendKey) {
             $qr->where(function ($w) use ($q, $vendKey) {
                 $w->whereRaw('LOWER(d.cd_no) LIKE ?', ["%{$q}%"])
                   ->orWhereRaw('LOWER(d.vend_id) LIKE ?', ["%{$q}%"])
                   ->orWhereRaw('LOWER(d.check_ref_no) LIKE ?', ["%{$q}%"])
                   ->orWhereRaw('LOWER(d.bank_id) LIKE ?', ["%{$q}%"])
-                  ->orWhereRaw('LOWER(b.bank_name) LIKE ?', ["%{$q}%"]);
+                  ->orWhereRaw('LOWER(b.bank_name) LIKE ?', ["%{$q}%"])
+
+                  // ✅ amount searchable (supports typing 20000 to match 20000 or 20000.00)
+                  ->orWhereRaw('CAST(d.disburse_amount AS TEXT) LIKE ?', ["%{$q}%"]);
+
                 if ($vendKey) {
                     $w->orWhereRaw('LOWER(v.vend_name) LIKE ?', ["%{$q}%"]);
                 }
             });
         })
 
+        ->distinct()
         ->orderByDesc('d.cd_no')
         ->limit(50)
         ->get([
-            'd.id', 'd.cd_no', 'd.vend_id', 'd.disburse_date', 'd.disburse_amount',
+            'd.id', 'd.cd_no', 'd.vend_id', 'd.disburse_date',
+
+            // ✅ keep header total available (optional)
+            'd.disburse_amount',
+
+            // ✅ dropdown Amount should be bank_amount
+            DB::raw("COALESCE(bk.bank_amount, 0) as bank_amount"),
+
             'd.bank_id', 'd.check_ref_no', 'd.is_cancel',
             DB::raw($vendKey ? "COALESCE(v.vend_name,'') as vend_name" : "'' as vend_name"),
             DB::raw("COALESCE(b.bank_name,'') as bank_name"),
@@ -503,6 +558,172 @@ public function updateCancel(Request $req)
         return $words . $tail;
     }
 
+
+/**
+ * Print Check PDF (8" x 3" landscape) — amount is BANK row amount.
+ * Locks transaction by setting exported_at (mark once).
+ */
+public function checkPdf(Request $request, $id)
+{
+    $companyId  = $request->query('company_id');
+    $exportedBy = $request->query('user_id');
+
+    // vendor key runtime
+    $vendKey = Schema::hasColumn('vendor_list', 'vend_id')
+        ? 'vend_id'
+        : (Schema::hasColumn('vendor_list', 'vend_code') ? 'vend_code' : null);
+
+    $headerQ = DB::table('cash_disbursement as d');
+
+    if ($vendKey) {
+        $headerQ->leftJoin('vendor_list as v', function ($j) use ($vendKey, $companyId) {
+            $j->on('d.vend_id', '=', 'v.'.$vendKey);
+            if ($companyId) $j->where('v.company_id', '=', $companyId);
+        });
+    }
+
+    $header = $headerQ
+        ->select(
+            'd.id',
+            'd.cd_no',
+            'd.vend_id',
+            'd.is_cancel',
+            'd.check_ref_no',
+            DB::raw("d.disburse_date as raw_disburse_date"),
+            DB::raw($vendKey ? "COALESCE(v.vend_name,'') as vend_name" : "'' as vend_name"),
+            'd.amount_in_words'
+        )
+        ->where('d.id', $id)
+        ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+        ->first();
+
+    if (!$header || $header->is_cancel === 'y') {
+        abort(404, 'Cash Disbursement not found or cancelled');
+    }
+
+    // Ensure balanced (same guard behavior as Sales check)
+    $details = DB::table('cash_disbursement_details as x')
+        ->where('x.transaction_id', $id)
+        ->when($companyId, fn($q) => $q->where('x.company_id', $companyId))
+        ->get(['x.debit', 'x.credit']);
+
+    $totalDebit  = (float) $details->sum('debit');
+    $totalCredit = (float) $details->sum('credit');
+
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        $html = sprintf(
+            '<!doctype html><meta charset="utf-8">
+            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+            <h2>Cannot print Check</h2>
+            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing the check.</p>
+            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+            number_format($totalDebit, 2),
+            number_format($totalCredit, 2)
+        );
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    // ✅ Amount source: BANK row amount (prefer CREDIT, fallback DEBIT)
+    $bankRow = CashDisbursementDetail::where('transaction_id', (int) $id)
+        ->where('workstation_id', 'BANK')
+        ->first(['debit', 'credit']);
+
+    $bankAmount = 0.0;
+    if ($bankRow) {
+        $bankAmount = (float) (($bankRow->credit ?? 0) > 0 ? $bankRow->credit : ($bankRow->debit ?? 0));
+    }
+
+    // If BANK row missing/zero, fail clearly (check amount must be BANK amount)
+    if ($bankAmount <= 0) {
+        $html = '<!doctype html><meta charset="utf-8">
+            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+            <h2>Cannot print Check</h2>
+            <p>Bank (BANK row) amount is missing or zero. Please ensure the BANK line exists and has the correct amount.</p>';
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    $amountNumeric    = round($bankAmount, 2);
+    $amountNumericStr = number_format($amountNumeric, 2);
+
+    $amountWords = trim((string) ($header->amount_in_words ?? ''));
+    if ($amountWords === '') {
+        $amountWords = $this->pesoWords($amountNumeric);
+    }
+
+    $payeeName = (string) ($header->vend_name ?: $header->vend_id);
+
+    $date = $header->raw_disburse_date
+        ? \Carbon\Carbon::parse($header->raw_disburse_date)
+        : \Carbon\Carbon::now();
+
+    $mm   = $date->format('m');
+    $dd   = $date->format('d');
+    $yyyy = $date->format('Y');
+
+    // ✅ Same physical check size & layout style as Sales checkPdf
+    $checkWidthMm  = 8.0 * 25.4;   // 203.2 mm
+    $checkHeightMm = 3.0 * 25.4;   // 76.2 mm
+
+    $pdf = new \TCPDF('L', 'mm', [$checkWidthMm, $checkHeightMm], true, 'UTF-8', false);
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+    $pdf->SetMargins(5, 5, 5);
+    $pdf->SetAutoPageBreak(false, 0);
+
+    $pdf->AddPage();
+    $pdf->SetFont('helvetica', '', 9);
+
+    // 1) Date (MM  DD  YYYY)
+    $pdf->SetXY(140, 10);
+    $pdf->Cell(0, 5, $mm . '   ' . $dd . '   ' . $yyyy, 0, 1, 'L');
+
+    // 2) Payee
+    $pdf->SetXY(20, 25);
+    $pdf->Cell(120, 6, $payeeName, 0, 1, 'L');
+
+    // 3) Amount in figures
+    $pdf->SetXY(145, 25);
+    $pdf->Cell(50, 6, $amountNumericStr, 0, 1, 'R');
+
+    // 4) Amount in words
+    $pdf->SetXY(20, 35);
+    $pdf->MultiCell(160, 6, $amountWords, 0, 'L', false, 1);
+
+    $fileName = 'check_' . ($header->cd_no ?? $id) . '.pdf';
+
+    // ✅ lock transaction after successful check print
+    $this->markExportedOnce((int) $id, $companyId ? (int)$companyId : null, $exportedBy ? (int)$exportedBy : null);
+
+    $pdfContent = $pdf->Output($fileName, 'S');
+
+    return response($pdfContent, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="'.$fileName.'"');
+}
+
+/**
+ * Mark exported once (do not overwrite exported_at if already set).
+ */
+protected function markExportedOnce(int $id, ?int $companyId, ?int $userId): void
+{
+    $q = DB::table('cash_disbursement')
+        ->where('id', $id)
+        ->whereNull('exported_at');
+
+    if (!empty($companyId)) {
+        $q->where('company_id', $companyId);
+    }
+
+    $q->update([
+        'exported_at' => now(),
+        'exported_by' => $userId,
+    ]);
+}
+
+
+
+
+
     // === PDF ===
     public function formPdf(Request $req, $id)
     {
@@ -557,9 +778,34 @@ $details = DB::table('cash_disbursement_details as x')
         $totalDebit  = (float)$details->sum('debit');
         $totalCredit = (float)$details->sum('credit');
 
-        $dvAmount = (float)($header->disburse_amount ?? 0);
-        $amountInWords = $this->pesoWords($dvAmount);
-        $dvAmountFmt = number_format($dvAmount, 2);
+        //$dvAmount = (float)($header->disburse_amount ?? 0);
+        //$amountInWords = $this->pesoWords($dvAmount);
+        //$dvAmountFmt = number_format($dvAmount, 2);
+
+
+// --- Use BANK row amount for display (instead of header->disburse_amount) ---
+$bankRow = CashDisbursementDetail::where('transaction_id', (int) $id)
+    ->where('workstation_id', 'BANK')
+    ->first(['debit', 'credit']);
+
+// For Disbursement, BANK is typically CREDIT; fallback to DEBIT if needed.
+$bankAmount = 0.0;
+if ($bankRow) {
+    $bankAmount = (float) (($bankRow->credit ?? 0) > 0 ? $bankRow->credit : ($bankRow->debit ?? 0));
+}
+
+$bankAmountFmt = number_format($bankAmount, 2);
+
+// ✅ Replace "amount in words" display under PESOS with BANK amount (figure)
+$amountInWords = $this->pesoWords($bankAmount);
+
+// ✅ Replace AMOUNT (right of explanation) with BANK amount (figure)
+$dvAmountFmt = $bankAmountFmt;
+
+// Keep original header amount available if you still need it elsewhere
+$dvAmount = (float)($header->disburse_amount ?? 0);
+
+
 
         $pdf = new MyDisbursementVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
         $pdf->setPrintHeader(true);
@@ -586,30 +832,30 @@ $details = DB::table('cash_disbursement_details as x')
   <td width="10%"></td>
   <td width="20%"></td>
   <td width="20%"></td>
-  <td width="50%" colspan="2" align="left"><div><font size="16"><b>DISBURSEMENT VOUCHER</b></font></div></td>
+  <td width="50%" colspan="2" align="left"><div><font size="16"><b>CHECK VOUCHER</b></font></div></td>
 </tr>
 <tr><td colspan="5"></td></tr>
 <tr>
   <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left" valign="middle" height="30"><font size="14"><b>DV Number:</b></font></td>
+  <td width="31%" align="left" valign="middle" height="30"><font size="14"><b>CV Number:</b></font></td>
   <td width="14%" align="left"><font size="18"><b><u>{$dvNumber}</u></b></font></td>
 </tr>
 <tr>
   <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left"><font size="10"><b>Date:</b></font></td>
+  <td width="31%" align="left"><font size="10"><b>Check Date:</b></font></td>
   <td width="14%" align="left"><font size="10"><u>{$dvDateText}</u></font></td>
 </tr>
 <tr>
   <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left"><font size="12"><b>Check/Ref #:</b></font></td>
+  <td width="31%" align="left"><font size="12"><b>Check Number:</b></font></td>
   <td width="14%" align="left"><font size="12"><u>{$checkNo}</u></font></td>
 </tr>
 <tr>
-  <td width="15%"><font size="10"><b>PAYEE</b></font></td>
+  <td width="15%"><font size="10"><b>PAY TO</b></font></td>
   <td width="80%" colspan="4"><font size="14"><u>{$payee}</u></font></td>
 </tr>
 <tr>
-  <td width="15%"><font size="10"><b>AMOUNT:</b></font></td>
+  <td width="15%"><font size="10"><b>PESOS:</b></font></td>
   <td width="80%" colspan="4"><font size="10"><u>{$amountInWords}</u></font></td>
 </tr>
 </table>
@@ -676,6 +922,17 @@ EOD;
             return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
         }
 
+
+// ✅ Mark as exported ONLY when printing is allowed (balanced + not cancelled already checked)
+DB::table('cash_disbursement')
+    ->where('id', (int) $id)
+    ->update([
+        'exported_at' => now(),
+        'exported_by' => $header->user_id ?? null,
+    ]);
+
+
+
         $pdfContent = $pdf->Output('disbursementVoucher.pdf', 'S');
         return response($pdfContent, 200)
             ->header('Content-Type','application/pdf')
@@ -732,8 +989,57 @@ $details = DB::table('cash_disbursement_details as x')
 
     $totalDebit  = (float)$details->sum('debit');
     $totalCredit = (float)$details->sum('credit');
-    $dvAmount = (float)($header->disburse_amount ?? 0);
-    $amountInWords = $this->pesoWords($dvAmount);
+
+// ✅ Block Excel export when unbalanced (same rule as PDF)
+if (abs($totalDebit - $totalCredit) > 0.005) {
+    $html = sprintf(
+        '<!doctype html><meta charset="utf-8">
+        <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+        <h2>Cannot download Disbursement Voucher</h2>
+        <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before downloading.</p>
+        <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+        number_format($totalDebit, 2),
+        number_format($totalCredit, 2)
+    );
+    return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+}
+
+// ✅ Mark as exported ONLY when download is allowed
+DB::table('cash_disbursement')
+    ->where('id', (int) $id)
+    ->update([
+        'exported_at' => now(),
+        'exported_by' => $header->user_id ?? null,
+    ]);
+
+
+    //$dvAmount = (float)($header->disburse_amount ?? 0);
+    //$amountInWords = $this->pesoWords($dvAmount);
+
+// --- Use BANK row amount for display (instead of header->disburse_amount) ---
+$bankRow = CashDisbursementDetail::where('transaction_id', (int) $id)
+    ->where('workstation_id', 'BANK')
+    ->first(['debit', 'credit']);
+
+// For Disbursement, BANK is typically CREDIT; fallback to DEBIT if needed.
+$bankAmount = 0.0;
+if ($bankRow) {
+    $bankAmount = (float) (($bankRow->credit ?? 0) > 0 ? $bankRow->credit : ($bankRow->debit ?? 0));
+}
+
+$bankAmountFmt = number_format($bankAmount, 2);
+
+// ✅ Replace "amount in words" display under PESOS with BANK amount (figure)
+$amountInWords = $this->pesoWords($bankAmount);
+
+// ✅ Replace AMOUNT (right of explanation) with BANK amount (figure)
+$dvAmount = $bankAmountFmt;
+
+// Keep original header amount available if you still need it elsewhere
+$dvAmount = (float)($bankAmount ?? 0);
+
+
+
 
     $ss = new Spreadsheet();
     $sheet = $ss->getActiveSheet();
@@ -902,6 +1208,36 @@ if ($bankRow && $bankRow->acct_code !== $bankAcct->acct_code) {
 
 
 /**
+ * True if transaction was already exported (PDF/Excel).
+ * Spreadsheet lock trigger: exported_at is not null.
+ */
+protected function isExported(int $transactionId): bool
+{
+    return DB::table('cash_disbursement')
+        ->where('id', $transactionId)
+        ->whereNotNull('exported_at')
+        ->exists();
+}
+
+/**
+ * Spreadsheet (details) edit rule:
+ * - Always block if cancelled
+ * - If NOT exported yet => details can be edited WITHOUT approval
+ * - If exported already => requires ACTIVE approved edit window
+ */
+protected function requireDetailsEditable(int $transactionId, ?int $companyId = null): void
+{
+    $this->requireNotCancelled($transactionId);
+
+    if ($this->isExported($transactionId)) {
+        $this->requireApprovedEdit($transactionId, $companyId);
+    }
+}
+
+
+
+
+/**
  * Require that transaction is not cancelled.
  */
 protected function requireNotCancelled(int $transactionId): void
@@ -982,6 +1318,9 @@ public function updateMain(Request $req)
 
     // enforce rules
     $this->requireNotCancelled((int) $tx->id);
+
+
+
     $this->requireApprovedEdit((int) $tx->id, $companyId ? (int) $companyId : null);
 
     $oldBankId = (string) ($tx->bank_id ?? '');
@@ -1002,7 +1341,7 @@ public function updateMain(Request $req)
     // If bank changed, ensure BANK row acct_code aligns to new bank_id mapping
     if ($oldBankId !== (string) $data['bank_id']) {
 $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
-    ->where('company_id', (int) $data['company_id'])
+    ->where('company_id', (int) $companyId)
     ->where('active_flag', 1)
     ->first(['acct_code']);
 
@@ -1066,6 +1405,10 @@ public function updateMainNoApproval(Request $req)
     // ✅ use the SAME cancel guard your working updateMain uses
     // (If you only have requireNotCancelled(), keep that.)
     $this->requireNotCancelled((int) $tx->id);
+// ✅ Enforce new rule: once exported, edits require approval (even for header)
+if ($this->isExported((int) $tx->id)) {
+    abort(403, 'This transaction was already exported. Edit approval is required.');
+}
 
     $oldBankId = (string) ($tx->bank_id ?? '');
 
@@ -1085,7 +1428,7 @@ public function updateMainNoApproval(Request $req)
     // ✅ IMPORTANT: if bank changed, align the BANK row acct_code (same logic as updateMain)
     if ($oldBankId !== (string) $data['bank_id']) {
 $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
-    ->where('company_id', (int) $data['company_id'])
+    ->where('company_id', (int) $companyId)
     ->where('active_flag', 1)
     ->first(['acct_code']);
 

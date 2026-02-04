@@ -9,40 +9,48 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Validation\Rule;
 use Illuminate\Database\QueryException;
 
 class ReferenceAccountController extends Controller
 {
     /** List (paginated + search + filters) */
-public function index(Request $request): JsonResponse
-{
-    $perPage   = max(1, min((int)$request->input('per_page', 10), 100));
-    $q         = trim((string) ($request->query('q', $request->query('search', ''))));
-    $companyId = $this->resolveCompanyId($request);
+    public function index(Request $request): JsonResponse
+    {
+        $perPage   = max(1, min((int)$request->input('per_page', 10), 100));
+        $q         = trim((string) ($request->query('q', $request->query('search', ''))));
+        $companyId = $this->resolveCompanyId($request);
 
-    $query = AccountCode::query()
-        ->where('company_id', $companyId)
-        ->when($q !== '', function ($w) use ($q) {
-            $like = "%{$q}%";
-            $w->where(function ($x) use ($like) {
-                $x->where('acct_code', 'ILIKE', $like)
-                  ->orWhere('acct_desc', 'ILIKE', $like);
+        $query = AccountCode::query()
+            ->where('company_id', $companyId)
+            ->when($q !== '', function ($w) use ($q) {
+                $like = "%{$q}%";
+                $w->where(function ($x) use ($like) {
+                    $x->where('acct_code', 'ILIKE', $like)
+                      ->orWhere('acct_desc', 'ILIKE', $like)
+                      ->orWhere('main_acct', 'ILIKE', $like)
+                      ->orWhere('main_acct_code', 'ILIKE', $like)
+                      ->orWhere('acct_type', 'ILIKE', $like);
+                });
             });
-        });
 
-    // keep your optional filters
-    foreach (['fs','acct_group','acct_group_sub1','acct_group_sub2','normal_bal','acct_type'] as $f) {
-        $v = trim((string)$request->input($f, ''));
-        if ($v !== '') $query->where($f, $v);
+        // keep your optional filters
+        foreach (['fs','acct_group','acct_group_sub1','acct_group_sub2','normal_bal','acct_type'] as $f) {
+            $v = trim((string)$request->input($f, ''));
+            if ($v !== '') $query->where($f, $v);
+        }
+
+        // ✅ active_flag filter (expects 0 or 1)
+        if ($request->has('active_flag')) {
+            $af = $request->input('active_flag');
+            if ($af !== '' && $af !== null) {
+                $query->where('active_flag', (int)$af);
+            }
+        }
+
+        return response()->json(
+            $query->orderBy('acct_code')->paginate($perPage)
+        );
     }
-
-    return response()->json(
-        $query->orderBy('acct_code')->paginate($perPage)
-    );
-}
-
-
 
     /** Distinct meta for combos */
     public function meta(Request $request): JsonResponse
@@ -55,12 +63,12 @@ public function index(Request $request): JsonResponse
         };
 
         return response()->json([
-            'fs'            => $pluckDistinct('fs'),
-            'acct_group'    => $pluckDistinct('acct_group'),
+            'fs'             => $pluckDistinct('fs'),
+            'acct_group'     => $pluckDistinct('acct_group'),
             'acct_group_sub1'=> $pluckDistinct('acct_group_sub1'),
             'acct_group_sub2'=> $pluckDistinct('acct_group_sub2'),
-            'normal_bal'    => $pluckDistinct('normal_bal'),
-            'acct_type'     => $pluckDistinct('acct_type'),
+            'normal_bal'     => $pluckDistinct('normal_bal'),
+            'acct_type'      => $pluckDistinct('acct_type'),
         ]);
     }
 
@@ -104,20 +112,13 @@ public function index(Request $request): JsonResponse
             'normal_bal'     => ['nullable','string','max:50'],
             'acct_type'      => ['nullable','string','max:20'],
             'cash_disbursement_flag' => ['nullable','in:1,'],
-            'bank_id'        => ['nullable','string','max:15'], // or exists:banks,id if linked
+            'bank_id'        => ['nullable','string','max:15'],
             'vessel_flag'    => ['nullable','in:1,'],
             'booking_no'     => ['nullable','string','max:25'],
             'ap_ar'          => ['nullable','string','max:2'],
             'active_flag'    => ['nullable','integer','in:0,1'],
             'exclude'        => ['nullable','integer','in:0,1'],
         ]);
-
-        // Verify main account exists or accept free text? We’ll accept free text,
-        // but if you want strict linkage, uncomment the check:
-        // $exists = AccountMain::where('company_id',$companyId)
-        //   ->where('main_acct',$data['main_acct'])
-        //   ->where('main_acct_code',$data['main_acct_code'])->exists();
-        // if (!$exists) return response()->json(['message'=>'Invalid main account'], 422);
 
         $workstation = $request->header('X-Workstation-ID') ?? $request->ip() ?? gethostname();
         $userId = Auth::id() ?: null;
@@ -131,7 +132,7 @@ public function index(Request $request): JsonResponse
 
                 // acct_code: authoritative server-side generation (2-digit prefix + 2-digit suffix)
                 $prefix2 = substr($data['main_acct_code'], 0, 2);
-                // get current max suffix for prefix
+
                 $maxSuffix = AccountCode::query()
                     ->where('company_id', $companyId)
                     ->where('acct_code','LIKE',$prefix2.'__')
@@ -259,8 +260,6 @@ public function index(Request $request): JsonResponse
         $row->delete();
         return response()->json(['status'=>'success','message'=>'Account deleted']);
     }
-
-    /** account_main lookup list (with pagination + search) handled by another controller */
 
     // ------ helpers ------
     private function resolveCompanyId(Request $request): int

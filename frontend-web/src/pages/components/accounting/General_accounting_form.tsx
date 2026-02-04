@@ -49,7 +49,9 @@ type GaTxOption = {
   explanation?: string;
   sum_debit?: number;
   sum_credit?: number;
-  is_cancel?: 'y' | 'n';
+  is_cancel?: 'y' | 'n' | 'c' | 'd';
+  exported_at?: string | null;
+  exported_by?: number | null;
 };
 
 
@@ -75,7 +77,7 @@ export default function General_accounting_form() {
   const [_locked, setLocked] = useState(false);      // header lock
   const [gridLocked, setGridLocked] = useState(true);
   const [isCancelled, setIsCancelled] = useState(false);
-
+const [isExported, setIsExported] = useState(false);
   // dropdowns
   const [accounts, setAccounts] = useState<{ acct_code: string; acct_desc: string }[]>([]);
   const [txOptions, setTxOptions] = useState<GaTxOption[]>([]);
@@ -221,10 +223,12 @@ const refreshApprovalStatus = async (recordId: number | null) => {
       editWindowMinutes: null,
       reason: null,
     });
-    // default: lock loaded JEs until approval
-    setLocked(!!recordId);
-    setGridLocked(!!recordId);
-    return;
+// GA requirement: selecting a transaction should be editable immediately.
+// Approval status is still shown/usable, but it does NOT control locking.
+// Locking is controlled by Cancelled/Exported only.
+setLocked(false);
+setGridLocked(false);
+return;
   }
 
   try {
@@ -237,19 +241,20 @@ const refreshApprovalStatus = async (recordId: number | null) => {
       },
     });
 
-    if (!data?.exists) {
-      setApproval({
-        id: null,
-        status: null,
-        approvedActive: false,
-        expiresAt: null,
-        editWindowMinutes: null,
-        reason: null,
-      });
-      setLocked(true);
-      setGridLocked(true);
-      return;
-    }
+if (!data?.exists) {
+  setApproval({
+    id: null,
+    status: null,
+    approvedActive: false,
+    expiresAt: null,
+    editWindowMinutes: null,
+    reason: null,
+  });
+  // Do NOT lock based on missing approval
+  setLocked(false);
+  setGridLocked(false);
+  return;
+}
 
     setApproval({
       id: data.id ?? null,
@@ -260,10 +265,10 @@ const refreshApprovalStatus = async (recordId: number | null) => {
       reason: data.reason ?? null,
     });
 
-    // When approval is active → unlock header + grid
-    const canEdit = !!data.approved_active;
-    setLocked(!canEdit);
-    setGridLocked(!canEdit);
+// Approval status is informational (and used for Request to Edit / Save changes flow),
+// but does NOT control locking.
+setLocked(false);
+setGridLocked(false);
   } catch {
     // On error: stay locked
     setApproval({
@@ -360,6 +365,7 @@ const refreshApprovalStatus = async (recordId: number | null) => {
     setLocked(false);
     setGridLocked(false);
     setIsCancelled(false);
+    setIsExported(false);
     setHotEnabled(false);
     setTableData([emptyRow()]);
 
@@ -609,6 +615,7 @@ const handleCancelTxn = async () => {
     });
 
     setIsCancelled(false);
+    setIsExported(false);
 
     toast.success('Journal has been uncancelled.');
     fetchTransactions();
@@ -691,8 +698,8 @@ const handleDeleteTxn = async () => {
 
 
   // row validator: exactly one of debit/credit > 0 and acct_code present
-  const isRowValid = (r: GaDetailRow) =>
-    !!onlyCode(r.acct_code) && ((r.debit ?? 0) > 0) !== ((r.credit ?? 0) > 0);
+const isRowValid = (r: GaDetailRow) =>
+  !!onlyCode(r.acct_code) && (((r.debit ?? 0) > 0) || ((r.credit ?? 0) > 0));
 
   // save or update a line
   const handleAutoSave = async (row: GaDetailRow, rowIndex: number) => {
@@ -743,8 +750,9 @@ const handleDeleteTxn = async () => {
       setGenAcctDate(formatDateToYYYYMMDD(m.gen_acct_date));
       setExplanation(m.explanation ?? '');
       setIsCancelled(m.is_cancel === 'y' || m.is_cancel === 'c');
-
-
+setIsExported(!!m.exported_at);
+const exported = !!m.exported_at;
+setIsExported(exported);
       const details = (data.details || []).map((d: any) => ({
         id: d.id,
         acct_code: `${d.acct_code};${d.acct_desc || findDesc(d.acct_code)}`,
@@ -755,11 +763,20 @@ const handleDeleteTxn = async () => {
       }));
       setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
       setHotEnabled(true);
-      setLocked(true);
-      setGridLocked(true);
+// Editable immediately on select unless cancelled/exported
+const shouldLock = (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd') || !!m.exported_at;
+setLocked(shouldLock);
+setGridLocked(shouldLock);
 
       // 🔹 approval-aware locking (instead of always locking)
       await refreshApprovalStatus(m.id);
+
+// Enforce lock rules after approval refresh (approval should not override export/cancel lock)
+{
+  const shouldLock = (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd') || !!m.exported_at;
+  setLocked(shouldLock);
+  setGridLocked(shouldLock);
+}      
 
       await Promise.all([
         refreshApprovalForAction(m.id, 'cancel', setCancelApproval),
@@ -938,9 +955,14 @@ const handleOpenPdf = () => {
   if (!mainId) return toast.info('Select or save a journal first.');
   if (isCancelled) return toast.info('Cancelled journals cannot be printed.');
 
-  const url = `/api/ga/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}&_=${Date.now()}`;
+  const url = `/api/ga/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}&user_id=${encodeURIComponent(user?.id||'')}&_=${Date.now()}`;
   setPdfUrl(url);
   setShowPdf(true);
+// Lock immediately after print action (backend also enforces)
+setIsExported(true);
+setLocked(true);
+setGridLocked(true);
+
 };
 
 
@@ -955,7 +977,7 @@ const handleDownloadExcel = async () => {
   try {
     const res = await napi.get(`/ga/form-excel/${mainId}`, {
       responseType: 'blob',
-      params: { company_id: user?.company_id || '' },
+      params: { company_id: user?.company_id || '', user_id: user?.id || '' },
     });
 
     const ct = String(res.headers['content-type'] || '');
@@ -993,6 +1015,12 @@ const handleDownloadExcel = async () => {
     a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+// Lock immediately after download action (backend also enforces)
+setIsExported(true);
+setLocked(true);
+setGridLocked(true);
+
+
   } catch (e: any) {
     // If backend returned 422 with JSON, Axios still gives a Blob
     const blob = e?.response?.data;
@@ -1040,7 +1068,7 @@ return (
             <input
               type="date"
               value={genAcctDate}
-              disabled={isCancelled}
+              disabled={isCancelled || isExported}
               onChange={(e) => setGenAcctDate(e.target.value)}
               className="w-full border p-2 bg-green-100 text-green-900"
             />
@@ -1051,7 +1079,7 @@ return (
             <label className="block mb-1">Explanation</label>
             <input
               value={explanation}
-              disabled={isCancelled}
+              disabled={isCancelled || isExported}
               onChange={(e) => setExplanation(e.target.value)}
               className="w-full border p-2 bg-green-100 text-green-900"
             />
@@ -1072,6 +1100,7 @@ return (
               {totals.balanced ? 'Balanced' : 'Unbalanced'}
             </div>
             {isCancelled && <div className="px-2 py-0.5 rounded bg-amber-600 text-white">CANCELLED</div>}
+            {isExported && <div className="px-2 py-0.5 rounded bg-slate-700 text-white">EXPORTED</div>}
           </div>
         </div>
 
@@ -1106,7 +1135,7 @@ return (
               <button
                 type="button"
                 onClick={handleRequestEdit}
-                disabled={isApprovalPending}
+                disabled={isApprovalPending || isCancelled || isExported}
                 className={
                   'inline-flex items-center gap-2 px-4 py-2 rounded text-white ' +
                   (isApprovalPending
@@ -1213,7 +1242,7 @@ return (
                 strict: true,
                 allowInvalid: false,
                 visibleRows: 14,
-                readOnly: gridLocked || isCancelled,
+                readOnly: gridLocked || isCancelled || isExported,
                 renderer: (inst, td, row, col, prop, value, cellProps) => {
                   const display = onlyCode(String(value ?? ''));
                   Handsontable.renderers.TextRenderer(inst, td, row, col, prop, display, cellProps);
@@ -1271,7 +1300,7 @@ return (
                 'remove_row': {
                   name: '🗑️ Remove row',
                   callback: async (_key, selection) => {
-                    if (gridLocked || isCancelled) return;
+                    if (gridLocked || isCancelled || isExported) return;
                     const hot = hotRef.current?.hotInstance;
                     const rowIndex = selection[0].start.row;
                     const src = (hot?.getSourceData() as GaDetailRow[]) || [];

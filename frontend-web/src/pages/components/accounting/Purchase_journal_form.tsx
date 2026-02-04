@@ -62,6 +62,7 @@ export default function Purchase_journal_form() {
   const [bookingNo, setBookingNo] = useState('');
   const [_invoiceNo, setInvoiceNo] = useState('');
   const [mainId, setMainId] = useState<number | null>(null);
+  const [exportedAt, setExportedAt] = useState<string | null>(null);
 
   // ---- status flags (from backend) ----
   const [isCancelled, setIsCancelled] = useState(false);
@@ -91,6 +92,19 @@ export default function Purchase_journal_form() {
 
   const [_locked, setLocked] = useState(false);
   const [gridLocked, setGridLocked] = useState(true);
+// ✅ UI locking rule:
+// - if exported_at exists => LOCK unless there is an active edit approval window
+// - if NOT exported => UNLOCK (unless cancelled)
+// - cancelled => always locked
+const computeUiLock = (opts: {
+  cancelled: boolean;
+  exportedAt: string | null;
+  approvedActive: boolean;
+}) => {
+  if (opts.cancelled) return true;
+  if (!opts.exportedAt) return false;         // not exported => editable
+  return !opts.approvedActive;                // exported => lock unless approved
+};
 
   // dropdown data
   const [vendors, setVendors] = useState<DropdownItem[]>([]);
@@ -300,6 +314,8 @@ const t = window.setInterval(() => {
   const emptyRow = (): PurchaseDetailRow => ({ acct_code: '', acct_desc: '', debit: 0, credit: 0, persisted: false });
 
   const resetForm = () => {
+        setExportedAt(null);
+
     setSearchId(''); setTxSearch('');
     setCpNo(''); setVendorId(''); setVendorName('');
     setPurchaseDate(''); setCropYear(''); setSugarType(''); setMillCode('');
@@ -378,6 +394,8 @@ const t = window.setInterval(() => {
       });
 
       setMainId(res.data.id);
+            setExportedAt(null);
+
       setHotEnabled(true);
       setTableData([emptyRow(), emptyRow()]);
       toast.success('Main saved. You can now input details.');
@@ -516,33 +534,27 @@ const releaseEditApproval = async (recordId?: number) => {
   });
 };
 
-const refreshEditApproval = async (recordId?: number) => {
+const refreshEditApproval = async (recordId?: number, exportedAtOverride?: string | null) => {
   const rid = recordId ?? mainId ?? undefined;
   if (!rid) return;
 
+  const exp = (exportedAtOverride ?? exportedAt) ?? null;
+
   try {
     const { data } = await napi.get(APPROVAL_STATUS_URL, {
-
       params: {
         module: MODULE,
         record_id: rid,
-        company_id: companyIdParam, // number|null
+        company_id: companyIdParam,
         action: 'edit',
       },
     });
 
-    // if API says none exists, hard lock (view mode)
-    if (!data?.exists) {
-      setEditApproval({ exists: false });
-      setLocked(true);
-      setGridLocked(true);
-      return;
-    }
-
+    const exists = !!data?.exists;
     const active = !!data?.approved_active;
 
     setEditApproval({
-      exists: true,
+      exists,
       id: data?.id ? Number(data.id) : undefined,
       status: data?.status,
       approved_active: active,
@@ -550,15 +562,31 @@ const refreshEditApproval = async (recordId?: number) => {
       reason: data?.reason ?? null,
     });
 
-    // single source of truth
-    setLocked(!active);
-    setGridLocked(!active);
+    // ✅ apply the rule immediately
+    const shouldLock = computeUiLock({
+      cancelled: isCancelled,
+      exportedAt: exp,
+      approvedActive: active,
+    });
+
+    setLocked(shouldLock);
+    setGridLocked(shouldLock);
   } catch {
     setEditApproval({ exists: false });
-    setLocked(true);
-    setGridLocked(true);
+
+    // if exported => lock; if not exported => unlock (unless cancelled)
+    const shouldLock = computeUiLock({
+      cancelled: isCancelled,
+      exportedAt: exp,
+      approvedActive: false,
+    });
+
+    setLocked(shouldLock);
+    setGridLocked(shouldLock);
   }
 };
+
+
 
 
 const statusLower = (s?: string) => String(s || '').toLowerCase();
@@ -757,6 +785,8 @@ const loadPurchase = async (selectedId: string) => {
   const m = data.main ?? data;
   const cancelled = normalizeCancel(m.is_cancel);
   const balanced = normalizeBalanced(m.is_balanced);
+  const expAt = m.exported_at ? String(m.exported_at) : null;
+  setExportedAt(expAt);
 
   setIsCancelled(cancelled);
   setIsBalanced(balanced);
@@ -785,12 +815,31 @@ const loadPurchase = async (selectedId: string) => {
   setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
   setHotEnabled(true);
 
-  setLocked(true);
-  setGridLocked(true);
+  //setLocked(true);
+  //setGridLocked(true);
 
-  await refreshActionApproval('uncancel', m.id);
-await refreshActionApproval('delete', m.id);
-await refreshActionApproval('cancel', m.id);
+  //await refreshActionApproval('uncancel', m.id);
+//await refreshActionApproval('delete', m.id);
+//await refreshActionApproval('cancel', m.id);
+
+  // ✅ IMPORTANT: after selecting/loading, check if there is an ACTIVE edit window.
+  // If approved_active = true, refreshEditApproval will unlock header + grid automatically.
+  // ✅ Do NOT force-lock here.
+// Let refreshEditApproval apply the exact rules using exported_at.
+// ✅ immediate lock based on exported_at (no waiting)
+// will unlock later only if refreshEditApproval finds approved_active = true
+const immediateLock = computeUiLock({
+  cancelled,
+  exportedAt: expAt,
+  approvedActive: false,
+});
+setLocked(immediateLock);
+setGridLocked(immediateLock);
+
+
+await refreshEditApproval(m.id, expAt);
+
+
 
 };
 
@@ -817,6 +866,7 @@ const canExport = !!mainId && !isCancelled && !!isBalanced;
 const editStatus = String(editApproval?.status || '').toLowerCase();
 const isEditPending = !!mainId && !!editApproval?.exists && editStatus === 'pending';
 const isEditApprovedActive = !!mainId && !!editApproval?.approved_active; // edit window open
+//const isExportLocked = !!mainId && !!exportedAt; // ✅ lock after first print/download
 
 const uncancelStatus = statusLower(actionApproval.uncancel?.status);
 const isUncancelPending = !!mainId && !!actionApproval.uncancel?.exists && uncancelStatus === 'pending';
@@ -833,6 +883,22 @@ const isDeletePending = !!mainId && !!actionApproval.delete?.exists && deleteSta
     const url = `${apiBase}/purchase/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id || '')}`;
     setPdfUrl(url);
     setShowPdf(true);
+        // ✅ lock after export (backend sets exported_at when pdf endpoint is hit)
+// ✅ lock immediately (no delay)
+setLocked(true);
+setGridLocked(true);
+
+// ✅ then sync from server (exported_at gets set server-side)
+(async () => {
+  try {
+    if (isEditApprovedActive) {
+      try { await releaseEditApproval(mainId); } catch {}
+    }
+    await loadPurchase(String(mainId));
+  } catch {}
+})();
+
+
   };
 
   const handleDownloadExcel = async () => {
@@ -864,6 +930,18 @@ const isDeletePending = !!mainId && !!actionApproval.delete?.exists && deleteSta
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
       toast.success('Excel downloaded.');
+            // ✅ lock after export
+      if (isEditApprovedActive) {
+        try { await releaseEditApproval(mainId); } catch {}
+      }
+ setLocked(true);
+setGridLocked(true);
+     
+      
+      await loadPurchase(String(mainId));
+      setLocked(true);
+      setGridLocked(true);
+
     } catch (e: any) {
       const msg = e?.response?.status
         ? `HTTP ${e.response.status}: ${e.response.statusText || 'Error'}`
@@ -1046,7 +1124,7 @@ const isDeletePending = !!mainId && !!actionApproval.delete?.exists && deleteSta
 <input
   type="date"
   value={purchaseDate}
-  disabled={isCancelled}
+  disabled={isCancelled || _locked}
   onChange={(e) => setPurchaseDate(e.target.value)}
   className={`w-full border p-2 ${isCancelled ? 'bg-gray-100 text-gray-400' : 'bg-blue-100 text-blue-900'}`}
 />
@@ -1104,7 +1182,7 @@ const isDeletePending = !!mainId && !!actionApproval.delete?.exists && deleteSta
             <label className="block mb-1">Explanation</label>
 <input
   value={explanation}
-  disabled={isCancelled}
+  disabled={isCancelled || _locked}
   onChange={(e) => setExplanation(e.target.value)}
   className={`w-full border p-2 ${isCancelled ? 'bg-gray-100 text-gray-400' : 'bg-blue-100 text-blue-900'}`}
 />
@@ -1447,6 +1525,25 @@ const isDeletePending = !!mainId && !!actionApproval.delete?.exists && deleteSta
                   onClick={() => {
                     setPrintOpen(false);
                     if (!mainId) return toast.info('Select or save a transaction.');
+
+                    // ✅ lock after export (backend sets exported_at when check pdf endpoint is hit)
+                    
+// ✅ lock immediately (no delay)
+setLocked(true);
+setGridLocked(true);
+
+// ✅ then sync from server (exported_at gets set server-side)
+(async () => {
+  try {
+    if (isEditApprovedActive) {
+      try { await releaseEditApproval(mainId); } catch {}
+    }
+    await loadPurchase(String(mainId));
+  } catch {}
+})();
+
+
+
                     window.open(
                       `${apiBase}/purchase/check-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id || '')}`,
                       '_blank',

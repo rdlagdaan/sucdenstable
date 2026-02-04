@@ -92,6 +92,7 @@ type DisbursementListRow = {
   vend_name?: string;
   disburse_date: string;
   disburse_amount: number;
+  bank_amount?: number; // BANK row amount for dropdown list
   bank_id?: string;
   check_ref_no?: string;
   is_cancel?: 'y' | 'n';
@@ -127,6 +128,7 @@ export default function CashDisbursementForm() {
   const [_locked, setLocked] = useState(false);       // legacy (we will still set it)
   const [_gridLocked, setGridLocked] = useState(true); // grid lock (separate)
   const [isCancelled, setIsCancelled] = useState(false);
+const [isExported, setIsExported] = useState(false); // ✅ locks spreadsheet only after export
 
   const isSaved = useMemo(() => mainId != null, [mainId]);
 
@@ -154,7 +156,7 @@ export default function CashDisbursementForm() {
       cd_no: o.cd_no,
       vend_name: o.vend_name || '',
       disburse_date: (o.disburse_date || '').slice(0, 10),
-      disburse_amount: fmtMoney(Number(o.disburse_amount || 0)),
+      disburse_amount: fmtMoney(Number(o.bank_amount ?? o.disburse_amount ?? 0)),
       check_ref_no: o.check_ref_no || '',
       label: o.cd_no,
       description: o.vend_name || o.vend_id,
@@ -276,7 +278,13 @@ const refreshApprovals = useCallback(
   const totalDebit = useMemo(() => (tableData || []).reduce((a, r) => a + Number(r.debit || 0), 0), [tableData]);
   const totalCredit = useMemo(() => (tableData || []).reduce((a, r) => a + Number(r.credit || 0), 0), [tableData]);
 
-  const canEditNow = isSaved && !isCancelled && isEditApprovedActive;
+// ✅ Spreadsheet rule:
+// - Before export: editable (once saved) even without approval
+// - After export: locked unless edit approval is active
+const canEditNow =
+  isSaved &&
+  !isCancelled &&
+  (!isExported || isEditApprovedActive);
 
   // enforce locks whenever state changes
   useEffect(() => {
@@ -489,6 +497,16 @@ const handleSaveMainNoApproval = async () => {
       });
       const m = data.main ?? data;
 
+      // ✅ BANK amount helper (frontend display must be BANK row only)
+      const bankAmountFromDetails = (rows: any[]) => {
+        const bank = (rows || []).find((r: any) => String(r.workstation_id || '').toUpperCase() === 'BANK');
+        if (!bank) return 0;
+        const credit = Number(bank.credit ?? 0);
+        const debit = Number(bank.debit ?? 0);
+        return credit > 0 ? credit : debit;
+      };
+
+
       setMainId(m.id);
       setCdNo(m.cd_no || '');
       setVendId(String(m.vend_id || ''));
@@ -496,14 +514,20 @@ const handleSaveMainNoApproval = async () => {
       setVendName(sel?.description || '');
 
       setDisburseDate((m.disburse_date || '').slice(0, 10));
-      setDisburseAmount(Number(m.disburse_amount || 0));
+
+      // ✅ Amount must be BANK row amount (not header disburse_amount which is sum_debit)
+      const bankAmt = bankAmountFromDetails(data.details || []);
+      setDisburseAmount(bankAmt);
+
       setBankId(String(m.bank_id || ''));
       setPayMethodId(String(m.pay_method || ''));
       setCheckRefNo(m.check_ref_no || '');
       setExplanation(m.explanation || '');
       setIsCancelled((m.is_cancel || m.is_cancelled) === 'y');
+setIsExported(!!m.exported_at);
 
       const details = (data.details || []).map((d: any) => {
+        
         const code = String(d.acct_code ?? '');
         const desc = findDesc(code) || String(d.acct_desc ?? '');
         ensureAccountInSource(code, desc);
@@ -520,6 +544,9 @@ const handleSaveMainNoApproval = async () => {
 
       setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
 
+      // ✅ Re-apply BANK amount after details are loaded/mapped (single source of truth)
+      const bankAmt2 = bankAmountFromDetails(data.details || []);
+      setDisburseAmount(bankAmt2);      
       // lock by default until approvals say otherwise
       setLocked(true);
       setGridLocked(true);
@@ -677,17 +704,11 @@ const handleSaveMainNoApproval = async () => {
   const isRowValid = (r: DetailRow) =>
     !!onlyCode(r.acct_code) && ((r.debit ?? 0) > 0) !== ((r.credit ?? 0) > 0);
 
-  const refreshHeaderTotals = (totals?: Totals) => {
-    if (!totals) return;
-    // Amount box shows total DEBIT (disbursement)
-    setDisburseAmount(
-      Number(
-        totals.sum_debit ??
-        totals.total_debit ??
-        totals.debit ??
-        0
-      )
-    );
+  const refreshHeaderTotals = (_totals?: Totals) => {
+    // ✅ IMPORTANT:
+    // Amount + Amount in Words must reflect BANK row amount, NOT header totals.
+    // We will set Amount from the BANK row during loadDisbursement() (single source of truth).
+    return;
   };
 
   /*const deleteDetail = async (payload: any) => {
@@ -785,7 +806,29 @@ const handleSaveMainNoApproval = async () => {
     const url = `/api/cash-disbursement/form-pdf/${mainId}?company_id=${encodeURIComponent(companyId || '')}`;
     setPdfUrl(url);
     setShowPdf(true);
+
+    // ✅ Immediately apply lock rule client-side (server will set exported_at during PDF generation)
+    setIsExported(true);
+
   };
+
+  const handleOpenCheckPdf = () => {
+    if (!mainId) return toast.info('Save or select a disbursement first.');
+    if (!canExport) return toast.info('Cannot print: transaction is cancelled or unbalanced.');
+
+    const url =
+      `/api/cash-disbursement/check-pdf/${mainId}` +
+      `?company_id=${encodeURIComponent(companyId || '')}` +
+      `&user_id=${encodeURIComponent(String(user?.id || ''))}`;
+
+    setPdfUrl(url);
+    setShowPdf(true);
+
+    // ✅ Immediately apply lock rule client-side (server marks exported_at during check pdf)
+    setIsExported(true);
+  };
+
+
 
   const handleDownloadExcel = async () => {
     if (!mainId) return toast.info('Save or select a disbursement first.');
@@ -799,6 +842,9 @@ const handleSaveMainNoApproval = async () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      // ✅ Apply lock rule after successful download trigger
+    setIsExported(true);
+
   };
 
   /* ---------------- UI ---------------- */
@@ -811,7 +857,7 @@ const handleSaveMainNoApproval = async () => {
 
   const approvalStrip = (
     <div className="flex flex-wrap items-center gap-4 text-sm font-semibold text-gray-700">
-      <div>DV No: <span className="text-gray-900">{cdNo || '-'}</span></div>
+      <div>CV No: <span className="text-gray-900">{cdNo || '-'}</span></div>
       <div>Total Debit: <span className="text-gray-900">{fmtMoney(totalDebit)}</span></div>
       <div>Total Credit: <span className="text-gray-900">{fmtMoney(totalCredit)}</span></div>
       <div>{balancedPill}</div>
@@ -929,10 +975,12 @@ const handleSaveMainNoApproval = async () => {
               items={txDropdownItems}
               search={txSearch}
               onSearchChange={setTxSearch}
-              headers={['ID', 'DV #', 'Vendor', 'Date', 'Amount', 'Check/Ref #']}
+              headers={['ID', 'CV #', 'Vendor', 'Date', 'Amount', 'Check/Ref #']}
               columnWidths={['60px', '90px', '250px', '110px', '110px', '110px']}
               dropdownPositionStyle={{ width: '750px' }}
               inputClassName="p-2 text-sm bg-white"
+              searchInputClassName="bg-yellow-100 border-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+
             />
           </div>
 
@@ -953,6 +1001,8 @@ const handleSaveMainNoApproval = async () => {
               columnWidths={['140px', '520px']}
               dropdownPositionStyle={{ width: '700px' }}
               inputClassName="p-2 text-sm bg-white"
+              searchInputClassName="bg-yellow-100 border-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+
               // lock vendor unless edit approved
               // (when not saved yet, allow selection)
             />
@@ -983,6 +1033,8 @@ const handleSaveMainNoApproval = async () => {
               columnWidths={['100px', '350px']}
               dropdownPositionStyle={{ width: '500px' }}
               inputClassName="p-2 text-sm bg-white"
+              searchInputClassName="bg-yellow-100 border-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+
             />
           </div>
 
@@ -999,6 +1051,8 @@ const handleSaveMainNoApproval = async () => {
               columnWidths={['80px', '200px']}
               dropdownPositionStyle={{ width: '280px' }}
               inputClassName="p-2 text-sm bg-white"
+              searchInputClassName="bg-yellow-100 border-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+
             />
           </div>
 
@@ -1312,6 +1366,19 @@ remove_row: {
           {canExport && printOpen && (
             <div className="absolute left-0 top-full z-50">
               <div className="mt-1 w-64 rounded-md border bg-white shadow-lg py-1">
+                
+                <button
+                  type="button"
+                  onClick={handleOpenCheckPdf}
+                  className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
+                >
+                  <DocumentTextIcon className="h-5 w-5 text-red-600" />
+                  <span className="truncate">Check – PDF</span>
+                  <span className="ml-auto text-[10px] font-semibold text-red-600">PDF</span>
+                </button>
+                
+                
+                
                 <button
                   type="button"
                   onClick={handleOpenPdf}

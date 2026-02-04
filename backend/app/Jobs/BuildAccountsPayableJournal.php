@@ -197,29 +197,42 @@ private function buildPdf(string $file, callable $progress): void
             $this->Cell(0, 4, $addr1, 0, 1, 'R');
             $this->Cell(0, 4, $addr2, 0, 1, 'R');
 
+            // Divider line under company block
             $y = $this->GetY() + 3;
             $this->Line(10, $y, 206, $y);
 
+            // Report title
             $this->SetY($y + 6);
             $this->SetFont('helvetica', 'B', 16);
             $this->Cell(0, 7, 'PURCHASE JOURNAL', 0, 1, 'L');
 
-            $this->SetFont('helvetica', 'B', 11);
-            $this->Cell(0, 6, "For the period covering {$this->from} -- {$this->to}", 0, 1, 'L');
+            /**
+             * ✅ FIX: Put "For the period covering..." AND Debit/Credit on the SAME LINE
+             */
+            $yPeriod = $this->GetY(); // current line Y after title
 
-            $y2 = $this->GetY() + 2;
+            // Left side: period covering
+            $this->SetFont('helvetica', 'B', 11);
+            $this->SetXY(10, $yPeriod);
+            // 140mm left column, leaving room for debit/credit on the right
+            $this->Cell(140, 6, "For the period covering {$this->from} -- {$this->to}", 0, 0, 'L');
+
+            // Right side: Debit / Credit aligned with the SAME Y
+            $this->SetFont('helvetica', 'B', 10);
+            $this->SetXY(150, $yPeriod);
+            $this->Cell(28, 6, 'Debit', 0, 0, 'R');
+            $this->Cell(28, 6, 'Credit', 0, 0, 'R');
+
+            // Move down AFTER the shared line
+            $this->Ln(8);
+
+            // Divider line under the period+debit/credit line
+            $y2 = $this->GetY();
             $this->Line(10, $y2, 206, $y2);
 
-            $this->SetY($y2 + 4);
-            $this->SetFont('helvetica', 'B', 10);
-
-            // Debit/Credit labels (right aligned)
-            $this->SetX(150);
-            $this->Cell(28, 5, 'Debit', 0, 0, 'R');
-            $this->Cell(28, 5, 'Credit', 0, 1, 'R');
-
-            $this->SetFont('helvetica', '', 7);
+            // Body font
             $this->Ln(2);
+            $this->SetFont('helvetica', '', 7);
         }
 
         public function Footer()
@@ -300,9 +313,7 @@ private function buildPdf(string $file, callable $progress): void
             $j->on('b.acct_code', '=', 'r.bank_id')
               ->where('b.company_id', '=', $cid);
         })
-        // ✅ Vendor join MUST be its own join (NOT inside another join closure)
         ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
-            // match like your working SQL: upper(trim(v.vend_code)) = upper(trim(r.vend_id))
             $j->on(DB::raw('upper(trim(v.vend_code))'), '=', DB::raw('upper(trim(r.vend_id))'));
             if ($vendHasCompany) {
                 $j->where('v.company_id', '=', $cid);
@@ -345,7 +356,6 @@ private function buildPdf(string $file, callable $progress): void
 
                 $lines = json_decode($row->lines, true) ?: [];
 
-                // ✅ Vendor name now comes from COALESCE(v.vend_name, r.vend_id)
                 $descLine = trim(implode(' - ', array_filter([
                     $row->rr_no,
                     $row->vend_name,
