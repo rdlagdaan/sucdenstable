@@ -269,6 +269,8 @@ $this->SetFont('helvetica', '', 8);
         $pdf->AddPage('P', 'LETTER');
 
         $done = 0;
+$grandDebit  = 0.0;
+$grandCredit = 0.0;
 
         DB::table('cash_disbursement as r')
             ->selectRaw("
@@ -305,7 +307,7 @@ $this->SetFont('helvetica', '', 8);
             ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
             ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name','r.vend_id','r.bank_id')
             ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$done, $progress, $pdf) {
+            ->chunk(200, function($chunk) use (&$done, &$grandDebit, &$grandCredit, $progress, $pdf) {
                 foreach ($chunk as $row) {
                     $done++;
                     $progress($done);
@@ -353,6 +355,10 @@ HTML;
                         $itemDebit  += $debit;
                         $itemCredit += $credit;
 
+// accumulate journal totals
+$grandDebit  += $debit;
+$grandCredit += $credit;
+
                         $rowsHtml .= sprintf(
                             '<tr>
                                <td width="18%%">&nbsp;&nbsp;&nbsp;%s</td>
@@ -385,6 +391,24 @@ HTML;
                     $pdf->writeHTML($rowsHtml, true, false, false, false, '');
                 }
             });
+// ================= GRAND TOTAL =================
+$grandHtml = sprintf(
+    '<table width="100%%" cellspacing="0" cellpadding="2">
+        <tr>
+            <td width="18%%"></td>
+            <td width="52%%" align="right"><b>GRAND&nbsp;TOTAL</b></td>
+            <td width="15%%" align="right"><b>%s</b></td>
+            <td width="15%%" align="right"><b>%s</b></td>
+        </tr>
+        <tr><td colspan="4"><hr/></td></tr>
+    </table>',
+    number_format($grandDebit, 2),
+    number_format($grandCredit, 2)
+);
+
+
+$pdf->writeHTML($grandHtml, true, false, false, false, '');
+
 
         Storage::disk('local')->put($file, $pdf->Output('cash-disbursements.pdf', 'S'));
     }
@@ -419,6 +443,8 @@ HTML;
         foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(18);
 
         $done = 0;
+$grandDebit  = 0.0;
+$grandCredit = 0.0;
 
         DB::table('cash_disbursement as r')
             ->selectRaw("
@@ -455,7 +481,7 @@ HTML;
             ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
             ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name','r.vend_id','r.bank_id')
             ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
+            ->chunk(200, function($chunk) use (&$r, $ws, &$done, &$grandDebit, &$grandCredit, $progress) {
                 foreach ($chunk as $row) {
                     $done++;
                     $progress($done);
@@ -481,6 +507,9 @@ HTML;
                         $itemDebit  += $debit;
                         $itemCredit += $credit;
 
+$grandDebit  += $debit;
+$grandCredit += $credit;
+
                         $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
                         $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
                         $ws->setCellValue("F{$r}", $debit);
@@ -496,6 +525,17 @@ HTML;
                     $r += 2;
                 }
             });
+
+// ================= GRAND TOTAL =================
+$ws->setCellValue("E{$r}", 'GRAND TOTAL');
+$ws->setCellValue("F{$r}", $grandDebit);
+$ws->setCellValue("G{$r}", $grandCredit);
+
+$ws->getStyle("E{$r}")->getFont()->setBold(true);
+$ws->getStyle("F{$r}:G{$r}")->getFont()->setBold(true);
+$ws->getStyle("F{$r}:G{$r}")
+    ->getNumberFormat()
+    ->setFormatCode('#,##0.00');
 
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
         $stream = fopen('php://temp', 'r+');

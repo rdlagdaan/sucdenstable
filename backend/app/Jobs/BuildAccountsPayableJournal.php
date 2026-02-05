@@ -272,6 +272,8 @@ private function buildPdf(string $file, callable $progress): void
     $pdf->AddPage('P', 'LETTER');
 
     $done = 0;
+$grandDebit  = 0.0;
+$grandCredit = 0.0;
 
     DB::table('cash_purchase as r')
         ->selectRaw("
@@ -345,7 +347,7 @@ private function buildPdf(string $file, callable $progress): void
             'r.vend_id'
         )
         ->orderBy('r.id')
-        ->chunk(200, function ($chunk) use (&$done, $progress, $pdf) {
+        ->chunk(200, function ($chunk) use (&$done, $progress, $pdf, &$grandDebit, &$grandCredit) {
             foreach ($chunk as $row) {
                 $done++;
                 $progress($done);
@@ -388,6 +390,8 @@ private function buildPdf(string $file, callable $progress): void
 
                     $td += $debit;
                     $tc += $credit;
+$grandDebit  += $debit;
+$grandCredit += $credit;
 
                     $rowsHtml .= sprintf(
                         '<tr>
@@ -427,6 +431,21 @@ private function buildPdf(string $file, callable $progress): void
                 $pdf->writeHTML($rowsHtml, true, false, false, false, '');
             }
         });
+$grandHtml = sprintf(
+    '<table width="100%%" cellspacing="0" cellpadding="2">
+        <tr>
+            <td width="15%%"></td>
+            <td width="55%%" align="right"><b>GRAND&nbsp;TOTAL</b></td>
+            <td width="15%%" align="right"><b>%s</b></td>
+            <td width="15%%" align="right"><b>%s</b></td>
+        </tr>
+        <tr><td colspan="4"><hr/></td></tr>
+    </table>',
+    number_format($grandDebit, 2),
+    number_format($grandCredit, 2)
+);
+
+$pdf->writeHTML($grandHtml, true, false, false, false, '');
 
     Storage::disk('local')->put($file, $pdf->Output('accounts-payable.pdf', 'S'));
 }
@@ -463,6 +482,8 @@ private function buildExcel(string $file, callable $progress): void
     }
 
     $done = 0;
+$grandDebit  = 0.0;
+$grandCredit = 0.0;
 
     DB::table('cash_purchase as r')
         ->selectRaw("
@@ -536,7 +557,7 @@ private function buildExcel(string $file, callable $progress): void
             'r.vend_id'
         )
         ->orderBy('r.id')
-        ->chunk(200, function ($chunk) use (&$r, $ws, &$done, $progress) {
+        ->chunk(200, function ($chunk) use (&$r, $ws, &$done, $progress, &$grandDebit, &$grandCredit) {
             foreach ($chunk as $row) {
                 $done++;
                 $progress($done);
@@ -568,6 +589,8 @@ private function buildExcel(string $file, callable $progress): void
 
                     $itemTotalDebit  += $debit;
                     $itemTotalCredit += $credit;
+$grandDebit  += $debit;
+$grandCredit += $credit;
 
                     $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
                     $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
@@ -589,6 +612,15 @@ private function buildExcel(string $file, callable $progress): void
                 $r += 2;
             }
         });
+$ws->setCellValue("E{$r}", 'GRAND TOTAL');
+$ws->setCellValue("F{$r}", $grandDebit);
+$ws->setCellValue("G{$r}", $grandCredit);
+
+$ws->getStyle("E{$r}")->getFont()->setBold(true);
+$ws->getStyle("F{$r}:G{$r}")->getFont()->setBold(true);
+$ws->getStyle("F{$r}:G{$r}")
+    ->getNumberFormat()
+    ->setFormatCode('#,##0.00');
 
     $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
     $stream = fopen('php://temp', 'r+');

@@ -251,6 +251,9 @@ public function Header()
 
         $done = 0;
         $lineCount = 0;
+$grandDebit  = 0.0;
+$grandCredit = 0.0;
+
 
         DB::table('cash_receipts as r')
             ->selectRaw("
@@ -282,7 +285,7 @@ public function Header()
             ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
             ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
             ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount) {
+            ->chunk(200, function($chunk) use (&$done, $progress, $pdf, &$lineCount, &$grandDebit, &$grandCredit) {
                 foreach ($chunk as $row) {
                     $crbId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
@@ -302,6 +305,8 @@ HTML;
                     foreach ((json_decode($row->lines, true) ?: []) as $ln) {
                         $itemDebit  += (float)($ln['debit'] ?? 0);
                         $itemCredit += (float)($ln['credit'] ?? 0);
+$grandDebit  += (float)($ln['debit'] ?? 0);
+$grandCredit += (float)($ln['credit'] ?? 0);
 
                         $rowsHtml .= sprintf(
                             '<tr>
@@ -344,6 +349,23 @@ HTML;
                 }
             });
 
+$grandHtml = sprintf(
+    '<table width="100%%" cellspacing="0" cellpadding="2">
+        <tr>
+            <td width="18%%"></td>
+            <td width="52%%" align="right"><b>GRAND&nbsp;TOTAL</b></td>
+            <td width="15%%" align="right"><b>%s</b></td>
+            <td width="15%%" align="right"><b>%s</b></td>
+        </tr>
+        <tr><td colspan="4"><hr/></td></tr>
+    </table>',
+    number_format($grandDebit, 2),
+    number_format($grandCredit, 2)
+);
+
+$pdf->writeHTML($grandHtml, true, false, false, false, '');
+
+
         Storage::disk('local')->put($file, $pdf->Output('cash-receipts.pdf', 'S'));
     }
 
@@ -374,6 +396,8 @@ HTML;
         foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(18);
 
         $done = 0;
+$grandDebit  = 0.0;
+$grandCredit = 0.0;
 
         DB::table('cash_receipts as r')
             ->selectRaw("
@@ -405,7 +429,7 @@ HTML;
             ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
             ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
             ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
+            ->chunk(200, function($chunk) use (&$r, $ws, &$done, &$grandDebit, &$grandCredit, $progress) {
                 foreach ($chunk as $row) {
                     $crbId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
@@ -432,6 +456,10 @@ HTML;
                         $itemDebit  += $debit;
                         $itemCredit += $credit;
                         $r++;
+
+$grandDebit  += $debit;
+$grandCredit += $credit;
+
                     }
 
                     $ws->setCellValue("E{$r}", 'TOTAL');
@@ -443,6 +471,16 @@ HTML;
                     $done++; $progress($done);
                 }
             });
+$ws->setCellValue("E{$r}", 'GRAND TOTAL');
+$ws->setCellValue("F{$r}", $grandDebit);
+$ws->setCellValue("G{$r}", $grandCredit);
+
+$ws->getStyle("E{$r}")->getFont()->setBold(true);
+$ws->getStyle("F{$r}:G{$r}")->getFont()->setBold(true);
+$ws->getStyle("F{$r}:G{$r}")
+    ->getNumberFormat()
+    ->setFormatCode('#,##0.00');
+
 
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
         $stream = fopen('php://temp', 'r+');

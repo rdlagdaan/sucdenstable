@@ -312,11 +312,13 @@ class BuildAccountsReceivableJournal implements ShouldQueue
         $pdf->AddPage();
 
         $done = 0;
+$grandDebit  = 0.0;
+$grandCredit = 0.0;
 
         $this->applyFilters($this->baseQuery())
             ->groupBy('r.id', 'r.sales_date', 'r.cs_no', 'r.si_no', 'r.cust_id', 'r.booking_no', 'r.explanation', 'b.acct_desc')
             ->orderBy('r.id')
-            ->chunk(200, function ($chunk) use (&$done, $progress, $pdf) {
+            ->chunk(200, function ($chunk) use (&$done, $progress, $pdf, &$grandDebit, &$grandCredit) {
 
                 foreach ($chunk as $row) {
 
@@ -349,6 +351,8 @@ HTML;
                     foreach ((json_decode($row->lines, true) ?: []) as $ln) {
                         $itemDebit  += (float)($ln['debit'] ?? 0);
                         $itemCredit += (float)($ln['credit'] ?? 0);
+$grandDebit  += (float)($ln['debit'] ?? 0);
+$grandCredit += (float)($ln['credit'] ?? 0);
 
                         $rowsHtml .= sprintf(
                             '<tr>
@@ -390,6 +394,21 @@ HTML;
                     $progress($done);
                 }
             });
+$grandHtml = sprintf(
+    '<table width="100%%" cellspacing="0" cellpadding="2">
+        <tr>
+            <td width="15%%"></td>
+            <td width="55%%" align="right"><b>GRAND&nbsp;TOTAL</b></td>
+            <td width="15%%" align="right"><b>%s</b></td>
+            <td width="15%%" align="right"><b>%s</b></td>
+        </tr>
+        <tr><td colspan="4"><hr/></td></tr>
+    </table>',
+    number_format($grandDebit, 2),
+    number_format($grandCredit, 2)
+);
+
+$pdf->writeHTML($grandHtml, true, false, false, false, '');
 
         Storage::disk('local')->put($file, $pdf->Output('accounts-receivable.pdf', 'S'));
     }
@@ -414,10 +433,13 @@ HTML;
         foreach (range('A', 'G') as $col) $ws->getColumnDimension($col)->setWidth(15);
 
         $done = 0;
+$grandDebit  = 0.0;
+$grandCredit = 0.0;
+
         $this->applyFilters($this->baseQuery())
             ->groupBy('r.id', 'r.sales_date', 'r.cs_no', 'r.si_no', 'r.cust_id', 'r.booking_no', 'r.explanation', 'b.acct_desc')
             ->orderBy('r.id')
-            ->chunk(200, function ($chunk) use (&$r, $ws, &$done, $progress) {
+            ->chunk(200, function ($chunk) use (&$r, $ws, &$done, $progress, &$grandDebit, &$grandCredit) {
                 foreach ($chunk as $row) {
                     $docId = 'ARCR-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
@@ -442,6 +464,8 @@ HTML;
 
                         $itemDebit  += (float)($ln['debit'] ?? 0);
                         $itemCredit += (float)($ln['credit'] ?? 0);
+$grandDebit  += (float)($ln['debit'] ?? 0);
+$grandCredit += (float)($ln['credit'] ?? 0);
 
                         $r++;
                     }
@@ -455,6 +479,15 @@ HTML;
                     $done++; $progress($done);
                 }
             });
+$ws->setCellValue("E{$r}", 'GRAND TOTAL');
+$ws->setCellValue("F{$r}", $grandDebit);
+$ws->setCellValue("G{$r}", $grandCredit);
+
+$ws->getStyle("E{$r}")->getFont()->setBold(true);
+$ws->getStyle("F{$r}:G{$r}")->getFont()->setBold(true);
+$ws->getStyle("F{$r}:G{$r}")
+    ->getNumberFormat()
+    ->setFormatCode('#,##0.00');
 
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
         $stream = fopen('php://temp', 'r+');
