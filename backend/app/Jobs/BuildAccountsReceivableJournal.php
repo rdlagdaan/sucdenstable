@@ -413,91 +413,128 @@ $pdf->writeHTML($grandHtml, true, false, false, false, '');
         Storage::disk('local')->put($file, $pdf->Output('accounts-receivable.pdf', 'S'));
     }
 
-    private function buildExcel(string $file, callable $progress): void
-    {
-        $co = $this->companyHeader();
+private function buildExcel(string $file, callable $progress): void
+{
+    $co = $this->companyHeader();
 
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('Sales Journal');
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('Sales Journal');
 
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'SALES JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", $co['name']);  $r++;
-        $ws->setCellValue("A{$r}", $co['tin']);   $r++;
-        $ws->setCellValue("A{$r}", $co['addr1']); $r++;
-        $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
+    $r = 1;
+    $ws->setCellValue("A{$r}", 'SALES JOURNAL'); $r++;
+    $ws->setCellValue("A{$r}", $co['name']);  $r++;
+    $ws->setCellValue("A{$r}", $co['tin']);   $r++;
+    $ws->setCellValue("A{$r}", $co['addr1']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
 
-        $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
-        $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
-        foreach (range('A', 'G') as $col) $ws->getColumnDimension($col)->setWidth(15);
+    $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}");
+    $r += 2;
 
-        $done = 0;
-$grandDebit  = 0.0;
-$grandCredit = 0.0;
+    /**
+     * ✅ REMOVE columns C and D by shifting to A..D only:
+     * A = labels / dates / acct_code
+     * B = doc refs / acct_desc
+     * C = DEBIT
+     * D = CREDIT
+     */
+    $ws->fromArray(['', '', 'DEBIT', 'CREDIT'], null, "A{$r}");
+    $r++;
 
-        $this->applyFilters($this->baseQuery())
-            ->groupBy('r.id', 'r.sales_date', 'r.cs_no', 'r.si_no', 'r.cust_id', 'r.booking_no', 'r.explanation', 'b.acct_desc')
-            ->orderBy('r.id')
-            ->chunk(200, function ($chunk) use (&$r, $ws, &$done, $progress, &$grandDebit, &$grandCredit) {
-                foreach ($chunk as $row) {
-                    $docId = 'ARCR-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+    // Column widths (A..D only)
+    $ws->getColumnDimension('A')->setWidth(45);
+    $ws->getColumnDimension('B')->setWidth(28);
+    $ws->getColumnDimension('C')->setWidth(18);
+    $ws->getColumnDimension('D')->setWidth(18);
 
-                    $ws->setCellValue("A{$r}", $row->sales_date);
-                    $ws->setCellValue("B{$r}", $docId); $r++;
+    $done = 0;
+    $grandDebit  = 0.0;
+    $grandCredit = 0.0;
 
-                    $ws->setCellValue("A{$r}", "SV - {$row->cs_no} - {$row->cust_id} - {$row->explanation}");
-                    $ws->setCellValue("B{$r}", "S.I.#: {$row->si_no}"); $r++;
+    $this->applyFilters($this->baseQuery())
+        ->groupBy('r.id', 'r.sales_date', 'r.cs_no', 'r.si_no', 'r.cust_id', 'r.booking_no', 'r.explanation', 'b.acct_desc')
+        ->orderBy('r.id')
+        ->chunk(200, function ($chunk) use (&$r, $ws, &$done, $progress, &$grandDebit, &$grandCredit) {
 
-                    $ws->setCellValue("A{$r}", "OR#: {$row->booking_no}");
-                    $ws->setCellValue("B{$r}", $row->bank_name); $r++;
+            foreach ($chunk as $row) {
+                $docId = 'ARCR-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-                    $itemDebit = 0;
-                    $itemCredit = 0;
+                // header lines per document
+                $ws->setCellValue("A{$r}", $row->sales_date);
+                $ws->setCellValue("B{$r}", $docId);
+                $r++;
 
-                    foreach (json_decode($row->lines, true) as $ln) {
-                        $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
-                        $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                        $ws->setCellValue("F{$r}", (float)($ln['debit'] ?? 0));
-                        $ws->setCellValue("G{$r}", (float)($ln['credit'] ?? 0));
-                        $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                $ws->setCellValue("A{$r}", "SV - {$row->cs_no} - {$row->cust_id} - {$row->explanation}");
+                $ws->setCellValue("B{$r}", "S.I.#: {$row->si_no}");
+                $r++;
 
-                        $itemDebit  += (float)($ln['debit'] ?? 0);
-                        $itemCredit += (float)($ln['credit'] ?? 0);
-$grandDebit  += (float)($ln['debit'] ?? 0);
-$grandCredit += (float)($ln['credit'] ?? 0);
+                $ws->setCellValue("A{$r}", "OR#: {$row->booking_no}");
+                $ws->setCellValue("B{$r}", $row->bank_name);
+                $r++;
 
-                        $r++;
-                    }
+                $itemDebit  = 0.0;
+                $itemCredit = 0.0;
 
-                    $ws->setCellValue("E{$r}", 'TOTAL');
-                    $ws->setCellValue("F{$r}", $itemDebit);
-                    $ws->setCellValue("G{$r}", $itemCredit);
-                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                    $r += 2;
+                foreach (json_decode($row->lines, true) as $ln) {
+                    $debit  = (float)($ln['debit'] ?? 0);
+                    $credit = (float)($ln['credit'] ?? 0);
 
-                    $done++; $progress($done);
+                    $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
+                    $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
+                    $ws->setCellValue("C{$r}", $debit);
+                    $ws->setCellValue("D{$r}", $credit);
+
+                    $ws->getStyle("C{$r}:D{$r}")
+                        ->getNumberFormat()
+                        ->setFormatCode('#,##0.00');
+
+                    $itemDebit  += $debit;
+                    $itemCredit += $credit;
+
+                    $grandDebit  += $debit;
+                    $grandCredit += $credit;
+
+                    $r++;
                 }
-            });
-$ws->setCellValue("E{$r}", 'GRAND TOTAL');
-$ws->setCellValue("F{$r}", $grandDebit);
-$ws->setCellValue("G{$r}", $grandCredit);
 
-$ws->getStyle("E{$r}")->getFont()->setBold(true);
-$ws->getStyle("F{$r}:G{$r}")->getFont()->setBold(true);
-$ws->getStyle("F{$r}:G{$r}")
-    ->getNumberFormat()
-    ->setFormatCode('#,##0.00');
+                // TOTAL line (no more E/F/G)
+                $ws->setCellValue("B{$r}", 'TOTAL');
+                $ws->setCellValue("C{$r}", $itemDebit);
+                $ws->setCellValue("D{$r}", $itemCredit);
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream);
-        rewind($stream);
+                $ws->getStyle("B{$r}")->getFont()->setBold(true);
+                $ws->getStyle("C{$r}:D{$r}")
+                    ->getNumberFormat()
+                    ->setFormatCode('#,##0.00');
 
-        Storage::disk('local')->put($file, stream_get_contents($stream));
-        fclose($stream);
+                $r += 2;
 
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+                $done++;
+                $progress($done);
+            }
+        });
+
+    // GRAND TOTAL line
+    $ws->setCellValue("B{$r}", 'GRAND TOTAL');
+    $ws->setCellValue("C{$r}", $grandDebit);
+    $ws->setCellValue("D{$r}", $grandCredit);
+
+    $ws->getStyle("B{$r}")->getFont()->setBold(true);
+    $ws->getStyle("C{$r}:D{$r}")->getFont()->setBold(true);
+    $ws->getStyle("C{$r}:D{$r}")
+        ->getNumberFormat()
+        ->setFormatCode('#,##0.00');
+
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream);
+    rewind($stream);
+
+    Storage::disk('local')->put($file, stream_get_contents($stream));
+    fclose($stream);
+
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
+
 }

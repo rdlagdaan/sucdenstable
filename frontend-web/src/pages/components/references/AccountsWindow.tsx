@@ -191,7 +191,7 @@ const AccountsWindow: React.FC = () => {
       const payload: any = res.data;
       const list: Account[] = Array.isArray(payload) ? payload : payload?.data ?? [];
 
-      const title = showActiveOnly ? 'ACTIVE ACCOUNTS' : 'INACTIVE ACCOUNTS';
+      const title = showActiveOnly ? 'CHART OF ACCOUNTS' : 'CHART OF ACCOUNTS';
       const printedAt = new Date().toLocaleString();
 
       const esc = (s: any) =>
@@ -446,7 +446,7 @@ const AccountsWindow: React.FC = () => {
           onClick={handlePrint}
           className="px-3 py-2 rounded bg-gray-800 text-white text-sm hover:bg-gray-700"
           disabled={loading}
-          title={showActiveOnly ? 'Print Active Accounts' : 'Print Inactive Accounts'}
+          title={showActiveOnly ? 'Print Active Chart of Accounts' : 'Print Inactive Chart of Accounts'}
         >
           Print
         </button>

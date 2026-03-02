@@ -11,42 +11,118 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class MySalesVoucherPDF extends \TCPDF {
+
+    public $companyId = null;
+
+    public function setCompanyId(?int $companyId): void
+    {
+        $this->companyId = $companyId;
+    }
+
     public $salesDate;
     public $salesTime;
+
+    public $preparedByInitials = '';
+
+    public function setPreparedByInitials(string $initials): void
+    {
+        $this->preparedByInitials = $initials;
+    }
 
     public function setDataSalesDate($date) { $this->salesDate = $date; }
     public function setDataSalesTime($time) { $this->salesTime = $time; }
 
-    public function Header() {
-        // Try common locations and support JPG/PNG
+    public function Header()
+    {
+        $companyId = (int)($this->companyId ?? 0);
+
+        // =========================
+        // COMPANY 2 — AMEROP
+        // =========================
+        if ($companyId === 2) {
+
+            // NOTE: your screenshot shows logos in /public (NOT /public/images)
+            $logoCandidates = [
+                public_path('ameropLogo.jpg'),
+                public_path('ameropLogo.png'),
+            ];
+
+            foreach ($logoCandidates as $logo) {
+                if ($logo && is_file($logo)) {
+                    // smaller printed-like logo
+                    $this->Image($logo, 15, 12, 22, '', '', '', 'T', false, 300);
+                    break;
+                }
+            }
+
+            // Text beside the logo (same style you wanted)
+            $this->SetTextColor(40, 85, 160); // amerop-ish blue
+            $this->SetFont('helvetica', 'B', 12);
+            $this->Text(40, 14, 'AMEROP');
+
+            $this->SetFont('helvetica', '', 8);
+            $this->Text(40, 19, 'PHILIPPINES, INC.');
+
+            $this->SetTextColor(0, 0, 0);
+            return;
+        }
+
+        // =========================
+        // DEFAULT — SUCDEN (company_id 1)
+        // =========================
         $candidates = [
-            public_path('images/sucdenLogo.jpg'),
-            public_path('images/sucdenLogo.png'),
+            public_path('SucdenLogo.jpg'),
+            public_path('SucdenLogo.png'),
             public_path('sucdenLogo.jpg'),
             public_path('sucdenLogo.png'),
+            public_path('images/sucdenLogo.jpg'),
+            public_path('images/sucdenLogo.png'),
         ];
+
         foreach ($candidates as $img) {
             if ($img && is_file($img)) {
-                $ext = strtoupper(pathinfo($img, PATHINFO_EXTENSION)); // JPG or PNG
-                // x=15, y=10, width=50 (same spot you use elsewhere)
-                $this->Image($img, 15, 10, 50, '', $ext, '', 'T', false, 300, '', false, false, 0, false, false, false);
+                $this->Image($img, 15, 10, 50, '', '', '', 'T', false, 300);
                 break;
             }
         }
     }
 
-    public function Footer() {
+    public function Footer()
+    {
         $this->SetY(-50);
         $this->SetFont('helvetica','I',8);
 
         $currentDate = date('M d, Y');
         $currentTime = date('h:i:sa');
+        // ✅ Company label in footer (company_id 1 vs 2)
+        $companyId = (int)($this->companyId ?? 0);
+        $receivedFrom = ($companyId === 2)
+            ? 'AMEROP PHILIPPINES, INC.'
+            : 'SUCDEN PHILIPPINES, INC.';
 
         $html = '
         <table border="0"><tr>
           <td width="70%">
             <table border="1" cellpadding="5"><tr>
-              <td><font size="8">Prepared:<br><br><br><br><br></font></td>
+
+<td width="16%">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+    <tr>
+      <td valign="top" align="left"><font size="8">Prepared:</font></td>
+    </tr>
+
+    <tr>
+      <td height="42"></td>
+    </tr>
+
+    <tr>
+      <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
+        <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
+      </td>
+    </tr>
+  </table>
+</td>
+
               <td><font size="8">Accted by:<br><br><br><br><br></font></td>
               <td><font size="8">Checked:<br><br><br><br><br></font></td>
               <td><font size="8">Approved:<br><br><br><br><br></font></td>
@@ -57,7 +133,7 @@ class MySalesVoucherPDF extends \TCPDF {
           <td width="5%"></td>
           <td width="25%">
             <table border="1" cellpadding="5">
-              <tr><td align="center"><font size="8">Received from SUCDEN PHILIPPINES, INC.</font><br><br></td></tr>
+              <tr><td align="center"><font size="8">Received from '.$receivedFrom.'</font><br><br></td></tr>
               <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
             </table>
           </td>
@@ -72,17 +148,37 @@ class MySalesVoucherPDF extends \TCPDF {
           </tr>
           <tr>
             <td><font size="8">Created:</font></td>
-            <td><font size="8">'.$this->salesDate.'</font></td>
-            <td><font size="8">'.$this->salesTime.'</font></td>
+            <td width="15%"><font size="8">'.$this->salesDate.'</font></td>
+            <td width="15%"><font size="8">'.$this->salesTime.'</font></td>
             <td></td>
           </tr>
         </table>';
+
         $this->writeHTML($html, true, false, false, false, '');
     }
 }
 
+
 class SalesJournalController extends Controller
 {
+    
+protected function userInitials(?int $userId): string
+{
+    if (empty($userId)) return '';
+
+    if (\Illuminate\Support\Facades\Schema::hasTable('users_employees')) {
+        $u = (string) DB::table('users_employees')
+            ->where('id', (int)$userId)
+            ->value('username');
+
+        $u = strtoupper(trim((string)$u));
+        if ($u !== '') return $u;
+    }
+
+    return 'U' . (int)$userId;
+}
+    
+    
     // 1) Generate next CS number (incremental)
     public function generateCsNumber(Request $req)
     {
@@ -557,11 +653,30 @@ $details = DB::table('cash_sales_details as d')
         }
 
         // --- TCPDF with custom header/footer
-        $pdf = new MySalesVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-        $pdf->setPrintHeader(true);
-        $pdf->SetHeaderMargin(8);
-        $pdf->SetMargins(15,30,15);
-        $pdf->AddPage();
+$pdf = new MySalesVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
+
+// ✅ pass company_id into PDF so Header() can pick the correct logo
+$pdf->setCompanyId($companyId ? (int)$companyId : null);
+
+// ✅ prepared initials (priority: URL user_id, else header user_id)
+$preparedUserId = (int) ($request->query('user_id') ?: 0);
+if ($preparedUserId <= 0) {
+    $preparedUserId = (int) ($header->user_id ?? 0);
+}
+$pdf->setPreparedByInitials($this->userInitials($preparedUserId));
+
+$pdf->setPrintHeader(true);
+$pdf->setPrintFooter(true);
+
+$pdf->SetMargins(15, 30, 15);
+$pdf->SetHeaderMargin(8);
+$pdf->SetFooterMargin(10);
+
+// ✅ Reserve footer space so body never overlaps footer
+$pdf->SetAutoPageBreak(true, 55);
+
+$pdf->AddPage();
+
         $pdf->SetFont('helvetica','',7);
 
         $pdf->setDataSalesDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
@@ -571,6 +686,10 @@ $details = DB::table('cash_sales_details as d')
         $formattedCredit = number_format($totalCredit, 2);
 
         // --- Build body (existing layout)
+// ✅ SV number 6 digits (pad only if purely numeric)
+$rawSvNo = (string) ($header->cs_no ?? '');
+$svNumber = ctype_digit($rawSvNo) ? str_pad($rawSvNo, 6, '0', STR_PAD_LEFT) : $rawSvNo;
+
         $tbl = <<<EOD
 <br><br>
 <table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
@@ -584,7 +703,7 @@ $details = DB::table('cash_sales_details as d')
 <tr>
   <td width="65%"></td>
   <td width="20%" align="left"><font size="10"><b>SV Number:</b></font></td>
-  <td width="15%" align="left"><font size="14"><b><u>{$header->cs_no}</u></b></font></td>
+  <td width="15%" align="left"><font size="14"><b><u>{$svNumber}</u></b></font></td>
 </tr>
 <tr>
   <td width="65%"></td>
@@ -623,8 +742,12 @@ $details = DB::table('cash_sales_details as d')
 EOD;
 
         foreach ($details as $d) {
-            $debit  = $d->debit  ? number_format($d->debit, 2) : '';
-            $credit = $d->credit ? number_format($d->credit, 2) : '';
+$debitVal  = (float)($d->debit ?? 0);
+$creditVal = (float)($d->credit ?? 0);
+
+$debit  = ($debitVal  > 0) ? number_format($debitVal, 2) : '';
+$credit = ($creditVal > 0) ? number_format($creditVal, 2) : '';
+
             $tbl .= <<<EOD
   <tr>
     <td align="left"><font size="10">{$d->acct_code}</font></td>
@@ -864,8 +987,18 @@ $details = DB::table('cash_sales_details as d')
         foreach ($details as $d) {
             $sheet->setCellValue("A{$r}", $d->acct_code);
             $sheet->setCellValue("B{$r}", $d->acct_desc);
-            $sheet->setCellValueExplicit("C{$r}", (float)($d->debit ?? 0), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
-            $sheet->setCellValueExplicit("D{$r}", (float)($d->credit ?? 0), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+            
+$debitVal  = (float)($d->debit ?? 0);
+$creditVal = (float)($d->credit ?? 0);
+
+if ($debitVal > 0) {
+    $sheet->setCellValueExplicit("C{$r}", $debitVal, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+} // else leave blank
+
+if ($creditVal > 0) {
+    $sheet->setCellValueExplicit("D{$r}", $creditVal, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+} // else leave blank
+            
             $r++;
         }
 

@@ -23,72 +23,172 @@ use PhpOffice\PhpSpreadsheet\Style\Border;
 
 
 class MyDisbursementVoucherPDF extends \TCPDF {
+
+    public $companyId = null;
+
+    public function setCompanyId(?int $companyId): void
+    {
+        $this->companyId = $companyId;
+    }
+
+
     public $receiptDate;
     public $receiptTime;
+    public $preparedByInitials = '';
+
+    public function setPreparedByInitials(string $initials) { $this->preparedByInitials = $initials; }
 
     public function setDataReceiptDate($date) { $this->receiptDate = $date; }
     public function setDataReceiptTime($time) { $this->receiptTime = $time; }
 
-public function Header() {
+public function Header()
+{
+    // You MUST set this before creating the PDF:
+    // $pdf->companyId = (int)$companyId;
+    $companyId = (int)($this->companyId ?? 0);
+
+    // =========================
+    // COMPANY 2 — AMEROP
+    // =========================
+    if ($companyId === 2) {
+
+        // --- Amerop logo (smaller, like printed sample) ---
+        $logo = public_path('ameropLogo.jpg');
+        if (is_file($logo)) {
+            // x, y, width
+            $this->Image(
+                $logo,
+                15,   // left
+                12,   // top
+                22,   // SMALL logo width (matches printed sample)
+                '', '', '', 'T',
+                false, 300
+            );
+        }
+
+        // --- Text to the RIGHT of logo ---
+        // Color: Amerop blue
+        $this->SetTextColor(40, 85, 160);
+
+        // AMEROP (top line)
+        $this->SetFont('helvetica', 'B', 14);
+        $this->Text(40, 14, 'AMEROP');
+
+        // PHILIPPINES, INC. (second line)
+        $this->SetFont('helvetica', '', 9);
+        $this->Text(40, 20, 'PHILIPPINES, INC.');
+
+        // Reset color for rest of document
+        $this->SetTextColor(0, 0, 0);
+
+        return;
+    }
+
+    // =========================
+    // DEFAULT — SUCDEN (unchanged)
+    // =========================
     $candidates = [
         public_path('images/sucdenLogo.jpg'),
         public_path('images/sucdenLogo.png'),
         public_path('sucdenLogo.jpg'),
         public_path('sucdenLogo.png'),
     ];
+
     foreach ($candidates as $image) {
         if ($image && is_file($image)) {
-            $this->Image($image, 15, 10, 50, '', '', '', 'T', false, 300, '', false, false, 0, false, false, false);
+            $this->Image(
+                $image,
+                15,
+                10,
+                50,
+                '',
+                '',
+                '',
+                'T',
+                false,
+                300
+            );
             break;
         }
     }
 }
 
 
-    public function Footer() {
-        $this->SetY(-50);
-        $this->SetFont('helvetica','I',8);
 
-        $currentDate = date('M d, Y');
-        $currentTime = date('h:i:sa');
 
-        $html = '
-        <table border="0"><tr>
-          <td width="70%">
-            <table border="1" cellpadding="5"><tr>
-              <td><font size="8">Prepared:<br><br><br><br><br></font></td>
-              <td><font size="8">Acted by:<br><br><br><br><br></font></td>
-              <td><font size="8">Checked:<br><br><br><br><br></font></td>
-              <td><font size="8">Approved:<br><br><br><br><br></font></td>
-<td><font size="8">Noted by:<br><br><br><br><br></font></td>
-<td><font size="8">Posted by:<br><br><br><br><br></font></td>            
-              </tr></table>
-          </td>
-          <td width="5%"></td>
-          <td width="25%">
-            <table border="1" cellpadding="5">
-              <tr><td align="center"><font size="8">Paid by SUCDEN PHILIPPINES, INC.</font><br><br></td></tr>
-              <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
-            </table>
-          </td>
+
+public function Footer() {
+    $this->SetY(-50);
+    $this->SetFont('helvetica','I',8);
+
+    $currentDate = date('M d, Y');
+    $currentTime = date('h:i:sa');
+
+    // ✅ Company label (company_id 1 vs 2)
+    $companyId = (int)($this->companyId ?? 0);
+    $paidBy = ($companyId === 2)
+        ? 'AMEROP PHILIPPINES, INC.'
+        : 'SUCDEN PHILIPPINES, INC.';
+
+    $html = '
+    <table border="0"><tr>
+      <td width="70%">
+        <table border="1" cellpadding="5"><tr>
+<td width="16%">
+<table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+<tr>
+  <td valign="top" align="left"><font size="8">Prepared:</font></td>
+</tr>
+
+<tr>
+  <td height="42"></td>
+</tr>
+
+<tr>
+  <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
+    <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
+  </td>
+</tr>
+</table>
+</td>
+
+          <td><font size="8">Acted by:<br><br><br><br><br></font></td>
+          <td><font size="8">Checked:<br><br><br><br><br></font></td>
+          <td><font size="8">Approved:<br><br><br><br><br></font></td>
+          <td><font size="8">Noted by:<br><br><br><br><br></font></td>
+          <td><font size="8">Posted by:<br><br><br><br><br></font></td>
         </tr></table>
-        <br>
-        <table border="0">
-          <tr>
-            <td width="10%"><font size="8">Printed:</font></td>
-            <td width="15%"><font size="8">'.$currentDate.'</font></td>
-            <td width="15%"><font size="8">'.$currentTime.'</font></td>
-            <td width="60%"></td>
-          </tr>
-          <tr>
-            <td><font size="8">Created:</font></td>
-            <td><font size="8">'.($this->receiptDate ?? '').'</font></td>
-            <td><font size="8">'.($this->receiptTime ?? '').'</font></td>
-            <td></td>
-          </tr>
-        </table>';
-        $this->writeHTML($html, true, false, false, false, '');
-    }
+      </td>
+      <td width="5%"></td>
+      <td width="25%">
+        <table border="1" cellpadding="5">
+          <tr><td align="center"><font size="8">Paid by __PAID_BY__</font><br><br></td></tr>
+          <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
+        </table>
+      </td>
+    </tr></table>
+    <br>
+    <table border="0">
+      <tr>
+        <td width="10%"><font size="8">Printed:</font></td>
+        <td width="15%"><font size="8">'.$currentDate.'</font></td>
+        <td width="15%"><font size="8">'.$currentTime.'</font></td>
+        <td width="60%"></td>
+      </tr>
+      <tr>
+        <td><font size="8">Created:</font></td>
+        <td><font size="8">'.($this->receiptDate ?? '').'</font></td>
+        <td><font size="8">'.($this->receiptTime ?? '').'</font></td>
+        <td></td>
+      </tr>
+    </table>';
+
+    // ✅ Safe inject (prevents quote/concat parse errors)
+    $html = str_replace('__PAID_BY__', htmlspecialchars($paidBy), $html);
+
+    $this->writeHTML($html, true, false, false, false, '');
+}
+
 }
 
 class CashDisbursementController extends Controller
@@ -133,6 +233,21 @@ class CashDisbursementController extends Controller
         $data['sum_debit']       = 0;
         $data['sum_credit']      = 0;
         $data['is_balanced']     = false;
+
+        // ✅ Block duplicate Check/Ref # per company (case-insensitive)
+        $ref = trim((string) ($data['check_ref_no'] ?? ''));
+        if ($ref !== '') {
+            $dup = CashDisbursement::where('company_id', (int) $data['company_id'])
+                ->whereRaw('LOWER(check_ref_no) = ?', [strtolower($ref)])
+                ->exists();
+
+            if ($dup) {
+                return response()->json([
+                    'message' => 'Duplicate Check / Ref #. This Check/Ref # already exists.',
+                ], 422);
+            }
+        }
+
 
         $main = CashDisbursement::create($data);
 
@@ -511,6 +626,27 @@ public function updateCancel(Request $req)
 }
 
 
+protected function userInitials(?int $userId): string
+{
+    if (empty($userId)) return '';
+
+    // ✅ Your actual table
+    if (\Illuminate\Support\Facades\Schema::hasTable('users_employees')) {
+        $u = (string) DB::table('users_employees')
+            ->where('id', (int)$userId)
+            ->value('username');
+
+        $u = strtoupper(trim((string)$u));
+        if ($u !== '') return $u;
+    }
+
+    // last fallback (never blank)
+    return 'U' . (int)$userId;
+}
+
+
+
+
     /** Convert helpers (0..999 → words) */
     private function chunkToWords(int $n): string {
         $ones = ['', 'one','two','three','four','five','six','seven','eight','nine','ten',
@@ -725,109 +861,115 @@ protected function markExportedOnce(int $id, ?int $companyId, ?int $userId): voi
 
 
     // === PDF ===
-    public function formPdf(Request $req, $id)
-    {
-        // pick the correct vendor key at runtime
-        $vendKey = Schema::hasColumn('vendor_list', 'vend_id')
-            ? 'vend_id'
-            : (Schema::hasColumn('vendor_list', 'vend_code') ? 'vend_code' : null);
+public function formPdf(Request $req, $id)
+{
+    // pick the correct vendor key at runtime
+    $vendKey = Schema::hasColumn('vendor_list', 'vend_id')
+        ? 'vend_id'
+        : (Schema::hasColumn('vendor_list', 'vend_code') ? 'vend_code' : null);
 
-        $headerQ = DB::table('cash_disbursement as d');
+    $headerQ = DB::table('cash_disbursement as d');
 
-$companyId = $req->query('company_id');
+    $companyId = $req->query('company_id');
 
-if ($vendKey) {
-    $headerQ->leftJoin('vendor_list as v', function ($j) use ($vendKey, $companyId) {
-        $j->on('d.vend_id', '=', 'v.'.$vendKey);
-        if ($companyId) $j->where('v.company_id', '=', $companyId);
-    });
-}
+    if ($vendKey) {
+        $headerQ->leftJoin('vendor_list as v', function ($j) use ($vendKey, $companyId) {
+            $j->on('d.vend_id', '=', 'v.' . $vendKey);
+            if ($companyId) $j->where('v.company_id', '=', $companyId);
+        });
+    }
 
+    $header = $headerQ
+        ->select(
+            'd.id', 'd.cd_no', 'd.vend_id', 'd.disburse_amount', 'd.pay_method',
+            'd.bank_id', 'd.explanation', 'd.is_cancel', 'd.check_ref_no',
+            DB::raw("to_char(d.disburse_date, 'MM/DD/YYYY') as disburse_date"),
+            DB::raw($vendKey ? "COALESCE(v.vend_name,'') as vend_name" : "'' as vend_name"),
+            'd.amount_in_words', 'd.workstation_id', 'd.user_id', 'd.created_at'
+        )
+        ->where('d.id', $id)
+        ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+        ->first();
 
-        $header = $headerQ
-            ->select(
-                'd.id','d.cd_no','d.vend_id','d.disburse_amount','d.pay_method',
-                'd.bank_id','d.explanation','d.is_cancel','d.check_ref_no',
-                DB::raw("to_char(d.disburse_date, 'MM/DD/YYYY') as disburse_date"),
-                DB::raw($vendKey ? "COALESCE(v.vend_name,'') as vend_name" : "'' as vend_name"),
-                'd.amount_in_words','d.workstation_id','d.user_id','d.created_at'
-            )
-    ->where('d.id', $id)
-    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
-    ->first();
+    if (!$header || $header->is_cancel === 'y') {
+        abort(404, 'Cash Disbursement not found or cancelled');
+    }
 
-        if (!$header || $header->is_cancel === 'y') {
-            abort(404, 'Cash Disbursement not found or cancelled');
-        }
+    // Details (BANK first)
+    $details = DB::table('cash_disbursement_details as x')
+        ->join('account_code as a', function ($j) use ($companyId) {
+            $j->on('x.acct_code', '=', 'a.acct_code');
+            if ($companyId) $j->where('a.company_id', '=', $companyId);
+        })
+        ->where('x.transaction_id', $id)
+        ->when($companyId, fn($q) => $q->where('x.company_id', $companyId))
+        ->orderByRaw("CASE WHEN x.workstation_id = 'BANK' THEN 0 ELSE 1 END ASC")
+        ->orderBy('x.id', 'asc')
+        ->select('x.acct_code', 'a.acct_desc', 'x.debit', 'x.credit')
+        ->get();
 
-$companyId = $req->query('company_id');
+    $totalDebit  = (float) $details->sum('debit');
+    $totalCredit = (float) $details->sum('credit');
 
-$details = DB::table('cash_disbursement_details as x')
-    ->join('account_code as a', function ($j) use ($companyId) {
-        $j->on('x.acct_code', '=', 'a.acct_code');
-        if ($companyId) $j->where('a.company_id', '=', $companyId);
-    })
-    ->where('x.transaction_id', $id)
-    ->when($companyId, fn($q) => $q->where('x.company_id', $companyId))
-    ->orderBy('x.workstation_id','desc')
-    ->orderBy('x.credit','desc')
-    ->select('x.acct_code','a.acct_desc','x.debit','x.credit')
-    ->get();
+    // --- Use BANK row amount for display (instead of header->disburse_amount) ---
+    $bankRow = CashDisbursementDetail::where('transaction_id', (int) $id)
+        ->where('workstation_id', 'BANK')
+        ->first(['debit', 'credit']);
 
+    $bankAmount = 0.0;
+    if ($bankRow) {
+        $bankAmount = (float) (($bankRow->credit ?? 0) > 0 ? $bankRow->credit : ($bankRow->debit ?? 0));
+    }
 
-        $totalDebit  = (float)$details->sum('debit');
-        $totalCredit = (float)$details->sum('credit');
+    $bankAmountFmt = number_format($bankAmount, 2);
 
-        //$dvAmount = (float)($header->disburse_amount ?? 0);
-        //$amountInWords = $this->pesoWords($dvAmount);
-        //$dvAmountFmt = number_format($dvAmount, 2);
+    // ✅ Replace "amount in words" display under PESOS with BANK amount (words)
+    $amountInWords = $this->pesoWords($bankAmount);
 
+    // ✅ Replace AMOUNT (right of explanation) with BANK amount (figure)
+    $dvAmountFmt = $bankAmountFmt;
 
-// --- Use BANK row amount for display (instead of header->disburse_amount) ---
-$bankRow = CashDisbursementDetail::where('transaction_id', (int) $id)
-    ->where('workstation_id', 'BANK')
-    ->first(['debit', 'credit']);
+    // PDF init
+    $pdf = new MyDisbursementVoucherPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
 
-// For Disbursement, BANK is typically CREDIT; fallback to DEBIT if needed.
-$bankAmount = 0.0;
-if ($bankRow) {
-    $bankAmount = (float) (($bankRow->credit ?? 0) > 0 ? $bankRow->credit : ($bankRow->debit ?? 0));
-}
+    // ✅ pass company_id into PDF so Header() can pick the correct logo
+    $pdf->setCompanyId($companyId ? (int)$companyId : null);
 
-$bankAmountFmt = number_format($bankAmount, 2);
+    // Prepared by (priority): URL user_id, else header user_id
+    $preparedUserId = (int) ($req->query('user_id') ?: 0);
+    if ($preparedUserId <= 0) {
+        $preparedUserId = (int) ($header->user_id ?? 0);
+    }
+    $pdf->setPreparedByInitials($this->userInitials($preparedUserId));
 
-// ✅ Replace "amount in words" display under PESOS with BANK amount (figure)
-$amountInWords = $this->pesoWords($bankAmount);
+    $pdf->setPrintHeader(true);
+    $pdf->setPrintFooter(true);
+    $pdf->SetMargins(15, 30, 15);
+    $pdf->SetHeaderMargin(8);
+    $pdf->SetFooterMargin(10);
 
-// ✅ Replace AMOUNT (right of explanation) with BANK amount (figure)
-$dvAmountFmt = $bankAmountFmt;
+    // ✅ Reserve footer space so table never overlaps footer
+    $pdf->SetAutoPageBreak(true, 55);
 
-// Keep original header amount available if you still need it elsewhere
-$dvAmount = (float)($header->disburse_amount ?? 0);
+    $pdf->AddPage();
+    $pdf->SetFont('helvetica', '', 7);
 
+    $pdf->setDataReceiptDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
+    $pdf->setDataReceiptTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
 
+    // ✅ CV number always 6 digits (pad only if purely numeric)
+    $rawDvNo  = (string) ($header->cd_no ?? '');
+    $dvNumber = ctype_digit($rawDvNo) ? str_pad($rawDvNo, 6, '0', STR_PAD_LEFT) : $rawDvNo;
 
-        $pdf = new MyDisbursementVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-        $pdf->setPrintHeader(true);
-        $pdf->setPrintFooter(true);
-        $pdf->SetMargins(15,30,15);
-        $pdf->SetHeaderMargin(8);
-        $pdf->SetFooterMargin(10);
-        $pdf->AddPage();
-        $pdf->SetFont('helvetica','',7);
+    $dvDateText   = $header->disburse_date;
+    $checkNo      = $header->check_ref_no;
+    $payee        = (string) ($header->vend_name ?? $header->vend_id);
+    $explanation  = (string) ($header->explanation ?? '');
 
-        $pdf->setDataReceiptDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
-        $pdf->setDataReceiptTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
-
-        $dvNumber     = $header->cd_no;
-        $dvDateText   = $header->disburse_date;
-        $checkNo      = $header->check_ref_no;
-        $payee        = (string)($header->vend_name ?? $header->vend_id);
-        $explanation  = (string)($header->explanation ?? '');
-
-        $tbl = <<<EOD
+    // =================== TOP (header + explanation) ===================
+    $tblTop = <<<EOD
 <br><br>
-<table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
+<table border="0" cellpadding="1" cellspacing="0" width="100%">
 <tr>
   <td width="10%"></td>
   <td width="20%"></td>
@@ -873,71 +1015,103 @@ $dvAmount = (float)($header->disburse_amount ?? 0);
 </table>
 
 <table><tr><td><br><br></td></tr></table>
-<table border="1" cellpadding="3" cellspacing="0" nobr="true" width="100%">
- <tr>
-  <td width="20%" align="center"><font size="10"><b>ACCOUNT</b></font></td>
-  <td width="40%" align="center"><font size="10"><b>GL ACCOUNT</b></font></td>
-  <td width="20%" align="center"><font size="10"><b>DEBIT</b></font></td>
-  <td width="20%" align="center"><font size="10"><b>CREDIT</b></font></td>
- </tr>
 EOD;
 
-        foreach ($details as $d) {
-            $debit  = $d->debit  ? number_format((float)$d->debit, 2) : '';
-            $credit = $d->credit ? number_format((float)$d->credit, 2) : '';
-            $tbl .= <<<EOD
+    $pdf->writeHTML($tblTop, true, false, false, false, '');
+
+    // =================== GL TABLE (chunked per page to avoid broken borders) ===================
+    $glHeader = <<<EOD
+<table border="1" cellpadding="3" cellspacing="0" width="100%">
   <tr>
-    <td align="left"><font size="10">{$d->acct_code}</font></td>
-    <td align="left"><font size="10">{$d->acct_desc}</font></td>
+    <td width="20%" align="center"><font size="10"><b>ACCOUNT</b></font></td>
+    <td width="40%" align="center"><font size="10"><b>GL ACCOUNT</b></font></td>
+    <td width="20%" align="center"><font size="10"><b>DEBIT</b></font></td>
+    <td width="20%" align="center"><font size="10"><b>CREDIT</b></font></td>
+  </tr>
+EOD;
+
+    $rowsPerPage = 12; // tweak if needed
+    $rows = $details->values();
+
+    for ($i = 0; $i < $rows->count(); $i += $rowsPerPage) {
+
+        // Start a clean new page for each chunk after the first chunk
+        if ($i > 0) {
+            $pdf->AddPage();
+            $pdf->SetFont('helvetica', '', 7);
+        }
+
+        $chunk = $rows->slice($i, $rowsPerPage);
+
+        $tblGl = $glHeader;
+
+        foreach ($chunk as $d) {
+            // ✅ show BLANK instead of 0.00
+            $debitVal  = (float) ($d->debit  ?? 0);
+            $creditVal = (float) ($d->credit ?? 0);
+
+            $debit  = ($debitVal  > 0) ? number_format($debitVal, 2) : '';
+            $credit = ($creditVal > 0) ? number_format($creditVal, 2) : '';
+
+            $acct = (string) $d->acct_code;
+            $desc = (string) $d->acct_desc;
+
+            $tblGl .= <<<EOD
+  <tr>
+    <td align="left"><font size="10">{$acct}</font></td>
+    <td align="left"><font size="10">{$desc}</font></td>
     <td align="right"><font size="10">{$debit}</font></td>
     <td align="right"><font size="10">{$credit}</font></td>
   </tr>
 EOD;
         }
 
-        $fmtD = number_format($totalDebit, 2);
-        $fmtC = number_format($totalCredit, 2);
-        $tbl .= <<<EOD
+        // TOTAL only on last chunk
+        if ($i + $rowsPerPage >= $rows->count()) {
+            $fmtD = number_format($totalDebit, 2);
+            $fmtC = number_format($totalCredit, 2);
+            $tblGl .= <<<EOD
   <tr>
     <td></td>
     <td align="left"><font size="10">TOTAL</font></td>
     <td align="right"><font size="10">{$fmtD}</font></td>
     <td align="right"><font size="10">{$fmtC}</font></td>
   </tr>
-</table>
 EOD;
-
-        $pdf->writeHTML($tbl, true, false, false, false, '');
-
-        if (abs($totalDebit - $totalCredit) > 0.005) {
-            $html = sprintf(
-                '<!doctype html><meta charset="utf-8">
-                <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
-                <h2>Cannot print Disbursement Voucher</h2>
-                <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
-                <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
-                number_format($totalDebit, 2),
-                number_format($totalCredit, 2)
-            );
-            return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
         }
 
+        $tblGl .= "</table>";
 
-// ✅ Mark as exported ONLY when printing is allowed (balanced + not cancelled already checked)
-DB::table('cash_disbursement')
-    ->where('id', (int) $id)
-    ->update([
-        'exported_at' => now(),
-        'exported_by' => $header->user_id ?? null,
-    ]);
-
-
-
-        $pdfContent = $pdf->Output('disbursementVoucher.pdf', 'S');
-        return response($pdfContent, 200)
-            ->header('Content-Type','application/pdf')
-            ->header('Content-Disposition','inline; filename="disbursementVoucher.pdf"');
+        $pdf->writeHTML($tblGl, true, false, false, false, '');
     }
+
+    // Balanced guard (same as before)
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        $html = sprintf(
+            '<!doctype html><meta charset="utf-8">
+            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+            <h2>Cannot print Disbursement Voucher</h2>
+            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
+            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+            number_format($totalDebit, 2),
+            number_format($totalCredit, 2)
+        );
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    // Mark exported
+    DB::table('cash_disbursement')
+        ->where('id', (int) $id)
+        ->update([
+            'exported_at' => now(),
+            'exported_by' => $header->user_id ?? null,
+        ]);
+
+    $pdfContent = $pdf->Output('disbursementVoucher.pdf', 'S');
+    return response($pdfContent, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="disbursementVoucher.pdf"');
+}
 
 
 
@@ -981,8 +1155,9 @@ $details = DB::table('cash_disbursement_details as x')
     })
     ->where('x.transaction_id', $id)
     ->when($companyId, fn($q) => $q->where('x.company_id', $companyId))
-    ->orderBy('x.workstation_id','desc')
-    ->orderBy('x.credit','desc')
+    ->orderByRaw("CASE WHEN x.workstation_id = 'BANK' THEN 0 ELSE 1 END ASC")
+    ->orderBy('x.id', 'asc')
+
     ->select('x.acct_code','a.acct_desc','x.debit','x.credit')
     ->get();
 
@@ -1075,8 +1250,8 @@ $dvAmount = (float)($bankAmount ?? 0);
     foreach ($details as $d) {
         $sheet->setCellValue("A{$row}", $d->acct_code);
         $sheet->setCellValue("B{$row}", $d->acct_desc);
-        if ($d->debit)  $sheet->setCellValue("C{$row}", (float)$d->debit);
-        if ($d->credit) $sheet->setCellValue("D{$row}", (float)$d->credit);
+        if (((float)($d->debit ?? 0)) > 0)  $sheet->setCellValue("C{$row}", (float)$d->debit);
+        if (((float)($d->credit ?? 0)) > 0) $sheet->setCellValue("D{$row}", (float)$d->credit);
         $sheet->getStyle("A{$row}:D{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
         $sheet->getStyle("C{$row}:D{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
         $row++;
@@ -1316,6 +1491,21 @@ public function updateMain(Request $req)
     $tx = CashDisbursement::findOrFail($data['id']);
     $companyId = $data['company_id'] ?? $tx->company_id;
 
+    // ✅ Block duplicate Check/Ref # per company (exclude this record)
+    $ref = trim((string) ($data['check_ref_no'] ?? ''));
+    if ($ref !== '') {
+        $dup = CashDisbursement::where('company_id', (int) $companyId)
+            ->whereRaw('LOWER(check_ref_no) = ?', [strtolower($ref)])
+            ->where('id', '<>', (int) $tx->id)
+            ->exists();
+
+        if ($dup) {
+            return response()->json([
+                'message' => 'Duplicate Check / Ref #. This Check/Ref # already exists.',
+            ], 422);
+        }
+    }
+
     // enforce rules
     $this->requireNotCancelled((int) $tx->id);
 
@@ -1402,6 +1592,22 @@ public function updateMainNoApproval(Request $req)
     $tx = CashDisbursement::findOrFail($data['id']);
     $companyId = (int) $data['company_id'];
 
+    // ✅ Block duplicate Check/Ref # per company (exclude this record)
+    $ref = trim((string) ($data['check_ref_no'] ?? ''));
+    if ($ref !== '') {
+        $dup = CashDisbursement::where('company_id', (int) $companyId)
+            ->whereRaw('LOWER(check_ref_no) = ?', [strtolower($ref)])
+            ->where('id', '<>', (int) $tx->id)
+            ->exists();
+
+        if ($dup) {
+            return response()->json([
+                'message' => 'Duplicate Check / Ref #. This Check/Ref # already exists.',
+            ], 422);
+        }
+    }
+
+
     // ✅ use the SAME cancel guard your working updateMain uses
     // (If you only have requireNotCancelled(), keep that.)
     $this->requireNotCancelled((int) $tx->id);
@@ -1466,6 +1672,43 @@ $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
         'cd_no'  => $tx->cd_no,
         'main'   => $tx,
         'totals' => $totals,
+    ]);
+}
+
+
+/**
+ * ✅ Check if Check/Ref # already exists (per company).
+ * Used by frontend "live check" before save.
+ *
+ * GET /cash-disbursement/check-ref-exists?company_id=1&check_ref_no=ABC&exclude_id=123
+ */
+public function checkRefExists(Request $req)
+{
+    $data = $req->validate([
+        'company_id'    => ['required','integer'],
+        'check_ref_no'  => ['required','string','max:25'],
+        'exclude_id'    => ['nullable'],
+    ]);
+
+    $companyId = (int) $data['company_id'];
+    $ref = trim((string) $data['check_ref_no']);
+    $excludeId = (int) ($data['exclude_id'] ?? 0);
+
+    $q = CashDisbursement::where('company_id', $companyId)
+        ->whereRaw('LOWER(check_ref_no) = ?', [strtolower($ref)]);
+
+    if ($excludeId > 0) {
+        $q->where('id', '<>', $excludeId);
+    }
+
+    $hit = $q->orderByDesc('id')->first(['id','cd_no']);
+
+    return response()->json([
+        'exists'      => (bool) $hit,
+        'id'          => $hit?->id,
+        'cd_no'       => $hit?->cd_no,
+        'company_id'  => $companyId,
+        'check_ref_no'=> $ref,
     ]);
 }
 

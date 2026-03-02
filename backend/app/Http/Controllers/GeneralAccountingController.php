@@ -7,30 +7,85 @@ use App\Models\GeneralAccountingDetail;
 use App\Models\AccountCode;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class MyJournalVoucherPDF extends \TCPDF
 {
+public $companyId = null;
+
+public function setCompanyId(?int $companyId): void
+{
+    $this->companyId = $companyId;
+}
+
+public $preparedByInitials = '';
+
+public function setPreparedByInitials(string $initials): void
+{
+    $this->preparedByInitials = $initials;
+}
+    
+    
     public $journalDate;
     public $journalTime;
     public function setDataJournalDate($d) { $this->journalDate = $d; }
     public function setDataJournalTime($t) { $this->journalTime = $t; }
 
-    public function Header()
-    {
-        $candidates = [
-            public_path('images/sucdenLogo.jpg'),
-            public_path('images/sucdenLogo.png'),
-            public_path('sucdenLogo.jpg'),
-            public_path('sucdenLogo.png'),
+public function Header()
+{
+    $companyId = (int)($this->companyId ?? 0);
+
+    // =========================
+    // COMPANY 2 — AMEROP
+    // =========================
+    if ($companyId === 2) {
+
+        $logoCandidates = [
+            public_path('ameropLogo.jpg'),
+            public_path('ameropLogo.png'),
         ];
-        foreach ($candidates as $img) {
-            if ($img && is_file($img)) {
-                $ext = strtoupper(pathinfo($img, PATHINFO_EXTENSION));
-                $this->Image($img, 15, 10, 50, '', $ext, '', 'T', false, 300, '', false, false, 0, false, false, false);
+
+        foreach ($logoCandidates as $logo) {
+            if ($logo && is_file($logo)) {
+                $this->Image($logo, 15, 12, 22, '', '', '', 'T', false, 300);
                 break;
             }
         }
+
+        $this->SetTextColor(40, 85, 160);
+        $this->SetFont('helvetica', 'B', 12);
+        $this->Text(40, 14, 'AMEROP');
+
+        $this->SetFont('helvetica', '', 8);
+        $this->Text(40, 19, 'PHILIPPINES, INC.');
+
+        $this->SetTextColor(0, 0, 0);
+        return;
     }
+
+    // =========================
+    // DEFAULT — SUCDEN
+    // =========================
+    $candidates = [
+        public_path('SucdenLogo.jpg'),
+        public_path('SucdenLogo.png'),
+        public_path('sucdenLogo.jpg'),
+        public_path('sucdenLogo.png'),
+        public_path('images/SucdenLogo.jpg'),
+        public_path('images/SucdenLogo.png'),
+        public_path('images/sucdenLogo.jpg'),
+        public_path('images/sucdenLogo.png'),
+    ];
+
+    foreach ($candidates as $img) {
+        if ($img && is_file($img)) {
+            $ext = strtoupper(pathinfo($img, PATHINFO_EXTENSION));
+            $this->Image($img, 15, 10, 50, '', $ext, '', 'T', false, 300, '', false, false, 0, false, false, false);
+            break;
+        }
+    }
+}
+
 
     public function Footer()
     {
@@ -43,7 +98,23 @@ class MyJournalVoucherPDF extends \TCPDF
         <table border="0"><tr>
           <td width="70%">
             <table border="1" cellpadding="5"><tr>
-              <td><font size="8">Prepared:<br><br><br><br><br></font></td>
+<td width="25%">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+    <tr>
+      <td valign="top" align="left"><font size="8">Prepared:</font></td>
+    </tr>
+
+    <tr>
+      <td height="42"></td>
+    </tr>
+
+    <tr>
+      <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
+        <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
+      </td>
+    </tr>
+  </table>
+</td>
               <td><font size="8">Checked:<br><br><br><br><br></font></td>
               <td><font size="8">Approved:<br><br><br><br><br></font></td>
               <td><font size="8">Posted by:<br><br><br><br><br></font></td>
@@ -74,6 +145,23 @@ class MyJournalVoucherPDF extends \TCPDF
 class GeneralAccountingController extends Controller
 {
     
+protected function userInitials(?int $userId): string
+{
+    if (empty($userId)) return '';
+
+    if (Schema::hasTable('users_employees')) {
+        $u = (string) DB::table('users_employees')
+            ->where('id', (int)$userId)
+            ->value('username');
+
+        $u = strtoupper(trim((string)$u));
+        if ($u !== '') return $u;
+    }
+
+    return 'U' . (int)$userId;
+}
+
+
  /** 6) Show main + details (company-scoped) */
 public function show($id, Request $req)
 {
@@ -187,51 +275,34 @@ public function saveDetail(Request $req)
         'workstation_id' => ['nullable','string','max:25'],
     ]);
 
-    // 1) Load main + enforce tenant (company) safety
     $main = GeneralAccounting::findOrFail((int)$payload['transaction_id']);
 
     if ((int)$main->company_id !== (int)$payload['company_id']) {
         abort(403, 'Company mismatch.');
     }
 
-    // 2) Block edits if cancelled/deleted
-// ✅ Lock inserts when exported
-if (!empty($main->exported_at)) {
-    abort(403, 'This journal entry is already exported and is locked for editing.');
-}
-
     if (in_array((string)$main->is_cancel, ['c','d','y'], true)) {
         abort(403, 'Cancelled/deleted journal cannot be modified.');
     }
 
-// 2b) Block edits if exported (locked after print/download)
-if (!empty($main->exported_at)) {
-    abort(403, 'Exported journal cannot be modified.');
-}    
-    // Optional: require approval for adding details too
-    // $this->requireEditApproval((int)$main->id);
-
-
-// 3) Ensure workstation_id (DB NOT NULL)
-// Prefer payload -> header -> client IP
-if (empty($payload['workstation_id'])) {
-    if (!empty($main->workstation_id)) {
-        $payload['workstation_id'] = $main->workstation_id;
-    } else {
-        $payload['workstation_id'] = (string) $req->ip();
+    // ✅ EXPORTED: allow edits only if approved edit window exists
+    if (!empty($main->exported_at)) {
+        $this->requireEditApproval((int)$main->id);
     }
-}
 
+    // workstation_id fallback
+    if (empty($payload['workstation_id'])) {
+        $payload['workstation_id'] = !empty($main->workstation_id)
+            ? $main->workstation_id
+            : (string)$req->ip();
+    }
 
-// 4) Validate amounts: allow BOTH debit and credit > 0, but NOT both <= 0
-$d = (float)($payload['debit'] ?? 0);
-$c = (float)($payload['credit'] ?? 0);
+    $d = (float)($payload['debit'] ?? 0);
+    $c = (float)($payload['credit'] ?? 0);
+    if ($d <= 0 && $c <= 0) {
+        return response()->json(['message' => 'Provide a debit and/or credit amount (> 0).'], 422);
+    }
 
-if ($d <= 0 && $c <= 0) {
-    return response()->json(['message' => 'Provide a debit and/or credit amount (> 0).'], 422);
-}
-
-    // 5) Validate account is active FOR THIS COMPANY
     $acctOk = AccountCode::where('acct_code', $payload['acct_code'])
         ->where('company_id', (int)$payload['company_id'])
         ->where('active_flag', 1)
@@ -241,11 +312,6 @@ if ($d <= 0 && $c <= 0) {
         return response()->json(['message' => 'Invalid or inactive account.'], 422);
     }
 
-// 6) Allow duplicate acct_code lines (legacy-style journals often repeat accounts)
-// (No duplicate blocking)
-
-
-    // 7) Set FK field (your table uses both naming styles)
     $payload['general_accounting_id'] = (int)$payload['transaction_id'];
 
     $detail = GeneralAccountingDetail::create($payload);
@@ -253,6 +319,7 @@ if ($d <= 0 && $c <= 0) {
 
     return response()->json(['detail_id' => $detail->id, 'totals' => $totals]);
 }
+
 
 
 /**
@@ -283,14 +350,12 @@ public function updateDetail(Request $req)
     }
 
     // 2b) Block edits if exported (locked after print/download)
+// ✅ EXPORTED: allow edits only if approved edit window exists
 if (!empty($main->exported_at)) {
-    abort(403, 'Exported journal cannot be modified.');
+    $this->requireEditApproval((int)$main->id);
 }
-    // 3) Approval gate (your existing behavior)
-    // ✅ Editable on load; lock only when exported
-if (!empty($main->exported_at)) {
-    abort(403, 'This journal entry is already exported and is locked for editing.');
-}
+
+
 
     // 4) Tenant-safe detail lookup: id + transaction_id + company_id
     $row = GeneralAccountingDetail::where('id', (int)$payload['id'])
@@ -365,14 +430,16 @@ public function deleteDetail(Request $req)
     }
 
 // 2b) Block edits if exported (locked after print/download)
+// ✅ EXPORTED: allow deletes only if approved edit window exists
 if (!empty($main->exported_at)) {
-    abort(403, 'Exported journal cannot be modified.');
-}    
+    $this->requireEditApproval((int)$main->id);
+}
+    
     // 3) Approval gate (your existing behavior)
     // ✅ Editable on load; lock only when exported
-if (!empty($main->exported_at)) {
-    abort(403, 'This journal entry is already exported and is locked for editing.');
-}
+//if (!empty($main->exported_at)) {
+//    abort(403, 'This journal entry is already exported and is locked for editing.');
+//}
 
     // 4) Tenant-safe delete: scope by id + transaction_id + company_id
     $deleted = GeneralAccountingDetail::where('id', (int)$payload['id'])
@@ -555,16 +622,36 @@ DB::table('general_accounting')
 
     
     // 4) Build PDF exactly like the working Purchase flow (no streamDownload)
-    $pdf = new MyJournalVoucherPDF('P','mm','LETTER', true, 'UTF-8', false);
-    $pdf->setPrintHeader(true);
-    $pdf->SetHeaderMargin(8);
-    $pdf->SetMargins(15, 30, 15);
-    $pdf->AddPage();
-    $pdf->SetFont('helvetica','',7);
+$pdf = new MyJournalVoucherPDF('P','mm','LETTER', true, 'UTF-8', false);
+
+$pdf->setCompanyId($companyId ? (int)$companyId : null);
+
+// prepared initials: prefer query user_id, else none
+$preparedUserId = (int) ($request->query('user_id') ?: 0);
+$pdf->setPreparedByInitials($this->userInitials($preparedUserId));
+
+$pdf->setPrintHeader(true);
+$pdf->setPrintFooter(true);
+
+$pdf->SetHeaderMargin(8);
+$pdf->SetMargins(15, 30, 15);
+$pdf->SetFooterMargin(10);
+
+// ✅ prevent footer overlap
+$pdf->SetAutoPageBreak(true, 55);
+
+$pdf->AddPage();
+$pdf->SetFont('helvetica','',7);
+
 
     // footer metadata (your subclass already exposes these setters)
     $pdf->setDataJournalDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
     $pdf->setDataJournalTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
+
+$rawGaNo = (string)($header->ga_no ?? '');
+$gaNo    = ctype_digit($rawGaNo) ? str_pad($rawGaNo, 6, '0', STR_PAD_LEFT) : $rawGaNo;
+
+
 
     $formattedDebit  = number_format($totalDebit, 2);
     $formattedCredit = number_format($totalCredit, 2);
@@ -581,7 +668,7 @@ DB::table('general_accounting')
 <tr>
   <td width="40%"><font size="10"><b>Date:</b> {$header->gen_acct_date}</font></td>
   <td width="20%"></td>
-  <td width="40%" align="left"><font size="14"><b><u>JE - {$header->ga_no}</u></b></font></td>
+  <td width="40%" align="left"><font size="14"><b><u>JE - {$gaNo}</u></b></font></td>
 </tr>
 </table>
 
@@ -602,8 +689,12 @@ DB::table('general_accounting')
 EOD;
 
     foreach ($details as $d) {
-        $debit  = $d->debit  ? number_format($d->debit, 2) : '';
-        $credit = $d->credit ? number_format($d->credit, 2) : '';
+$debitVal  = (float)($d->debit ?? 0);
+$creditVal = (float)($d->credit ?? 0);
+
+$debit  = ($debitVal  > 0) ? number_format($debitVal, 2) : '';
+$credit = ($creditVal > 0) ? number_format($creditVal, 2) : '';
+
         $acct   = htmlspecialchars($d->acct_code ?? '', ENT_QUOTES, 'UTF-8');
         $desc   = htmlspecialchars($d->acct_desc ?? '', ENT_QUOTES, 'UTF-8');
         $tbl .= <<<EOD
@@ -633,7 +724,8 @@ EOD;
 
     return response($pdfContent, 200)
         ->header('Content-Type', 'application/pdf')
-        ->header('Content-Disposition', 'inline; filename="JournalVoucher_'.$header->ga_no.'.pdf"');
+        ->header('Content-Disposition', 'inline; filename="JournalVoucher_'.$gaNo.'.pdf"');
+
 }
 
 
@@ -707,6 +799,8 @@ $details = DB::table('general_accounting_details as d')
     ->orderBy('d.id')
     ->get(['d.acct_code','a.acct_desc','d.debit','d.credit']);
 
+$rawGaNo = (string)($header->ga_no ?? '');
+$gaNo    = ctype_digit($rawGaNo) ? str_pad($rawGaNo, 6, '0', STR_PAD_LEFT) : $rawGaNo;
 
     // Spreadsheet
     $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
@@ -717,7 +811,8 @@ $details = DB::table('general_accounting_details as d')
     $sheet->setCellValue("A{$row}", 'JOURNAL VOUCHER'); $sheet->mergeCells("A{$row}:D{$row}");
     $sheet->getStyle("A{$row}")->getFont()->setBold(true)->setSize(14); $row += 2;
 
-    $sheet->setCellValue("A{$row}", 'JE No:');   $sheet->setCellValue("B{$row}", 'JE - '.$header->ga_no);
+    $sheet->setCellValue("A{$row}", 'JE No:');  $sheet->setCellValue("B{$row}", 'JE - '.$gaNo);
+
     $sheet->setCellValue("C{$row}", 'Date:');    $sheet->setCellValue("D{$row}", $header->gen_acct_date);
     $row++;
 
@@ -736,8 +831,17 @@ $details = DB::table('general_accounting_details as d')
     foreach ($details as $d) {
         $sheet->setCellValueExplicit("A{$row}", $d->acct_code, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
         $sheet->setCellValue("B{$row}", $d->acct_desc);
-        $sheet->setCellValue("C{$row}", (float)($d->debit ?? 0));
-        $sheet->setCellValue("D{$row}", (float)($d->credit ?? 0));
+$debitVal  = (float)($d->debit ?? 0);
+$creditVal = (float)($d->credit ?? 0);
+
+if ($debitVal > 0) {
+    $sheet->setCellValueExplicit("C{$row}", $debitVal, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+}
+
+if ($creditVal > 0) {
+    $sheet->setCellValueExplicit("D{$row}", $creditVal, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+}
+
         $row++;
     }
 
@@ -757,7 +861,8 @@ $details = DB::table('general_accounting_details as d')
     }
 
     // Stream
-    $fileName = 'JournalVoucher_'.$header->ga_no.'.xlsx';
+   $fileName = 'JournalVoucher_'.$gaNo.'.xlsx';
+
     $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
 
     if (ob_get_length()) { ob_end_clean(); }
@@ -794,9 +899,9 @@ public function updateMain(Request $req)
 if (in_array((string)$main->is_cancel, ['c','d','y'], true)) {
     abort(403, 'Cancelled or deleted journal cannot be updated.');
 }
-if (!empty($main->exported_at)) {
-    abort(403, 'Exported journal cannot be modified.');
-}   
+//if (!empty($main->exported_at)) {
+//    abort(403, 'Exported journal cannot be modified.');
+//}   
     $main->gen_acct_date = $data['gen_acct_date'];
     $main->explanation   = $data['explanation'];
     $main->save();

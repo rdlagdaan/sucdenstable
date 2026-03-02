@@ -65,12 +65,11 @@ const loadApprovals = async (pbnId: number) => {
 
 const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
   if (!selectedId) return;
-  const reason = prompt(`Reason for ${kind.toUpperCase()} approval request:`) || '';
+const reason = prompt(`Reason for ${kind.toUpperCase()} approval request:`);
+if (reason === null) return;
+if (reason.trim() === '') return;
 
-    if (reason === null) return;
 
-    // user submitted blank
-    if (reason.trim() === '') return;
 
   setBusyAction(kind);
   try {
@@ -97,6 +96,13 @@ const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
 
 
 
+useEffect(() => {
+  console.log('[PO Posting] list state length:', list.length, list);
+}, [list]);
+
+useEffect(() => {
+  console.log('[PO Posting] filtered length:', filtered?.length);
+}, [q]); // this is fine even if filtered is computed later
 
 
 
@@ -110,18 +116,42 @@ const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
     );
   }, [list, q]);
 
-  const loadList = async () => {
-    if (!companyId) return;
-    setLoadingList(true);
-    try {
-      const { data } = await napi.get('/pbn/posting/list', {
-        params: { company_id: companyId, status }
-      });
-      setList(Array.isArray(data) ? data : []);
-    } finally {
-      setLoadingList(false);
-    }
-  };
+const loadList = async () => {
+  if (!companyId) {
+    console.warn('[PO Posting] companyId is empty:', companyId);
+    return;
+  }
+
+  setLoadingList(true);
+  try {
+    const res = await napi.get('/pbn/posting/list', {
+      params: { company_id: companyId, status }
+    });
+
+    console.log('[PO Posting] LIST raw response:', res);
+    console.log('[PO Posting] LIST response.data:', res?.data);
+
+    const payload = res?.data;
+
+    const rows =
+      Array.isArray(payload) ? payload :
+      Array.isArray(payload?.data) ? payload.data :
+      Array.isArray(payload?.rows) ? payload.rows :
+      [];
+
+    console.log('[PO Posting] LIST rows extracted:', rows);
+    console.log('[PO Posting] LIST rows length:', rows.length);
+
+    setList(rows);
+  } catch (e: any) {
+    console.error('[PO Posting] loadList failed:', e?.response || e);
+    setList([]);
+  } finally {
+    setLoadingList(false);
+  }
+};
+
+
 
   const loadPbn = async (id: number) => {
     if (!companyId) return;
@@ -167,7 +197,7 @@ const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
             className="w-full border rounded p-2"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search PBN # / Vendor"
+            placeholder="Search PO # / Vendor"
           />
         </div>
 
@@ -183,7 +213,7 @@ const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
       <div className="grid grid-cols-12 gap-4">
         {/* LEFT LIST */}
         <div className="col-span-4 border rounded bg-white">
-          <div className="p-2 font-semibold border-b">PBN List</div>
+          <div className="p-2 font-semibold border-b">PO List</div>
           <div className="max-h-[70vh] overflow-auto">
             {filtered.map(r => (
               <button
@@ -209,18 +239,18 @@ const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
         {/* RIGHT PREVIEW */}
         <div className="col-span-8 space-y-3">
           <div className="border rounded bg-yellow-50">
-            <div className="p-3 border-b font-semibold">PBN Information (Preview First)</div>
+            <div className="p-3 border-b font-semibold">PO Information (Preview First)</div>
 
             {loadingPbn && <div className="p-3 text-sm">Loading…</div>}
 
             {!loadingPbn && !main && (
-              <div className="p-3 text-sm text-gray-600">Select a PBN to preview.</div>
+              <div className="p-3 text-sm text-gray-600">Select a PO to preview.</div>
             )}
 
             {!loadingPbn && main && (
               <div className="p-3 grid grid-cols-2 gap-2 text-sm">
-                <div><b>PBN #:</b> {main.pbn_number}</div>
-                <div><b>PBN Date:</b> {String(main.pbn_date || '')}</div>
+                <div><b>PO #:</b> {main.pbn_number}</div>
+                <div><b>PO Date:</b> {String(main.pbn_date || '')}</div>
                 <div><b>Vendor Code:</b> {main.vend_code}</div>
                 <div><b>Vendor Name:</b> {main.vendor_name}</div>
                 <div><b>Sugar Type:</b> {main.sugar_type}</div>
@@ -235,7 +265,7 @@ const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
 
           {/* DETAILS */}
           <div className="border rounded bg-white">
-            <div className="p-3 border-b font-semibold">PBN Details (Remaining Qty)</div>
+            <div className="p-3 border-b font-semibold">PO Details (Remaining Qty)</div>
 
             {main && details.length === 0 && (
               <div className="p-3 text-sm text-gray-500">No detail rows.</div>
@@ -272,7 +302,7 @@ const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
 
             {!main && (
               <div className="p-3 text-sm text-gray-500">
-                Select a PBN first to show details.
+                Select a PO first to show details.
               </div>
             )}
           </div>

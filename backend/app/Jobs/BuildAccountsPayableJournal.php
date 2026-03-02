@@ -474,16 +474,25 @@ private function buildExcel(string $file, callable $progress): void
     $ws->setCellValue("A{$r}", "For the period covering: {$from} to {$to}");
     $r += 2;
 
-    $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}");
+    /**
+     * ✅ REMOVE columns C and D by shifting to A..D only:
+     * A = code/labels/date/desc
+     * B = id/cp_no/acct_desc
+     * C = DEBIT
+     * D = CREDIT
+     */
+    $ws->fromArray(['', '', 'DEBIT', 'CREDIT'], null, "A{$r}");
     $r++;
 
-    foreach (range('A', 'G') as $col) {
-        $ws->getColumnDimension($col)->setWidth(18);
-    }
+    // Column widths (A..D only)
+    $ws->getColumnDimension('A')->setWidth(45);
+    $ws->getColumnDimension('B')->setWidth(22);
+    $ws->getColumnDimension('C')->setWidth(18);
+    $ws->getColumnDimension('D')->setWidth(18);
 
     $done = 0;
-$grandDebit  = 0.0;
-$grandCredit = 0.0;
+    $grandDebit  = 0.0;
+    $grandCredit = 0.0;
 
     DB::table('cash_purchase as r')
         ->selectRaw("
@@ -558,6 +567,7 @@ $grandCredit = 0.0;
         )
         ->orderBy('r.id')
         ->chunk(200, function ($chunk) use (&$r, $ws, &$done, $progress, &$grandDebit, &$grandCredit) {
+
             foreach ($chunk as $row) {
                 $done++;
                 $progress($done);
@@ -572,6 +582,7 @@ $grandCredit = 0.0;
                     $row->explanation
                 ])));
 
+                // Header lines per transaction
                 $ws->setCellValue("A{$r}", $row->purchase_date);
                 $ws->setCellValue("B{$r}", $row->id);
                 $r++;
@@ -589,38 +600,46 @@ $grandCredit = 0.0;
 
                     $itemTotalDebit  += $debit;
                     $itemTotalCredit += $credit;
-$grandDebit  += $debit;
-$grandCredit += $credit;
+
+                    $grandDebit  += $debit;
+                    $grandCredit += $credit;
 
                     $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
                     $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                    $ws->setCellValue("F{$r}", $debit);
-                    $ws->setCellValue("G{$r}", $credit);
-                    $ws->getStyle("F{$r}:G{$r}")
+                    $ws->setCellValue("C{$r}", $debit);
+                    $ws->setCellValue("D{$r}", $credit);
+
+                    $ws->getStyle("C{$r}:D{$r}")
                         ->getNumberFormat()
                         ->setFormatCode('#,##0.00');
+
                     $r++;
                 }
 
-                $ws->setCellValue("E{$r}", "TOTAL");
-                $ws->setCellValue("F{$r}", $itemTotalDebit);
-                $ws->setCellValue("G{$r}", $itemTotalCredit);
-                $ws->getStyle("F{$r}:G{$r}")
+                // TOTAL line (now uses B + C + D only)
+                $ws->setCellValue("B{$r}", "TOTAL");
+                $ws->setCellValue("C{$r}", $itemTotalDebit);
+                $ws->setCellValue("D{$r}", $itemTotalCredit);
+
+                $ws->getStyle("B{$r}")->getFont()->setBold(true);
+                $ws->getStyle("C{$r}:D{$r}")
                     ->getNumberFormat()
                     ->setFormatCode('#,##0.00');
 
                 $r += 2;
             }
         });
-$ws->setCellValue("E{$r}", 'GRAND TOTAL');
-$ws->setCellValue("F{$r}", $grandDebit);
-$ws->setCellValue("G{$r}", $grandCredit);
 
-$ws->getStyle("E{$r}")->getFont()->setBold(true);
-$ws->getStyle("F{$r}:G{$r}")->getFont()->setBold(true);
-$ws->getStyle("F{$r}:G{$r}")
-    ->getNumberFormat()
-    ->setFormatCode('#,##0.00');
+    // GRAND TOTAL line
+    $ws->setCellValue("B{$r}", 'GRAND TOTAL');
+    $ws->setCellValue("C{$r}", $grandDebit);
+    $ws->setCellValue("D{$r}", $grandCredit);
+
+    $ws->getStyle("B{$r}")->getFont()->setBold(true);
+    $ws->getStyle("C{$r}:D{$r}")->getFont()->setBold(true);
+    $ws->getStyle("C{$r}:D{$r}")
+        ->getNumberFormat()
+        ->setFormatCode('#,##0.00');
 
     $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
     $stream = fopen('php://temp', 'r+');
@@ -632,6 +651,7 @@ $ws->getStyle("F{$r}:G{$r}")
     $wb->disconnectWorksheets();
     unset($writer);
 }
+
 
 
 

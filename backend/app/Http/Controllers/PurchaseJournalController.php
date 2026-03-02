@@ -17,21 +17,75 @@ use PhpOffice\PhpSpreadsheet\Style\NumberFormat;
 
 
 class MyPurchaseVoucherPDF extends \TCPDF {
+
+    public $companyId = null;
+
+    public function setCompanyId(?int $companyId): void
+    {
+        $this->companyId = $companyId;
+    }
+
     public $createdDate;
     public $createdTime;
+
+    public $preparedByInitials = '';
+
+    public function setPreparedByInitials(string $initials): void
+    {
+        $this->preparedByInitials = $initials;
+    }
 
     public function setCreatedMeta($date, $time) {
         $this->createdDate = $date;
         $this->createdTime = $time;
     }
 
-    public function Header() {
+    public function Header()
+    {
+        $companyId = (int)($this->companyId ?? 0);
+
+        // =========================
+        // COMPANY 2 — AMEROP
+        // =========================
+        if ($companyId === 2) {
+
+            $logoCandidates = [
+                public_path('ameropLogo.jpg'),
+                public_path('ameropLogo.png'),
+            ];
+
+            foreach ($logoCandidates as $logo) {
+                if ($logo && is_file($logo)) {
+                    $this->Image($logo, 15, 12, 22, '', '', '', 'T', false, 300);
+                    break;
+                }
+            }
+
+            $this->SetTextColor(40, 85, 160);
+            $this->SetFont('helvetica', 'B', 12);
+            $this->Text(40, 14, 'AMEROP');
+
+            $this->SetFont('helvetica', '', 8);
+            $this->Text(40, 19, 'PHILIPPINES, INC.');
+
+            $this->SetTextColor(0, 0, 0);
+            return;
+        }
+
+        // =========================
+        // DEFAULT — SUCDEN (company_id 1)
+        // =========================
         $candidates = [
-            public_path('images/sucdenLogo.jpg'),
-            public_path('images/sucdenLogo.png'),
+            public_path('SucdenLogo.jpg'),
+            public_path('SucdenLogo.png'),
             public_path('sucdenLogo.jpg'),
             public_path('sucdenLogo.png'),
+            public_path('images/SucdenLogo.jpg'),
+            public_path('images/SucdenLogo.png'),
+            public_path('images/sucdenLogo.jpg'),
+            public_path('images/sucdenLogo.png'),
         ];
+
         foreach ($candidates as $img) {
             if ($img && is_file($img)) {
                 $ext = strtoupper(pathinfo($img, PATHINFO_EXTENSION));
@@ -41,54 +95,103 @@ class MyPurchaseVoucherPDF extends \TCPDF {
         }
     }
 
-    public function Footer() {
-        $this->SetY(-50);
-        $this->SetFont('helvetica','I',8);
-        $currentDate = date('M d, Y');
-        $currentTime = date('h:i:sa');
+public function Footer()
+{
+    $this->SetY(-50);
+    $this->SetFont('helvetica','I',8);
 
-        $html = '
-        <table border="0"><tr>
-          <td width="70%">
-            <table border="1" cellpadding="5"><tr>
-              <td><font size="8">Prepared:<br><br><br><br><br></font></td>
-              <td><font size="8">Accted by:<br><br><br><br><br></font></td>
-              <td><font size="8">Checked:<br><br><br><br><br></font></td>
-              <td><font size="8">Approved:<br><br><br><br><br></font></td>
-              <td><font size="8">Noted by:<br><br><br><br><br></font></td>
-              <td><font size="8">Posted by:<br><br><br><br><br></font></td>
-            </tr></table>
-          </td>
-          <td width="5%"></td>
-          <td width="25%">
-            <table border="1" cellpadding="5">
-              <tr><td align="center"><font size="8">Received from SUCDEN PHILIPPINES, INC.</font><br><br></td></tr>
-              <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
-            </table>
-          </td>
+    $currentDate = date('M d, Y');
+    $currentTime = date('h:i:sa');
+
+    // ✅ Company label in footer (company_id 1 vs 2)
+    $companyId = (int)($this->companyId ?? 0);
+    $receivedFrom = ($companyId === 2)
+        ? 'AMEROP PHILIPPINES, INC.'
+        : 'SUCDEN PHILIPPINES, INC.';
+
+    $html = '
+    <table border="0"><tr>
+      <td width="70%">
+        <table border="1" cellpadding="5"><tr>
+
+<td width="16%">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+    <tr>
+      <td valign="top" align="left"><font size="8">Prepared:</font></td>
+    </tr>
+
+    <tr>
+      <td height="42"></td>
+    </tr>
+
+    <tr>
+      <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
+        <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
+      </td>
+    </tr>
+  </table>
+</td>
+
+          <td><font size="8">Accted by:<br><br><br><br><br></font></td>
+          <td><font size="8">Checked:<br><br><br><br><br></font></td>
+          <td><font size="8">Approved:<br><br><br><br><br></font></td>
+          <td><font size="8">Noted by:<br><br><br><br><br></font></td>
+          <td><font size="8">Posted by:<br><br><br><br><br></font></td>
         </tr></table>
-        <br>
-        <table border="0">
-          <tr>
-            <td width="10%"><font size="8">Printed:</font></td>
-            <td width="15%"><font size="8">'.$currentDate.'</font></td>
-            <td width="15%"><font size="8">'.$currentTime.'</font></td>
-            <td width="60%"></td>
-          </tr>
-          <tr>
-            <td><font size="8">Created:</font></td>
-            <td><font size="8">'.$this->createdDate.'</font></td>
-            <td><font size="8">'.$this->createdTime.'</font></td>
-            <td></td>
-          </tr>
-        </table>';
-        $this->writeHTML($html, true, false, false, false, '');
-    }
+      </td>
+      <td width="5%"></td>
+      <td width="25%">
+        <table border="1" cellpadding="5">
+          <tr><td align="center"><font size="8">Received from __RECEIVED_FROM__</font><br><br></td></tr>
+          <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
+        </table>
+      </td>
+    </tr></table>
+    <br>
+    <table border="0">
+      <tr>
+        <td width="10%"><font size="8">Printed:</font></td>
+        <td width="15%"><font size="8">'.$currentDate.'</font></td>
+        <td width="15%"><font size="8">'.$currentTime.'</font></td>
+        <td width="60%"></td>
+      </tr>
+      <tr>
+        <td><font size="8">Created:</font></td>
+        <td width="15%"><font size="8">'.$this->createdDate.'</font></td>
+        <td width="15%"><font size="8">'.$this->createdTime.'</font></td>
+        <td></td>
+      </tr>
+    </table>';
+
+    // ✅ Safe inject to avoid quote/concat parse errors
+    $html = str_replace('__RECEIVED_FROM__', htmlspecialchars($receivedFrom), $html);
+
+    $this->writeHTML($html, true, false, false, false, '');
 }
+
+}
+
 
 class PurchaseJournalController extends Controller
 {
 
+protected function userInitials(?int $userId): string
+{
+    if (empty($userId)) return '';
+
+    if (\Illuminate\Support\Facades\Schema::hasTable('users_employees')) {
+        $u = (string) DB::table('users_employees')
+            ->where('id', (int)$userId)
+            ->value('username');
+
+        $u = strtoupper(trim((string)$u));
+        if ($u !== '') return $u;
+    }
+
+    return 'U' . (int)$userId;
+}
+
+    
     // ----------------------------
     // Cash Receipts baseline helpers
     // ----------------------------
@@ -681,12 +784,31 @@ $details = DB::table('cash_purchase_details as d')
         return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
     }
 
-    $pdf = new MyPurchaseVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-    $pdf->setPrintHeader(true);
-    $pdf->SetHeaderMargin(8);
-    $pdf->SetMargins(15,30,15);
-    $pdf->AddPage();
-    $pdf->SetFont('helvetica','',7);
+$pdf = new MyPurchaseVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
+
+// ✅ pass company_id so Header() can switch logo (AMEROP vs SUCDEN)
+$pdf->setCompanyId($companyId ? (int)$companyId : null);
+
+// ✅ prepared initials (priority: URL user_id, else header user_id)
+$preparedUserId = (int) ($request->query('user_id') ?: 0);
+if ($preparedUserId <= 0) {
+    $preparedUserId = (int) ($header->user_id ?? 0);
+}
+$pdf->setPreparedByInitials($this->userInitials($preparedUserId));
+
+$pdf->setPrintHeader(true);
+$pdf->setPrintFooter(true);
+
+$pdf->SetMargins(15, 30, 15);
+$pdf->SetHeaderMargin(8);
+$pdf->SetFooterMargin(10);
+
+// ✅ Reserve footer space so body never overlaps footer
+$pdf->SetAutoPageBreak(true, 55);
+
+$pdf->AddPage();
+$pdf->SetFont('helvetica','',7);
+
 
     $pdf->setCreatedMeta(
         \Carbon\Carbon::parse($header->created_at)->format('M d, Y'),
@@ -739,8 +861,12 @@ $details = DB::table('cash_purchase_details as d')
 EOD;
 
     foreach ($details as $d) {
-        $debit  = $d->debit  ? number_format($d->debit, 2) : '';
-        $credit = $d->credit ? number_format($d->credit, 2) : '';
+$debitVal  = (float)($d->debit ?? 0);
+$creditVal = (float)($d->credit ?? 0);
+
+$debit  = ($debitVal  > 0) ? number_format($debitVal, 2) : '';
+$credit = ($creditVal > 0) ? number_format($creditVal, 2) : '';
+
         $tbl .= <<<EOD
   <tr>
     <td align="left"><font size="10">{$d->acct_code}</font></td>
@@ -1049,8 +1175,16 @@ $header = DB::table('cash_purchase as cp')
     foreach ($details as $d) {
         $sheet->setCellValue("A{$row}", (string)$d->acct_code);
         $sheet->setCellValue("B{$row}", (string)$d->acct_desc);
-        if ($d->debit !== null)  $sheet->setCellValue("C{$row}", (float)$d->debit);
-        if ($d->credit !== null) $sheet->setCellValue("D{$row}", (float)$d->credit);
+$debitVal  = (float)($d->debit ?? 0);
+$creditVal = (float)($d->credit ?? 0);
+
+if ($debitVal > 0) {
+    $sheet->setCellValueExplicit("C{$row}", $debitVal, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+}
+
+if ($creditVal > 0) {
+    $sheet->setCellValueExplicit("D{$row}", $creditVal, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_NUMERIC);
+}
         $row++;
     }
 

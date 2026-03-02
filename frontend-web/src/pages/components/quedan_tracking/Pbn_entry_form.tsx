@@ -41,56 +41,29 @@ interface PbnDropdownItem {
 interface PbnDetailRow {
   id?: number;
   row?: number;
+
+  particulars: string;      // ✅ NEW
   mill: string;
   quantity: number;
-  unit_cost: number;
+
+  price: number;            // ✅ renamed from unit_cost
+  handling_fee: number;     // ✅ NEW input
   commission: number;
+
   cost: number;
   total_commission: number;
+
+  handling: number;         // ✅ NEW readonly computed
   total_cost: number;
+
   pbn_entry_id?: number;
-  pbn_number?: string;
+  pbn_number?: string;      // keep for now, but backend may return po_number too
   persisted?: boolean;
 }
 
+
 type MillLite = { mill_id: string | number; mill_name: string; company_id: number };
 
-/* ---------------- Vendor normalization helpers (FIXED) ---------------- */
-type AnyVendor = Record<string, unknown>;
-
-function asString(x: unknown): string {
-  return typeof x === 'string' ? x : (x == null ? '' : String(x));
-}
-
-function pickVendorCode(v: AnyVendor): string {
-  // try common keys in order
-  const val =
-    v['code'] ??
-    v['value'] ??
-    v['vend_code'] ??
-    v['vendor_code'];
-  return asString(val).trim();
-}
-
-function pickVendorName(v: AnyVendor): string {
-  const val =
-    v['description'] ??
-    v['label'] ??
-    v['vend_name'] ??
-    v['vendor_name'];
-  return asString(val).trim();
-}
-
-function findVendorByCode(items: AnyVendor[] | undefined, code: string): AnyVendor | undefined {
-  if (!items || !code) return undefined;
-  const want = code.trim().toUpperCase();
-  for (const v of items) {
-    const have = pickVendorCode(v).toUpperCase();
-    if (have && have === want) return v;
-  }
-  return undefined;
-}
-/* --------------------------------------------------------------------- */
 
 
 //This will become a part of the utilities component
@@ -116,15 +89,20 @@ export default function PurchaseBookNote() {
   const [selectedVendor, setSelectedVendor] = useState('');
   const [vendorName, setVendorName] = useState('');
   const [pbnDate, setPbnDate] = useState('');
+const [note, setNote] = useState('');
 
   //Establishing data state for the Handsontable
   const [handsontableEnabled, setHandsontableEnabled] = useState(false);
   const [mainEntryId, setMainEntryId] = useState<number | null>(null);
 
   const [_pdfModalOpen, setPdfModalOpen] = useState(false);
-  const [pdfUrl, setPdfUrl] = useState<string | undefined>(undefined);
+  // ✅ PDF modal state (these MUST exist if you use showPdf/setShowPdf in JSX)
+const [showPdf, setShowPdf] = useState(false);
+
+  const [pdfUrl, setPdfUrl] = useState<string>(''); // never undefined
+
   // ⬇️ add these two right after your other useState hooks
-  const [showPdf, setShowPdf] = useState(false);
+  const pdfBlobUrlRef = useRef<string | null>(null);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const isPbnReady = !!mainEntryId;   // true when a PBN is saved/selected
 
@@ -179,6 +157,7 @@ export default function PurchaseBookNote() {
 
   //Establishing the data state for the Handsontable's mills
   const [mills, setMills] = useState<{ mill_id: string; mill_name: string }[]>([]);
+const [particularsList, setParticularsList] = useState<string[]>([]);
 
   const [pbnOptions, setPbnOptions] = useState<PbnDropdownItem[]>([]);
   const [selectedPbnNo, setSelectedPbnNo] = useState('');
@@ -189,8 +168,105 @@ export default function PurchaseBookNote() {
   const [isExistingRecord, setIsExistingRecord] = useState(false);
 
   const sugarTypes = useDropdownOptions('/sugar-types');
-  const cropYears = useDropdownOptions('/crop-years');
-  const vendors = useDropdownOptions('/vendors');
+  //const cropYears = useDropdownOptions('/crop-years');
+  
+  // ✅ Crop years MUST include begin_year/end_year (hook likely strips these),
+  // so we load them raw here.
+  const [cropYearSearch, setCropYearSearch] = useState('');
+  const [cropYearRawItems, setCropYearRawItems] = useState<any[]>([]);
+
+
+
+  // ✅ Normalize CropYears to what DropdownWithHeaders expects
+  // ✅ Crop Year: show BYear=begin_year and EYear=end_year
+  // ✅ Crop Year dropdown items: Byear=begin_year, Eyear=end_year (and local search)
+  // ✅ Crop Year dropdown: code = crop_year, description = "begin_year - end_year"
+  // This avoids relying on extra columns that DropdownWithHeaders is not rendering correctly.
+  const cropYearItems = useMemo(() => {
+    const src = Array.isArray(cropYearRawItems) ? cropYearRawItems : [];
+
+    return src
+      .map((cy: any) => {
+        const crop  = String(cy?.crop_year ?? '').trim();
+        const begin = String(cy?.begin_year ?? '').trim();
+        const end   = String(cy?.end_year ?? '').trim();
+
+        return {
+          code: crop,                           // ✅ 1st column: crop_year
+          description: `${begin} - ${end}`,     // ✅ 2nd/3rd shown together reliably
+          begin_year: begin,                    // keep available if needed later
+          end_year: end,
+        };
+      })
+      .filter(x => !!x.code);
+  }, [cropYearRawItems]);
+
+
+
+
+
+
+  // ✅ Vendors: load ONCE (same pattern as CashDisbursement), then DropdownWithHeaders filters locally
+const [vendors, setVendors] = useState<{ code: string; description: string }[]>([]);
+const [vendSearch, setVendSearch] = useState('');
+
+useEffect(() => {
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+
+  let cancelled = false;
+
+  (async () => {
+    try {
+      const { data } = await napi.get('/vendors', {
+        params: { company_id: user?.company_id || '' },
+      });
+
+      const src = Array.isArray(data) ? data : [];
+
+      // normalize -> {code, description} then dedupe by code
+      const seen = new Set<string>();
+      const out: { code: string; description: string }[] = [];
+
+      for (const v of src) {
+        const code = String(v?.vend_code ?? v?.vend_id ?? v?.code ?? '').trim();
+        const name = String(v?.vend_name ?? v?.vendor_name ?? v?.description ?? '').trim();
+        if (!code) continue;
+
+        const k = code.toUpperCase(); // dedupe by code
+        if (seen.has(k)) continue;
+        seen.add(k);
+
+        out.push({ code, description: name });
+      }
+
+      if (!cancelled) setVendors(out);
+    } catch (e) {
+      console.error('Failed to load vendors', e);
+      if (!cancelled) setVendors([]);
+    }
+  })();
+
+  return () => { cancelled = true; };
+}, []);
+
+    // ✅ Company scope for vendor filtering (prevents cross-company duplicates if payload includes company_id)
+  //const companyId = useMemo(() => {
+  //  const storedUser = localStorage.getItem('user');
+  //  const user = storedUser ? JSON.parse(storedUser) : null;
+  //  return Number(user?.company_id || 0);
+  //}, []);
+
+
+
+    // ✅ Normalize Vendors to what DropdownWithHeaders expects so search works reliably
+  
+
+
+
+
+
+
   const [pendingDetails, setPendingDetails] = useState<PbnDetailRow[]>([]);
 
   // NEW ref — used to safely detect when mainEntryId is updated
@@ -256,18 +332,23 @@ export default function PurchaseBookNote() {
     return Math.min(desired, maxGridHeight);
   }, [tableData.length, maxGridHeight]);
 
-  const isRowComplete = (row: any) => {
-    return (
-      row.mill &&
-      row.quantity !== undefined &&
-      row.unit_cost !== undefined &&
-      row.commission !== undefined &&
-      row.mill !== '' &&
-      row.quantity !== '' &&
-      row.unit_cost !== '' &&
-      row.commission !== ''
-    );
-  };
+const isRowComplete = (row: any) => {
+  return (
+    row.particulars &&
+    row.mill &&
+    row.quantity !== undefined &&
+    row.price !== undefined &&
+    row.handling_fee !== undefined &&
+    row.commission !== undefined &&
+    row.particulars !== '' &&
+    row.mill !== '' &&
+    row.quantity !== '' &&
+    row.price !== '' &&
+    row.handling_fee !== '' &&
+    row.commission !== ''
+  );
+};
+
 
   // ---- Trailing blank rows helpers (add below isRowComplete) ----
   const TRAILING_BUFFER_ROWS = 4;
@@ -275,19 +356,27 @@ export default function PurchaseBookNote() {
   const gridLocked = posted === true; // lock when posted
 
 
-  const emptyRow = (): PbnDetailRow => ({
-    mill: '',
-    quantity: 0,
-    unit_cost: 0,
-    commission: 0,
-    cost: 0,
-    total_commission: 0,
-    total_cost: 0,
-    persisted: false,
-  });
+const emptyRow = (): PbnDetailRow => ({
+  particulars: '',
+  mill: '',
+  quantity: 0,
 
-  const isRowEmpty = (r?: PbnDetailRow) =>
-    !r?.mill && !r?.quantity && !r?.unit_cost && !r?.commission;
+  price: 0,
+  handling_fee: 0,
+  commission: 0,
+
+  cost: 0,
+  total_commission: 0,
+  handling: 0,
+  total_cost: 0,
+
+  persisted: false,
+});
+
+
+const isRowEmpty = (r?: PbnDetailRow) =>
+  !r?.particulars && !r?.mill && !r?.quantity && !r?.price && !r?.commission && !r?.handling_fee;
+
 
   const ensureTrailingBuffer = (data: PbnDetailRow[]) => {
     const out = [...data];
@@ -323,9 +412,66 @@ export default function PurchaseBookNote() {
     setPbnOptions(mapped);
   };
 
+
+  useEffect(() => {
+    const storedUser = localStorage.getItem('user');
+    const user = storedUser ? JSON.parse(storedUser) : null;
+
+    let cancelled = false;
+
+    async function loadCropYears() {
+      try {
+        const { data } = await napi.get('/crop-years', {
+          params: { company_id: user?.company_id || '' },
+        });
+
+        if (!cancelled) {
+          setCropYearRawItems(Array.isArray(data) ? data : []);
+        }
+      } catch (e) {
+        console.error('Failed to load crop years', e);
+        if (!cancelled) setCropYearRawItems([]);
+      }
+    }
+
+    loadCropYears();
+    return () => { cancelled = true; };
+  }, []);
+
+
   useEffect(() => {
     fetchPbnEntries();
   }, [includePosted]);
+
+
+useEffect(() => {
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+
+  let cancelled = false;
+
+  async function loadParticulars() {
+    try {
+      const { data } = await napi.get('/pbn/particulars', {
+        params: { company_id: user?.company_id || '' },
+      });
+
+      // Expect backend to return: [{particular_name: 'RAW SUGAR'}, ...]
+      const names = Array.isArray(data)
+        ? data.map((x: any) => String(x?.particular_name || '').trim()).filter(Boolean)
+        : [];
+
+      if (!cancelled) setParticularsList(names);
+    } catch (e) {
+      console.error('Failed to load particulars', e);
+      if (!cancelled) setParticularsList([]);
+    }
+  }
+
+  loadParticulars();
+  return () => { cancelled = true; };
+}, []);
+
 
   /*useEffect(() => {
     napi.get('/api/mills').then(res => setMills(res.data));
@@ -361,23 +507,17 @@ export default function PurchaseBookNote() {
   }, []);
 
   /* -------- Auto-populate Vendor Name when vendor changes or list updates (REPLACED) -------- */
+// ✅ Auto-fill Vendor Name based on selected vendor code
 useEffect(() => {
-  if (!selectedVendor || !Array.isArray(vendors.items) || vendors.items.length === 0) return;
-  const v = findVendorByCode(vendors.items as AnyVendor[], selectedVendor);
-  if (v) {
-    setVendorName(pickVendorName(v)); // only set when found; never blank out
-  }
-}, [selectedVendor, vendors.items]);
+  if (!selectedVendor) return;
+  const sel = vendors.find(v => String(v.code) === String(selectedVendor));
+  if (sel) setVendorName(sel.description || '');
+}, [selectedVendor, vendors]);
+
 
   /* ------------------------------------------------------------------------------------------ */
 
-  useEffect(() => {
-    if (mainEntryId && pendingDetails.length > 0) {
-      setTableData(pendingDetails);
-      setHandsontableEnabled(true);
-      setPendingDetails([]);
-    }
-  }, [mainEntryId, pendingDetails]);
+
 
   useEffect(() => {
     mainEntryIdRef.current = mainEntryId;
@@ -400,6 +540,8 @@ useEffect(() => {
     setSelectedVendor('');
     setVendorName('');
     setPbnDate('');
+    setNote('');
+
     setPosted(false);
     setHandsontableEnabled(false);
     setMainEntryId(null);
@@ -428,32 +570,33 @@ useEffect(() => {
         return;
       }
 
-      const { data } = await napi.get('/pbn/generate-pbn-number', {
-        params: {
-          company_id: companyId,
-          sugar_type: selectedSugarType,
-        },
-      });
+// ✅ PO number is now generated by backend using application_settings (PONoImpExp)
+// No separate "generate" call here.
 
-      const generatedPbnNumber = data.pbn_number;
-      setPbnNumber(generatedPbnNumber);
 
-      const res = await napi.post('/pbn/save-main', {
-        sugar_type: selectedSugarType,
-        crop_year: selectedCropYear,
-        pbn_date: pbnDate,
-        vend_code: selectedVendor,
-        vendor_name: vendorName,
-        pbn_number: generatedPbnNumber,
-        posted_flag: posted,
-        company_id: companyId,
-      });
+
+const res = await napi.post('/pbn/save-main', {
+  sugar_type: selectedSugarType,
+  crop_year: selectedCropYear,
+  pbn_date: pbnDate,
+  vend_code: selectedVendor,
+  vendor_name: vendorName,
+  note,
+  posted_flag: posted,
+  company_id: companyId,
+});
+
 
       await fetchPbnEntries();
 
-      const { id } = res.data;
-      setMainEntryId(id);
-      setSelectedPbnNo(id.toString());
+const { id, po_number } = res.data;
+
+setMainEntryId(id);
+setSelectedPbnNo(id.toString());
+
+// ✅ display/store PO number in state
+setPbnNumber(String(po_number || ''));
+
 
       setTableData(ensureTrailingBuffer([emptyRow()]));
 
@@ -490,9 +633,15 @@ useEffect(() => {
       row: rowIndex,
       company_id: user.company_id,
       user_id: user.id,
-      cost: Math.round(rowData.quantity * rowData.unit_cost * 100) / 100,
-      total_commission: rowData.quantity * rowData.commission,
-      total_cost: (rowData.quantity * rowData.unit_cost) + (rowData.quantity * rowData.commission),
+cost: Math.round((rowData.quantity * rowData.price) * 100) / 100,
+total_commission: Math.round((rowData.quantity * rowData.commission) * 100) / 100,
+handling: Math.round((rowData.price * rowData.handling_fee) * 100) / 100,
+total_cost: Math.round((
+  (rowData.quantity * rowData.price) +
+  (rowData.quantity * rowData.commission) +
+  (rowData.price * rowData.handling_fee)
+) * 100) / 100,
+
     };
 
     try {
@@ -508,15 +657,8 @@ useEffect(() => {
         updatedData[rowIndex] = updatedRow;
 
         if (rowIndex === updatedData.length - 1) {
-          updatedData.push({
-            mill: '',
-            quantity: 0,
-            unit_cost: 0,
-            commission: 0,
-            cost: 0,
-            total_commission: 0,
-            total_cost: 0,
-          });
+updatedData.push(emptyRow());
+
         }
 
         setTableData(updatedData);
@@ -533,9 +675,10 @@ useEffect(() => {
       const storedUser = localStorage.getItem('user');
       const user = storedUser ? JSON.parse(storedUser) : null;
 
-      const res = await napi.get(`/id/${selectedId}`, {
+      const res = await napi.get(`/pbn/${selectedId}`, {
         params: { company_id: user?.company_id },
       });
+
 
       const data = res.data;
 
@@ -546,27 +689,39 @@ useEffect(() => {
       setSelectedCropYear(data.main.crop_year);
       setSelectedVendor(data.main.vend_code);
       setVendorName(data.main.vendor_name);
+
+setNote(data.main.note || '');
+
       setPosted(data.main.posted_flag === 1);
       setPbnDate(formatDateToYYYYMMDD(data.main.pbn_date));
       setIsExistingRecord(true);
 
       // 🔁 Fallback if vendor_name missing in the record: derive from vendors list
-      if (!data.main.vendor_name && Array.isArray(vendors.items)) {
-        const v = findVendorByCode(vendors.items as AnyVendor[], data.main.vend_code || '');
-        if (v) setVendorName(pickVendorName(v));
-      }
+// 🔁 Fallback if vendor_name missing in the record: derive from loaded vendors list
+if (!data.main.vendor_name) {
+  const sel = vendors.find(v => String(v.code) === String(data.main.vend_code || ''));
+  if (sel) setVendorName(sel.description || '');
+}
+
 
       const normalizedDetails: PbnDetailRow[] = Array.isArray(data.details) && data.details.length > 0
         ? data.details.map((detail: any) => ({
+particulars: detail.particulars || '',
+            
             mill: detail.mill || '',
             quantity: detail.quantity ?? 0,
-            unit_cost: detail.unit_cost ?? 0,
+            price: detail.price ?? detail.unit_cost ?? 0,
             commission: detail.commission ?? 0,
-            cost: Math.round((detail.quantity ?? 0) * (detail.unit_cost ?? 0) * 100) / 100,
+            handling_fee: detail.handling_fee ?? 0,
+
+            cost: Math.round((detail.quantity ?? 0) * ((detail.price ?? detail.unit_cost) ?? 0) * 100) / 100,
             total_commission: (detail.quantity ?? 0) * (detail.commission ?? 0),
-            total_cost:
-              (detail.quantity ?? 0) * (detail.unit_cost ?? 0) +
-              (detail.quantity ?? 0) * (detail.commission ?? 0),
+handling: Math.round((((detail.price ?? detail.unit_cost) ?? 0) * (detail.handling_fee ?? 0)) * 100) / 100,
+total_cost:
+  ((detail.quantity ?? 0) * (((detail.price ?? detail.unit_cost) ?? 0))) +
+  ((detail.quantity ?? 0) * (detail.commission ?? 0)) +
+  ((((detail.price ?? detail.unit_cost) ?? 0) * (detail.handling_fee ?? 0))),
+
             id: detail.id,
             row: detail.row,
             pbn_entry_id: detail.pbn_entry_id,
@@ -574,16 +729,8 @@ useEffect(() => {
             persisted: true,
           }))
         : [
-            {
-              mill: '',
-              quantity: 0,
-              unit_cost: 0,
-              commission: 0,
-              cost: 0,
-              total_commission: 0,
-              total_cost: 0,
-              persisted: false,
-            },
+emptyRow(),
+
           ];
 
       // ❗ Step 1: Set the normalized details, but don't enable yet
@@ -591,8 +738,8 @@ useEffect(() => {
 
       // ❗ Step 2: Set the ID — and wait for React to complete this state change
       setMainEntryId(data.main.id);
-      setPbnNumber(data.main.pbn_number); // ✅ This is the missing line
-    } catch (err) {
+      setPbnNumber(data.main.po_number || data.main.pbn_number || '');
+   } catch (err) {
       console.error('Failed to fetch PBN data:', err);
     }
   };
@@ -609,7 +756,7 @@ useEffect(() => {
   }, [pbnOptions, pbnSearch]);
 
 // OPEN PBN PDF (fixed: use API route + cache-buster)
-const handleOpenPbnPdf = () => {
+const handleOpenPbnPdf = async () => {
   if (!selectedPbnNo) {
     toast.error('Please select or save a PBN first.');
     return;
@@ -618,18 +765,68 @@ const handleOpenPbnPdf = () => {
   const storedUser = localStorage.getItem('user');
   const user = storedUser ? JSON.parse(storedUser) : null;
 
-  // Use the API prefix + cache-buster
-  const url =
-    `/api/pbn/form-pdf/${selectedPbnNo}` +
-    `?company_id=${encodeURIComponent(user?.company_id || '')}` +
-    `&_=${Date.now()}`;
+  // cleanup previous blob url if any
+  if (pdfBlobUrlRef.current) {
+    URL.revokeObjectURL(pdfBlobUrlRef.current);
+    pdfBlobUrlRef.current = null;
+  }
 
-  setPdfUrl(url);
+  try {
+    // IMPORTANT: use axios instance so baseURL + cookies are correct
+    const res = await napi.get(`/pbn/form-pdf/${selectedPbnNo}`, {
+      responseType: 'blob',
+      params: {
+        company_id: user?.company_id || '',
+        _: Date.now(),
+      },
+    });
 
-  // Consolidate to a single modal
-  setShowPdf(true);
-  setPdfModalOpen(false); // ensure the old modal stays closed
+    const ct = String(res.headers['content-type'] || '');
+
+    // If server returned HTML/JSON, that means redirect/404/error, not a PDF
+    if (!ct.includes('application/pdf')) {
+      // Try to decode error message
+      try {
+        const txt = await (res.data as Blob).text();
+        // JSON?
+        if (ct.includes('application/json')) {
+          const j = JSON.parse(txt);
+          toast.error(j?.message || 'PDF export failed.');
+        } else {
+          toast.error('PDF export failed (server returned non-PDF response).');
+          console.error('Non-PDF response:', txt);
+        }
+      } catch {
+        toast.error('PDF export failed (unexpected response).');
+      }
+      return;
+    }
+
+    const blob = new Blob([res.data], { type: 'application/pdf' });
+    const blobUrl = URL.createObjectURL(blob);
+    pdfBlobUrlRef.current = blobUrl;
+
+    setPdfUrl(blobUrl);
+    setShowPdf(true);
+    setPdfModalOpen(false);
+  } catch (e: any) {
+    // If backend returned JSON error as blob, show message
+    const blob = e?.response?.data;
+    if (blob instanceof Blob) {
+      try {
+        const txt = await blob.text();
+        const j = JSON.parse(txt);
+        toast.error(j?.message || 'PDF export failed.');
+        return;
+      } catch {/* ignore */}
+    }
+
+    toast.error(e?.response?.data?.message || 'PDF export failed.');
+    console.error(e);
+  }
 };
+
+
 
 
 
@@ -677,7 +874,8 @@ const handleDownloadPbnExcel = async () => {
     // Filename from Content-Disposition or fallback
     const cd = String(res.headers['content-disposition'] || '');
     const m  = cd.match(/filename\*?=(?:UTF-8'')?("?)([^";]+)\1/i) || [];
-    const name = decodeURIComponent(m[2] || `PBN_${pbnNumber || mainEntryId}.xlsx`);
+        const name = decodeURIComponent(m[2] || `PO_${pbnNumber || mainEntryId}.xls`);
+
 
     const blob = new Blob([res.data], {
       type: ct || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -709,9 +907,11 @@ const handleDownloadPbnExcel = async () => {
 
 const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
   // return only overrides; HOT merges this with defaults
-  if (posted && (col === 0 || col === 1 || col === 2 || col === 3)) {
-    return { readOnly: true };
-  }
+// When posted, lock ALL input columns (Particulars..Commission)
+if (posted && (col >= 0 && col <= 5)) {
+  return { readOnly: true };
+}
+
   return {};
 };
 
@@ -722,7 +922,7 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
       <ToastContainer position="top-right" autoClose={3000} />
 
       <div className="bg-yellow-50 shadow-md rounded-lg p-6 space-y-4 border border-yellow-400">
-        <h2 className="text-xl font-bold text-green-800 mb-4">Purchase Book Note Entry Main</h2>
+        <h2 className="text-xl font-bold text-green-800 mb-4">Purchase Order Entry Main</h2>
 
         <div className="flex items-end gap-2 w-full">
           {/* Checkbox and Label */}
@@ -733,7 +933,7 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
               onChange={() => setIncludePosted(!includePosted)}
               className="form-checkbox h-4 w-4 text-blue-600"
             />
-            <label className="text-sm font-medium text-gray-700">PBN #</label>
+            <label className="text-sm font-medium text-gray-700">PO #</label>
           </div>
 
           {/* Dropdown */}
@@ -745,7 +945,7 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
               items={filteredPbnOptions}
               search={pbnSearch}
               onSearchChange={setPbnSearch}
-              headers={['ID', 'PBN Number', 'Sugar Type',  'Vendor Name', 'Crop Year', 'PBN Date']}
+              headers={['ID', 'PBN Number', 'Sugar Type',  'Vendor Name', 'Crop Year', 'PO Date']}
               dropdownPositionStyle={{ minWidth: '1200px' }}
               columnWidths={[
                 '30px', '150px', '60px',  '200px', '80px', '120px'
@@ -757,33 +957,71 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
 
         <div className="grid grid-cols-3 gap-4">
           <DropdownWithHeaders label="Sugar Type" value={selectedSugarType} onChange={setSelectedSugarType} items={sugarTypes.items} search={sugarTypes.search} onSearchChange={sugarTypes.setSearch} headers={['Sugar Type', 'Description']} />
-          <DropdownWithHeaders label="Crop Year" value={selectedCropYear} onChange={setSelectedCropYear} items={cropYears.items} search={cropYears.search} onSearchChange={cropYears.setSearch} headers={['Crop Year', 'FYear', 'TYear']} />
+          <DropdownWithHeaders
+            label="Crop Year"
+            value={selectedCropYear}
+            onChange={setSelectedCropYear}
+            items={cropYearItems}
+            search={cropYearSearch}
+            onSearchChange={setCropYearSearch}
+            headers={['Crop Year', 'Begin - End']}   // ✅ matches what we reliably show
+            customKey="cropYear"
+          />
+
+
+
+
           <div>
-            <label>PBN Date</label>
+            <label>PO Date</label>
             <input type="date" value={pbnDate} onChange={(e) => setPbnDate(e.target.value)} className="w-full border p-2 bg-green-100 text-green-900" />
           </div>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
-          <DropdownWithHeaders
-            label="Vendor"
-            value={selectedVendor}
-            onChange={setSelectedVendor}
-            items={vendors.items}
-            search={vendors.search}
-            onSearchChange={vendors.setSearch}
-            headers={['Vendor Code', 'Vendor Name']}
-          />
+<DropdownWithHeaders
+  label="Vendor"
+  value={selectedVendor}
+  onChange={(v) => {
+    setSelectedVendor(v);
+    const sel = vendors.find(x => String(x.code) === String(v));
+    setVendorName(sel?.description || '');
+  }}
+  items={vendors}
+  search={vendSearch}
+  onSearchChange={setVendSearch}
+  headers={['Vendor Code', 'Vendor Name']}
+  customKey="vendor"
+/>
+
+
+
+
+
+
+
           <div>
             <label className="block">Vendor Name</label>
             <input disabled className="w-full border p-2 bg-green-100 text-green-900" value={vendorName} />
           </div>
         </div>
+
+<div className="mt-2">
+  <label className="block">Note</label>
+  <textarea
+    value={note}
+    onChange={(e) => setNote(e.target.value)}
+    className="w-full border p-2 bg-white text-gray-900 min-h-[90px]"
+    placeholder="Enter note..."
+    disabled={posted}
+  />
+</div>
+
+
       </div>
 
       <div ref={detailsWrapRef} className="relative z-0">
         <h2 className="text-lg font-semibold text-gray-800 mb-2 mt-6">
-          Purchase Book Note Details
+          Purchase Order Details
         </h2>
         {handsontableEnabled && (
           <HotTable
@@ -791,33 +1029,63 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
             data={tableData}
             readOnly={posted}            // global lock (good baseline)
             cells={cellProps}  
-            colHeaders={['Mill', 'Quantity', 'Unit Cost', 'Commission', 'Cost', 'Total Commission', 'Total Cost']}
-            columns={[
-              {
-                data: 'mill',
-                type: 'autocomplete',        // base editor
-                //source: mills.map(m => m.mill_name),
-                source: (query, cb) => {
-                  const list = mills.map(m => m.mill_name);
-                  if (!query) return cb(list);
-                  const q = String(query).toLowerCase();
-                  cb(list.filter(name => name.toLowerCase().includes(q)));
-                },
+            colHeaders={[
+  'Particulars',
+  'Mill',
+  'Quantity',
+  'Price',
+  'Handling Fee',
+  'Commission',
+  'Cost',
+  'Total Commission',
+  'Handling',
+  'Total Cost',
+]}
+columns={[
+  {
+    data: 'particulars',
+    type: 'autocomplete',
+    source: (query, cb) => {
+      const list = particularsList;
+      if (!query) return cb(list);
+      const q = String(query).toLowerCase();
+      cb(list.filter(name => name.toLowerCase().includes(q)));
+    },
+    strict: true,
+    allowInvalid: false,
+    filter: true,
+    visibleRows: 10,
+    trimDropdown: false,
+    readOnly: gridLocked,
+  },
+  {
+    data: 'mill',
+    type: 'autocomplete',
+    source: (query, cb) => {
+      const list = mills.map(m => m.mill_name);
+      if (!query) return cb(list);
+      const q = String(query).toLowerCase();
+      cb(list.filter(name => name.toLowerCase().includes(q)));
+    },
+    strict: false,
+    filter: true,
+    allowInvalid: false,
+    visibleRows: 10,
+    trimDropdown: false,
+    readOnly: gridLocked,
+  },
+  { data: 'quantity', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
+  { data: 'price', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
+  { data: 'handling_fee', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
+  { data: 'commission', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
 
-                strict: false,
-                filter: true,
-                allowInvalid: false,
-                visibleRows: 10,              // show 8 items
-                trimDropdown: false,          // optionally allow wider dropdown
-                readOnly: gridLocked,
-              },
-              { data: 'quantity', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
-              { data: 'unit_cost', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
-              { data: 'commission', type: 'numeric', numericFormat: { pattern: '0,0.00' } },
-              { data: 'cost', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
-              { data: 'total_commission', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
-              { data: 'total_cost', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
-            ]}
+  { data: 'cost', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
+  { data: 'total_commission', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
+
+  { data: 'handling', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
+  { data: 'total_cost', type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' } },
+]}
+
 
             afterBeginEditing={(row, col) => {
               isEditingRef.current = true;
@@ -895,12 +1163,20 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
                 if (!row) return;
 
                 const qty = row.quantity ?? 0;
-                const uc = row.unit_cost ?? 0;
-                const com = row.commission ?? 0;
+const price = row.price ?? 0;
+const hf    = row.handling_fee ?? 0;
+const com   = row.commission ?? 0;
 
-                row.cost = Math.round(qty * uc * 100) / 100;
-                row.total_commission = qty * com;
-                row.total_cost = row.cost + row.total_commission;
+row.cost = Math.round(qty * price * 100) / 100;
+row.total_commission = Math.round(qty * com * 100) / 100;
+
+// Handling = Price * Handling Fee (as required)
+row.handling = Math.round(price * hf * 100) / 100;
+
+// Total Cost includes handling (recommended; otherwise Handling is ignored)
+// If you want Total Cost to exclude handling, tell me and I will adjust.
+row.total_cost = Math.round((row.cost + row.total_commission + row.handling) * 100) / 100;
+
 
                 console.log(row);
                 if (isRowComplete(row)) {
@@ -920,15 +1196,8 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
               });
 
               if (shouldAppendRow) {
-                newData.push({
-                  mill: '',
-                  quantity: 0,
-                  unit_cost: 0,
-                  commission: 0,
-                  cost: 0,
-                  total_commission: 0,
-                  total_cost: 0,
-                });
+newData.push(emptyRow());
+
               }
 
               setTableData(ensureTrailingBuffer(newData));
@@ -1060,7 +1329,11 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
               <div className="mt-1 w-60 rounded-md border bg-white shadow-lg py-1">
                 <button
                   type="button"
-                  onClick={handleOpenPbnPdf}
+                  onMouseDown={(e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  handleOpenPbnPdf();
+}}
                   className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
                 >
                   <DocumentTextIcon className="h-5 w-5 text-red-600" />
@@ -1140,20 +1413,36 @@ const cellProps: Handsontable.GridSettings['cells'] = (_row, col) => {
   <div className="fixed inset-0 z-[10000] bg-black/50 flex items-center justify-center">
     <div className="bg-white rounded-lg shadow-xl w-[90vw] h-[85vh] relative">
       <button
-        onClick={() => setShowPdf(false)}
+        onClick={() => {
+  setShowPdf(false);
+  if (pdfBlobUrlRef.current) {
+    URL.revokeObjectURL(pdfBlobUrlRef.current);
+    pdfBlobUrlRef.current = null;
+  }
+  setPdfUrl('');
+}}
         className="absolute top-2 right-2 rounded-full px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200"
         aria-label="Close"
       >
         ✕
       </button>
+
       <div className="h-full w-full pt-8">
-        <iframe
-          key={pdfUrl}                        // <- forces rerender on URL change
-          title="PBN Form PDF"
-          src={pdfUrl}
-          className="w-full h-full"
-          style={{ border: 'none' }}
-        />
+        {!pdfUrl ? (
+          <div className="h-full w-full flex items-center justify-center text-gray-600">
+            Loading PDF…
+          </div>
+        ) : (
+          <iframe
+            key={pdfUrl} // rerender when url changes
+            title="PBN Form PDF"
+            src={pdfUrl}
+            className="w-full h-full"
+            style={{ border: 'none' }}
+            onLoad={() => console.log('✅ iframe loaded:', pdfUrl)}
+            onError={() => console.log('❌ iframe error:', pdfUrl)}
+          />
+        )}
       </div>
     </div>
   </div>

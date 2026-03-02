@@ -413,138 +413,168 @@ $pdf->writeHTML($grandHtml, true, false, false, false, '');
         Storage::disk('local')->put($file, $pdf->Output('cash-disbursements.pdf', 'S'));
     }
 
-    private function buildExcel(string $file, callable $progress): void
-    {
-        $cid = (int) ($this->companyId ?? 0);
+private function buildExcel(string $file, callable $progress): void
+{
+    $cid = (int) ($this->companyId ?? 0);
 
-        $acctHasCompany = Schema::hasColumn('account_code', 'company_id');
-        $vendHasCompany = Schema::hasColumn('vendor_list', 'company_id');
+    $acctHasCompany = Schema::hasColumn('account_code', 'company_id');
+    $vendHasCompany = Schema::hasColumn('vendor_list', 'company_id');
 
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('Cash Disbursements Journal');
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('Cash Disbursements Journal');
 
-        $co = $this->companyHeader();
+    $co = $this->companyHeader();
 
-        // ✅ Period format mm/dd/yyyy
-        $from = Carbon::parse($this->startDate)->format('m/d/Y');
-        $to   = Carbon::parse($this->endDate)->format('m/d/Y');
+    // ✅ Period format mm/dd/yyyy
+    $from = Carbon::parse($this->startDate)->format('m/d/Y');
+    $to   = Carbon::parse($this->endDate)->format('m/d/Y');
 
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'CASH DISBURSEMENTS JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", $co['name']);  $r++;
-        $ws->setCellValue("A{$r}", $co['tin']);   $r++;
-        $ws->setCellValue("A{$r}", $co['addr1']); $r++;
-        $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
+    $r = 1;
+    $ws->setCellValue("A{$r}", 'CASH DISBURSEMENTS JOURNAL'); $r++;
+    $ws->setCellValue("A{$r}", $co['name']);  $r++;
+    $ws->setCellValue("A{$r}", $co['tin']);   $r++;
+    $ws->setCellValue("A{$r}", $co['addr1']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
 
-        $ws->setCellValue("A{$r}", "For the period covering: {$from} — {$to}"); $r += 2;
-        $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
+    $ws->setCellValue("A{$r}", "For the period covering: {$from} — {$to}");
+    $r += 2;
 
-        foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(18);
+    /**
+     * ✅ REMOVE columns C and D by shifting to A..D only:
+     * A = labels / dates / acct_code
+     * B = doc refs / acct_desc
+     * C = DEBIT
+     * D = CREDIT
+     */
+    $ws->fromArray(['', '', 'DEBIT', 'CREDIT'], null, "A{$r}");
+    $r++;
 
-        $done = 0;
-$grandDebit  = 0.0;
-$grandCredit = 0.0;
+    // Column widths (A..D only)
+    $ws->getColumnDimension('A')->setWidth(45);
+    $ws->getColumnDimension('B')->setWidth(38);
+    $ws->getColumnDimension('C')->setWidth(18);
+    $ws->getColumnDimension('D')->setWidth(18);
 
-        DB::table('cash_disbursement as r')
-            ->selectRaw("
-                r.id,
-                to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
-                r.cd_no,
-                r.check_ref_no,
-                r.explanation,
-                COALESCE(b.acct_desc, r.bank_id) as bank_name,
-                COALESCE(v.vend_name, r.vend_id) as vend_name,
-                json_agg(json_build_object(
-                    'acct_code', d.acct_code,
-                    'acct_desc', COALESCE(a.acct_desc,''),
-                    'debit', d.debit,
-                    'credit', d.credit
-                ) ORDER BY d.id) as lines
-            ")
-            ->leftJoin('account_code as b', function ($j) use ($cid, $acctHasCompany) {
-                $j->on('b.acct_code', '=', 'r.bank_id');
-                if ($acctHasCompany) $j->where('b.company_id', '=', $cid);
-            })
-            ->join('cash_disbursement_details as d', function ($j) {
-                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-            })
-            ->leftJoin('account_code as a', function ($j) use ($cid, $acctHasCompany) {
-                $j->on('a.acct_code', '=', 'd.acct_code');
-                if ($acctHasCompany) $j->where('a.company_id', '=', $cid);
-            })
-            ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
-                $j->on('v.vend_code', '=', 'r.vend_id');
-                if ($vendHasCompany) $j->where('v.company_id', '=', $cid);
-            })
-            ->where('r.company_id', $cid)
-            ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
-            ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name','r.vend_id','r.bank_id')
-            ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$r, $ws, &$done, &$grandDebit, &$grandCredit, $progress) {
-                foreach ($chunk as $row) {
-                    $done++;
-                    $progress($done);
+    $done = 0;
+    $grandDebit  = 0.0;
+    $grandCredit = 0.0;
 
-                    $cdbId = 'APMC-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+    DB::table('cash_disbursement as r')
+        ->selectRaw("
+            r.id,
+            to_char(r.disburse_date,'MM/DD/YYYY') as disburse_date,
+            r.cd_no,
+            r.check_ref_no,
+            r.explanation,
+            COALESCE(b.acct_desc, r.bank_id) as bank_name,
+            COALESCE(v.vend_name, r.vend_id) as vend_name,
+            json_agg(json_build_object(
+                'acct_code', d.acct_code,
+                'acct_desc', COALESCE(a.acct_desc,''),
+                'debit', d.debit,
+                'credit', d.credit
+            ) ORDER BY d.id) as lines
+        ")
+        ->leftJoin('account_code as b', function ($j) use ($cid, $acctHasCompany) {
+            $j->on('b.acct_code', '=', 'r.bank_id');
+            if ($acctHasCompany) $j->where('b.company_id', '=', $cid);
+        })
+        ->join('cash_disbursement_details as d', function ($j) {
+            $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+        })
+        ->leftJoin('account_code as a', function ($j) use ($cid, $acctHasCompany) {
+            $j->on('a.acct_code', '=', 'd.acct_code');
+            if ($acctHasCompany) $j->where('a.company_id', '=', $cid);
+        })
+        ->leftJoin('vendor_list as v', function ($j) use ($cid, $vendHasCompany) {
+            $j->on('v.vend_code', '=', 'r.vend_id');
+            if ($vendHasCompany) $j->where('v.company_id', '=', $cid);
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.disburse_date', [$this->startDate, $this->endDate])
+        ->groupBy('r.id','r.disburse_date','r.cd_no','r.check_ref_no','r.explanation','b.acct_desc','v.vend_name','r.vend_id','r.bank_id')
+        ->orderBy('r.id')
+        ->chunk(200, function($chunk) use (&$r, $ws, &$done, &$grandDebit, &$grandCredit, $progress) {
 
-                    $ws->setCellValue("A{$r}", $row->disburse_date);
-                    $ws->setCellValue("B{$r}", $cdbId); $r++;
+            foreach ($chunk as $row) {
+                $done++;
+                $progress($done);
 
-                    $ws->setCellValue("A{$r}", "CV# {$row->cd_no}");
-                    $ws->setCellValue("B{$r}", "Check#: {$row->check_ref_no} — {$row->bank_name}"); $r++;
+                $cdbId = 'APMC-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-                    $ws->setCellValue("A{$r}", $row->vend_name);
-                    $ws->setCellValue("B{$r}", $row->explanation); $r++;
+                // header lines per document
+                $ws->setCellValue("A{$r}", $row->disburse_date);
+                $ws->setCellValue("B{$r}", $cdbId);
+                $r++;
 
-                    $itemDebit = 0.0;
-                    $itemCredit = 0.0;
+                $ws->setCellValue("A{$r}", "CV# {$row->cd_no}");
+                $ws->setCellValue("B{$r}", "Check#: {$row->check_ref_no} — {$row->bank_name}");
+                $r++;
 
-                    foreach (json_decode($row->lines, true) ?: [] as $ln) {
-                        $debit  = (float)($ln['debit'] ?? 0);
-                        $credit = (float)($ln['credit'] ?? 0);
+                $ws->setCellValue("A{$r}", $row->vend_name);
+                $ws->setCellValue("B{$r}", $row->explanation);
+                $r++;
 
-                        $itemDebit  += $debit;
-                        $itemCredit += $credit;
+                $itemDebit  = 0.0;
+                $itemCredit = 0.0;
 
-$grandDebit  += $debit;
-$grandCredit += $credit;
+                foreach (json_decode($row->lines, true) ?: [] as $ln) {
+                    $debit  = (float)($ln['debit'] ?? 0);
+                    $credit = (float)($ln['credit'] ?? 0);
 
-                        $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
-                        $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                        $ws->setCellValue("F{$r}", $debit);
-                        $ws->setCellValue("G{$r}", $credit);
-                        $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                        $r++;
-                    }
+                    $itemDebit  += $debit;
+                    $itemCredit += $credit;
 
-                    $ws->setCellValue("E{$r}", 'TOTAL');
-                    $ws->setCellValue("F{$r}", $itemDebit);
-                    $ws->setCellValue("G{$r}", $itemCredit);
-                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                    $r += 2;
+                    $grandDebit  += $debit;
+                    $grandCredit += $credit;
+
+                    $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
+                    $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
+                    $ws->setCellValue("C{$r}", $debit);
+                    $ws->setCellValue("D{$r}", $credit);
+
+                    $ws->getStyle("C{$r}:D{$r}")
+                        ->getNumberFormat()
+                        ->setFormatCode('#,##0.00');
+
+                    $r++;
                 }
-            });
 
-// ================= GRAND TOTAL =================
-$ws->setCellValue("E{$r}", 'GRAND TOTAL');
-$ws->setCellValue("F{$r}", $grandDebit);
-$ws->setCellValue("G{$r}", $grandCredit);
+                // TOTAL line
+                $ws->setCellValue("B{$r}", 'TOTAL');
+                $ws->setCellValue("C{$r}", $itemDebit);
+                $ws->setCellValue("D{$r}", $itemCredit);
 
-$ws->getStyle("E{$r}")->getFont()->setBold(true);
-$ws->getStyle("F{$r}:G{$r}")->getFont()->setBold(true);
-$ws->getStyle("F{$r}:G{$r}")
-    ->getNumberFormat()
-    ->setFormatCode('#,##0.00');
+                $ws->getStyle("B{$r}")->getFont()->setBold(true);
+                $ws->getStyle("C{$r}:D{$r}")
+                    ->getNumberFormat()
+                    ->setFormatCode('#,##0.00');
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream);
-        rewind($stream);
-        Storage::disk('local')->put($file, stream_get_contents($stream));
-        fclose($stream);
+                $r += 2;
+            }
+        });
 
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+    // ================= GRAND TOTAL =================
+    $ws->setCellValue("B{$r}", 'GRAND TOTAL');
+    $ws->setCellValue("C{$r}", $grandDebit);
+    $ws->setCellValue("D{$r}", $grandCredit);
+
+    $ws->getStyle("B{$r}")->getFont()->setBold(true);
+    $ws->getStyle("C{$r}:D{$r}")->getFont()->setBold(true);
+    $ws->getStyle("C{$r}:D{$r}")
+        ->getNumberFormat()
+        ->setFormatCode('#,##0.00');
+
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream);
+    rewind($stream);
+    Storage::disk('local')->put($file, stream_get_contents($stream));
+    fclose($stream);
+
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
+
 }

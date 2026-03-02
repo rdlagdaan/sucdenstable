@@ -53,6 +53,7 @@ use App\Http\Controllers\CashDisbursementBookController;
 // routes/web.php
 use App\Http\Controllers\AccountsReceivableJournalController;
 use App\Http\Controllers\CheckRegisterController;
+use App\Http\Controllers\CustomerSummaryReportController;
 
 
 use App\Http\Controllers\ApprovalController;
@@ -62,6 +63,21 @@ use App\Http\Controllers\PlanterController;
 
 
 use App\Http\Controllers\ReceivingPostingController;
+
+
+use App\Http\Controllers\VendorSummaryReportController;
+
+// VENDOR SUMMARY REPORT (stateful)
+Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+    Route::post('/vendor-summary/report',                   [VendorSummaryReportController::class, 'start']);
+    Route::get ('/vendor-summary/report/{ticket}/status',   [VendorSummaryReportController::class, 'status'])->whereUuid('ticket');
+    Route::get ('/vendor-summary/report/{ticket}/download', [VendorSummaryReportController::class, 'download'])->whereUuid('ticket');
+    Route::get ('/vendor-summary/report/{ticket}/view',     [VendorSummaryReportController::class, 'view'])->whereUuid('ticket');
+
+    // Vendor dropdown datasource (same idea as /customers used by CustomerSummaryReport.tsx)
+    Route::get('/vendors', [VendorSummaryReportController::class, 'vendors']);
+});
+
 
 Route::middleware(['web','auth:sanctum'])->prefix('api')->group(function () {
     // Receiving Posting module (Bite A)
@@ -74,7 +90,10 @@ Route::middleware(['web','auth:sanctum'])->prefix('api')->group(function () {
 
 
 
-Route::get('/planters/lookup', [PlanterController::class, 'lookup']);
+Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+    Route::get('/planters/lookup', [PlanterController::class, 'lookup']);
+});
+
 
 
 // ...
@@ -108,9 +127,9 @@ Route::prefix('api')->group(function () {
     Route::get('/pbn/dropdown-list', [PbnEntryController::class, 'getPbnDropdownList']);
 
     // ✅ (optional) PBN show/PDF/Excel remain protected if needed
-    Route::get('/pbn/form-pdf/{id}', [PbnEntryController::class, 'formPdf']);
-    Route::get('/pbn/form-excel/{id}', [PbnEntryController::class, 'formExcel']);
-    Route::get('/pbn/{id}', [PbnEntryController::class, 'show']);
+    //Route::get('/pbn/form-pdf/{id}', [PbnEntryController::class, 'formPdf']);
+    //Route::get('/pbn/form-excel/{id}', [PbnEntryController::class, 'formExcel']);
+    //Route::get('/pbn/{id}', [PbnEntryController::class, 'show']);
     Route::get('/sugar-types', [SugarTypeController::class, 'index']);
     Route::get('/crop-years', [CropYearController::class, 'index']);
     Route::get('/vendors', [VendorListController::class, 'index']);    
@@ -133,6 +152,11 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
     Route::post('/pbn/save-detail',   [PbnEntryController::class, 'saveDetail']);
     Route::post('/pbn/update-detail', [PbnEntryController::class, 'updateDetail']);
     Route::post('/pbn/delete-detail', [PbnEntryController::class, 'deleteDetailAndLog']);
+    Route::get('/pbn/form-pdf/{id}', [PbnEntryController::class, 'formPdf']);
+    Route::get('/pbn/form-excel/{id}', [PbnEntryController::class, 'formExcel']);
+
+// --- Particulars dropdown (company-scoped) ---
+Route::get('/pbn/particulars', [PbnEntryController::class, 'particulars']);
 
     // Show a specific PBN (used by handlePbnSelect)
     Route::get('/pbn/{id}', [PbnEntryController::class, 'show'])->whereNumber('id');
@@ -162,6 +186,13 @@ Route::prefix('api')->middleware(['web'])->group(function () {
 });
 
 
+// CUSTOMER SUMMARY REPORT (stateful)
+Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
+    Route::post('/customer-summary/report',                   [CustomerSummaryReportController::class, 'start']);
+    Route::get ('/customer-summary/report/{ticket}/status',   [CustomerSummaryReportController::class, 'status'])->whereUuid('ticket');
+    Route::get ('/customer-summary/report/{ticket}/download', [CustomerSummaryReportController::class, 'download'])->whereUuid('ticket');
+    Route::get ('/customer-summary/report/{ticket}/view',     [CustomerSummaryReportController::class, 'view'])->whereUuid('ticket');
+});
 
 
 // RECEIPT REGISTER (under /api, stateful)
@@ -524,14 +555,14 @@ Route::middleware(['web'])->group(function () {
     Route::delete('/api/roles/{id}', [RoleController::class, 'destroy']);
 
     // PBN
-    Route::get('/api/pbn-entries', [PbnEntryController::class, 'index']);
-    Route::post('/api/pbn-entry', [PbnEntryController::class, 'store']);
+    //Route::get('/api/pbn-entries', [PbnEntryController::class, 'index']);
+    //Route::post('/api/pbn-entry', [PbnEntryController::class, 'store']);
     //Route::post('/api/pbn/save-main', [PbnEntryController::class, 'storeMain']);
     //Route::post('/api/pbn/save-detail', [PbnEntryController::class, 'saveDetail']);
     //Route::post('/api/pbn/update-detail', [PbnEntryController::class, 'updateDetail']);
     //Route::post('/api/pbn/delete-detail', [PbnEntryController::class, 'deleteDetailAndLog']);
     //Route::get('/api/pbn/dropdown-list', [PbnEntryController::class, 'getPbnDropdownList']);
-    Route::get('/api/id/{id}', [PbnEntryController::class, 'show']);
+    //Route::get('/api/id/{id}', [PbnEntryController::class, 'show']);
 
     // Mills
     Route::get('/api/mills', [MillListController::class, 'index']);
@@ -707,6 +738,10 @@ Route::get('/api/purchase-journal/check-pdf/{id}', [PurchaseJournalController::c
     Route::post('/api/cash-disbursement/delete-detail', [\App\Http\Controllers\CashDisbursementController::class, 'deleteDetail']);
     Route::delete('/api/cash-disbursement/{id}', [\App\Http\Controllers\CashDisbursementController::class, 'destroy']);
     Route::get('/api/cash-disbursement/list', [\App\Http\Controllers\CashDisbursementController::class, 'list']);
+
+    // ✅ Check/Ref # duplicate checker (live validation)
+    Route::get('/api/cash-disbursement/check-ref-exists', [\App\Http\Controllers\CashDisbursementController::class, 'checkRefExists']);
+
     Route::get('/api/cash-disbursement/{id}', [\App\Http\Controllers\CashDisbursementController::class, 'show'])->whereNumber('id');
     //Route::post('/api/cash-disbursement/cancel', [\App\Http\Controllers\CashDisbursementController::class, 'updateCancel']);
 
@@ -807,7 +842,4 @@ Route::get('/login', function (\Illuminate\Http\Request $r) {
     return response()->json(['message' => 'Login required'], 401);
 })->name('login');
 
-/* --------------------- whoami (duplicate short) --------------------- */
-Route::prefix("api")->middleware(["web","auth:sanctum"])->get("/whoami", function () {
-    return response()->json(auth()->user());
-});
+

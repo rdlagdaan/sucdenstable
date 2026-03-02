@@ -197,6 +197,9 @@ const refreshApprovalForAction = async (
 
 
   const isApprovalPending  = approval.status === 'pending';
+  // ✅ Allow editing while EXPORTED only when edit approval is ACTIVE
+const canEditExported = !isExported || approval.approvedActive;
+
   const isApprovalRejected = approval.status === 'rejected';
 
 const approvalLabel = useMemo(() => {
@@ -213,7 +216,7 @@ const approvalLabel = useMemo(() => {
 
 const MODULE_CODE = 'general_accounting'; // must match backend
 
-const refreshApprovalStatus = async (recordId: number | null) => {
+const refreshApprovalStatus = async (recordId: number | null): Promise<boolean> => {
   if (!recordId || !user?.company_id) {
     setApproval({
       id: null,
@@ -223,12 +226,7 @@ const refreshApprovalStatus = async (recordId: number | null) => {
       editWindowMinutes: null,
       reason: null,
     });
-// GA requirement: selecting a transaction should be editable immediately.
-// Approval status is still shown/usable, but it does NOT control locking.
-// Locking is controlled by Cancelled/Exported only.
-setLocked(false);
-setGridLocked(false);
-return;
+    return false;
   }
 
   try {
@@ -241,36 +239,31 @@ return;
       },
     });
 
-if (!data?.exists) {
-  setApproval({
-    id: null,
-    status: null,
-    approvedActive: false,
-    expiresAt: null,
-    editWindowMinutes: null,
-    reason: null,
-  });
-  // Do NOT lock based on missing approval
-  setLocked(false);
-  setGridLocked(false);
-  return;
-}
+    if (!data?.exists) {
+      setApproval({
+        id: null,
+        status: null,
+        approvedActive: false,
+        expiresAt: null,
+        editWindowMinutes: null,
+        reason: null,
+      });
+      return false;
+    }
+
+    const approvedActive = !!data.approved_active;
 
     setApproval({
       id: data.id ?? null,
       status: data.status ?? null,
-      approvedActive: !!data.approved_active,
+      approvedActive,
       expiresAt: data.expires_at ?? null,
       editWindowMinutes: data.edit_window_minutes ?? null,
       reason: data.reason ?? null,
     });
 
-// Approval status is informational (and used for Request to Edit / Save changes flow),
-// but does NOT control locking.
-setLocked(false);
-setGridLocked(false);
+    return approvedActive;
   } catch {
-    // On error: stay locked
     setApproval({
       id: null,
       status: null,
@@ -279,10 +272,10 @@ setGridLocked(false);
       editWindowMinutes: null,
       reason: null,
     });
-    setLocked(true);
-    setGridLocked(true);
+    return false;
   }
 };
+
 
 
 
@@ -764,19 +757,30 @@ setIsExported(exported);
       setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
       setHotEnabled(true);
 // Editable immediately on select unless cancelled/exported
-const shouldLock = (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd') || !!m.exported_at;
+// Lock immediately only for cancelled/deleted; export lock is decided after approval refresh
+const shouldLock = (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd');
 setLocked(shouldLock);
 setGridLocked(shouldLock);
 
+
       // 🔹 approval-aware locking (instead of always locking)
-      await refreshApprovalStatus(m.id);
+      const approvedActive = await refreshApprovalStatus(m.id);
+
 
 // Enforce lock rules after approval refresh (approval should not override export/cancel lock)
 {
-  const shouldLock = (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd') || !!m.exported_at;
+  const cancelledOrDeleted =
+    (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd');
+
+  const exported = !!m.exported_at;
+
+  // ✅ EXPORTED is overridden by APPROVED edit window
+  const shouldLock = cancelledOrDeleted || (exported && !approvedActive);
+
   setLocked(shouldLock);
   setGridLocked(shouldLock);
-}      
+}
+     
 
       await Promise.all([
         refreshApprovalForAction(m.id, 'cancel', setCancelApproval),
@@ -1068,7 +1072,7 @@ return (
             <input
               type="date"
               value={genAcctDate}
-              disabled={isCancelled || isExported}
+              disabled={isCancelled}
               onChange={(e) => setGenAcctDate(e.target.value)}
               className="w-full border p-2 bg-green-100 text-green-900"
             />
@@ -1079,7 +1083,7 @@ return (
             <label className="block mb-1">Explanation</label>
             <input
               value={explanation}
-              disabled={isCancelled || isExported}
+              disabled={isCancelled}
               onChange={(e) => setExplanation(e.target.value)}
               className="w-full border p-2 bg-green-100 text-green-900"
             />
@@ -1132,17 +1136,18 @@ return (
               </button>
             ) : (
               // 🔹 When there is no active approval → Request to Edit
-              <button
-                type="button"
-                onClick={handleRequestEdit}
-                disabled={isApprovalPending || isCancelled || isExported}
-                className={
-                  'inline-flex items-center gap-2 px-4 py-2 rounded text-white ' +
-                  (isApprovalPending
-                    ? 'bg-purple-400 cursor-not-allowed opacity-70'
-                    : 'bg-purple-600 hover:bg-purple-700')
-                }
-              >
+<button
+  type="button"
+  onClick={handleRequestEdit}
+  disabled={isApprovalPending || isCancelled}
+  className={
+    'inline-flex items-center gap-2 px-4 py-2 rounded text-white ' +
+    (isApprovalPending
+      ? 'bg-purple-400 cursor-not-allowed opacity-70'
+      : 'bg-purple-600 hover:bg-purple-700')
+  }
+>
+
                 <CheckCircleIcon className="h-5 w-5" />
                 {isApprovalPending ? 'Edit Request Pending' : 'Request to Edit'}
               </button>
@@ -1242,7 +1247,8 @@ return (
                 strict: true,
                 allowInvalid: false,
                 visibleRows: 14,
-                readOnly: gridLocked || isCancelled || isExported,
+                readOnly: gridLocked || isCancelled || !canEditExported,
+
                 renderer: (inst, td, row, col, prop, value, cellProps) => {
                   const display = onlyCode(String(value ?? ''));
                   Handsontable.renderers.TextRenderer(inst, td, row, col, prop, display, cellProps);
@@ -1255,7 +1261,8 @@ return (
             afterBeginEditing={afterBeginEditingOpenAll}
             afterChange={(changes, source) => {
               const hot = hotRef.current?.hotInstance;
-              if (!changes || !hot || isCancelled) return;
+              if (!changes || !hot || isCancelled || !canEditExported) return;
+
 
               if (source === 'edit') {
                 changes.forEach(([rowIndex, prop, _oldVal, newVal]) => {
@@ -1300,7 +1307,8 @@ return (
                 'remove_row': {
                   name: '🗑️ Remove row',
                   callback: async (_key, selection) => {
-                    if (gridLocked || isCancelled || isExported) return;
+                    if (gridLocked || isCancelled || !canEditExported) return;
+
                     const hot = hotRef.current?.hotInstance;
                     const rowIndex = selection[0].start.row;
                     const src = (hot?.getSourceData() as GaDetailRow[]) || [];

@@ -307,10 +307,7 @@ private function buildPdf(string $path, callable $progress, int $cid): void
         }
     };
 
-    // ✅ repeat Header() every page (no HTML header tables => no $cellspacingx error)
     $pdf->setPrintHeader(true);
-
-    // Top margin big enough so body never overlaps header
     $pdf->SetHeaderMargin(5);
     $pdf->SetMargins(10, 52, 10);
     $pdf->SetAutoPageBreak(true, 16);
@@ -320,29 +317,40 @@ private function buildPdf(string $path, callable $progress, int $cid): void
 
     $done = 0;
 
+    // ✅ GRAND TOTAL accumulators
+    $grandDebit  = 0.0;
+    $grandCredit = 0.0;
+
     $q = $this->applyFilters($this->baseQuery($cid), $cid)
         ->groupBy('r.id','r.gen_acct_date','r.ga_no','r.explanation')
         ->orderBy('r.id');
 
-    $q->chunk(200, function ($chunk) use (&$done, $progress, $pdf) {
+    $q->chunk(200, function ($chunk) use (&$done, $progress, $pdf, &$grandDebit, &$grandCredit) {
 
         foreach ($chunk as $row) {
 
             $gjId = 'GLGJ-' . str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-            // ✅ lines already have MM/DD/YYYY alias gen_date from baseQuery
-            $pdf->writeHTML(
-                '<table width="100%" cellspacing="0" cellpadding="1">'
-              . '<tr><td width="25%"><b>'.e($gjId).'</b></td><td width="75%"><b>JE - '.e($row->ga_no).'</b></td></tr>'
-              . '<tr><td width="25%">'.e($row->gen_date).'</td><td width="75%">'.e($row->explanation).'</td></tr>'
-              . '</table>',
-                true, false, false, false, ''
-            );
+            // Header block per JE (NO sprintf — avoids “Unknown format specifier”)
+            $hdrHtml =
+                '<table width="100%" cellspacing="0" cellpadding="1">' .
+                    '<tr>' .
+                        '<td width="25%"><b>' . e($gjId) . '</b></td>' .
+                        '<td width="75%"><b>JE - ' . e($row->ga_no) . '</b></td>' .
+                    '</tr>' .
+                    '<tr>' .
+                        '<td width="25%">' . e($row->gen_date) . '</td>' .
+                        '<td width="75%">' . e($row->explanation) . '</td>' .
+                    '</tr>' .
+                '</table>';
+
+            $pdf->writeHTML($hdrHtml, true, false, false, false, '');
 
             $itemDebit  = 0.0;
             $itemCredit = 0.0;
 
             $rowsHtml = '<table width="100%" cellspacing="0" cellpadding="1">';
+
             foreach ((json_decode($row->lines, true) ?: []) as $ln) {
                 $debit  = (float)($ln['debit'] ?? 0);
                 $credit = (float)($ln['credit'] ?? 0);
@@ -350,43 +358,65 @@ private function buildPdf(string $path, callable $progress, int $cid): void
                 $itemDebit  += $debit;
                 $itemCredit += $credit;
 
-                $rowsHtml .= sprintf(
-                    '<tr>
-                        <td width="15%%">&nbsp;&nbsp;&nbsp;%s</td>
-                        <td width="55%%">%s</td>
-                        <td width="15%%" align="right">%s</td>
-                        <td width="15%%" align="right">%s</td>
-                     </tr>',
-                    e($ln['acct_code'] ?? ''),
-                    e($ln['acct_desc'] ?? ''),
-                    $debit  == 0.0 ? '' : number_format($debit, 2),
-                    $credit == 0.0 ? '' : number_format($credit, 2)
-                );
+                $rowsHtml .=
+                    '<tr>' .
+                        '<td width="15%">&nbsp;&nbsp;&nbsp;' . e($ln['acct_code'] ?? '') . '</td>' .
+                        '<td width="55%">' . e($ln['acct_desc'] ?? '') . '</td>' .
+                        '<td width="15%" align="right">' . ($debit  == 0.0 ? '' : number_format($debit, 2)) . '</td>' .
+                        '<td width="15%" align="right">' . ($credit == 0.0 ? '' : number_format($credit, 2)) . '</td>' .
+                    '</tr>';
             }
 
-            $rowsHtml .= sprintf(
-                '<tr>
-                    <td width="15%%"></td>
-                    <td width="55%%" align="right"><b>TOTAL</b></td>
-                    <td width="15%%" align="right"><b>%s</b></td>
-                    <td width="15%%" align="right"><b>%s</b></td>
-                 </tr>
-                 <tr><td colspan="4"><hr/></td></tr>
-                 <tr><td colspan="4"><br/></td></tr>',
-                number_format($itemDebit, 2),
-                number_format($itemCredit, 2)
-            );
+            // totals for this JE
+            $rowsHtml .=
+                '<tr>' .
+                    '<td width="15%"></td>' .
+                    '<td width="55%" align="right"><b>TOTAL</b></td>' .
+                    '<td width="15%" align="right"><b>' . number_format($itemDebit, 2) . '</b></td>' .
+                    '<td width="15%" align="right"><b>' . number_format($itemCredit, 2) . '</b></td>' .
+                '</tr>' .
+                '<tr><td colspan="4"><hr/></td></tr>' .
+                '<tr><td colspan="4"><br/></td></tr>' .
+                '</table>';
 
-            $rowsHtml .= '</table>';
             $pdf->writeHTML($rowsHtml, true, false, false, false, '');
+
+            // ✅ accumulate GRAND TOTALS
+            $grandDebit  += $itemDebit;
+            $grandCredit += $itemCredit;
 
             $done++;
             $progress($done);
         }
     });
 
+    // ✅ GRAND TOTAL at the END (new page if needed)
+    $needed = 18; // mm-ish buffer
+    $bottom = $pdf->getPageHeight() - $pdf->getBreakMargin() - $needed;
+    if ($pdf->GetY() > $bottom) {
+        $pdf->AddPage();
+    } else {
+        $pdf->Ln(2);
+    }
+
+    $grandHtml =
+        '<table width="100%" cellspacing="0" cellpadding="2">' .
+            '<tr><td colspan="4"><hr/></td></tr>' .
+            '<tr>' .
+                '<td width="15%"></td>' .
+                '<td width="55%" align="right"><b>GRAND TOTAL</b></td>' .
+                '<td width="15%" align="right"><b>' . number_format($grandDebit, 2) . '</b></td>' .
+                '<td width="15%" align="right"><b>' . number_format($grandCredit, 2) . '</b></td>' .
+            '</tr>' .
+            '<tr><td colspan="4"><hr/></td></tr>' .
+        '</table>';
+
+    $pdf->writeHTML($grandHtml, true, false, false, false, '');
+
     Storage::disk('local')->put($path, $pdf->Output('general-journal.pdf', 'S'));
 }
+
+
 
 private function buildXls(string $path, callable $progress, int $cid): void
 {
@@ -394,14 +424,17 @@ private function buildXls(string $path, callable $progress, int $cid): void
     $ws = $wb->getActiveSheet();
     $ws->setTitle('General Journal');
 
-    // Column widths similar to your screenshots
+    // ✅ Remove old blank C/D by using ONLY A..E now
+    // A: Code/ID/Date
+    // B: Description/Explanation
+    // C: TOTAL label
+    // D: Debit
+    // E: Credit
     $ws->getColumnDimension('A')->setWidth(18);
-    $ws->getColumnDimension('B')->setWidth(55);
-    $ws->getColumnDimension('C')->setWidth(18);
+    $ws->getColumnDimension('B')->setWidth(60);
+    $ws->getColumnDimension('C')->setWidth(14);
     $ws->getColumnDimension('D')->setWidth(18);
-    $ws->getColumnDimension('E')->setWidth(12);
-    $ws->getColumnDimension('F')->setWidth(18);
-    $ws->getColumnDimension('G')->setWidth(18);
+    $ws->getColumnDimension('E')->setWidth(18);
 
     $co = $this->companyHeader($cid);
 
@@ -412,19 +445,26 @@ private function buildXls(string $path, callable $progress, int $cid): void
     $ws->setCellValue("A{$r}", $co['addr1']); $r++;
     $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
 
-    $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}"); $r += 2;
+    // ✅ keep your existing date text, but you can switch to mm/dd/yyyy if you want
+    $ws->setCellValue("A{$r}", "For the period covering: {$this->startDate} to {$this->endDate}");
+    $r += 2;
 
-    $ws->setCellValue("F{$r}", 'DEBIT');
-    $ws->setCellValue("G{$r}", 'CREDIT');
+    // Header for amounts (shifted left)
+    $ws->setCellValue("D{$r}", 'DEBIT');
+    $ws->setCellValue("E{$r}", 'CREDIT');
     $r++;
 
     $done = 0;
+
+    // ✅ GRAND TOTAL accumulators
+    $grandDebit  = 0.0;
+    $grandCredit = 0.0;
 
     $q = $this->applyFilters($this->baseQuery($cid), $cid)
         ->groupBy('r.id','r.gen_acct_date','r.ga_no','r.explanation')
         ->orderBy('r.id');
 
-    $q->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress) {
+    $q->chunk(200, function($chunk) use (&$r, $ws, &$done, $progress, &$grandDebit, &$grandCredit) {
         foreach ($chunk as $row) {
             $gjId = 'GLGJ-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
@@ -436,7 +476,8 @@ private function buildXls(string $path, callable $progress, int $cid): void
             $ws->setCellValue("B{$r}", $row->explanation);
             $r++;
 
-            $itemDebit = 0; $itemCredit = 0;
+            $itemDebit  = 0.0;
+            $itemCredit = 0.0;
 
             foreach (json_decode($row->lines, true) as $ln) {
                 $debit  = (float)($ln['debit'] ?? 0);
@@ -444,25 +485,40 @@ private function buildXls(string $path, callable $progress, int $cid): void
 
                 $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
                 $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                $ws->setCellValue("F{$r}", $debit);
-                $ws->setCellValue("G{$r}", $credit);
-                $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                if ($debit  != 0.0) $ws->setCellValue("D{$r}", $debit);
+                if ($credit != 0.0) $ws->setCellValue("E{$r}", $credit);
+
+                $ws->getStyle("D{$r}:E{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
 
                 $itemDebit  += $debit;
                 $itemCredit += $credit;
                 $r++;
             }
 
-            $ws->setCellValue("E{$r}", 'TOTAL');
-            $ws->setCellValue("F{$r}", $itemDebit);
-            $ws->setCellValue("G{$r}", $itemCredit);
-            $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+            // TOTAL row (shifted left)
+            $ws->setCellValue("C{$r}", 'TOTAL');
+            $ws->setCellValue("D{$r}", $itemDebit);
+            $ws->setCellValue("E{$r}", $itemCredit);
+            $ws->getStyle("D{$r}:E{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+            $ws->getStyle("C{$r}:E{$r}")->getFont()->setBold(true);
+
+            // ✅ accumulate GRAND TOTAL
+            $grandDebit  += $itemDebit;
+            $grandCredit += $itemCredit;
 
             $r += 2;
 
-            $done++; $progress($done);
+            $done++;
+            $progress($done);
         }
     });
+
+    // ✅ GRAND TOTAL at the end (shifted left)
+    $ws->setCellValue("C{$r}", 'GRAND TOTAL');
+    $ws->setCellValue("D{$r}", $grandDebit);
+    $ws->setCellValue("E{$r}", $grandCredit);
+    $ws->getStyle("D{$r}:E{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+    $ws->getStyle("C{$r}:E{$r}")->getFont()->setBold(true);
 
     $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
     $stream = fopen('php://temp', 'r+');
@@ -475,5 +531,6 @@ private function buildXls(string $path, callable $progress, int $cid): void
     $wb->disconnectWorksheets();
     unset($writer);
 }
+
 
 }

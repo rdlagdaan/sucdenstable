@@ -929,9 +929,26 @@ if ($isPortrait) {
 
             $isMonthOpen = !empty($r['is_month_open']);
 
-            $ref   = (string)($r['reference_no'] ?? '');
-            $party = (string)($r['party'] ?? '');
-            $comm  = (string)($r['comment'] ?? '');
+$cat   = (string)($r['category'] ?? ''); // G,D,R,P,S from periodRows()
+$refRaw = (string)($r['reference_no'] ?? '');
+
+$prefixMap = [
+    'S' => 'SV-', // Sales Journal (cash_sales)
+    'R' => 'RV-', // Cash Receipt (cash_receipts)
+    'D' => 'CV-', // Cash Disbursement (cash_disbursement)
+    'P' => 'RR-', // Purchase Journal (cash_purchase)
+    'G' => 'JE-', // General Accounting (general_accounting)
+];
+
+// Apply prefix ONLY for detail rows that actually have a reference number
+$ref = $refRaw;
+if ($refRaw !== '' && isset($prefixMap[$cat])) {
+    $ref = $prefixMap[$cat] . $refRaw;
+}
+
+$party = (string)($r['party'] ?? '');
+$comm  = (string)($r['comment'] ?? '');
+
 
             $debit  = (float)($r['debit'] ?? 0);
             $credit = (float)($r['credit'] ?? 0);
@@ -1051,55 +1068,69 @@ private function writeXls(array $report, string $sdate, string $edate): array
 
     $bold = function($coord) use ($sheet) { $sheet->getStyle($coord)->getFont()->setBold(true); };
 
+    // ✅ Company header must appear ONLY ONCE for the entire Excel file
+    $cid = (int)($this->companyId ?? 0);
+
+    $companyHdr = [
+        'name'  => 'SUCDEN PHILIPPINES, INC.',
+        'tin'   => 'TIN-000-105-267-000',
+        'addr1' => 'Unit 2202 The Podium West Tower',
+        'addr2' => 'Ortigas Center, Mandaluyong City',
+    ];
+
+    if ($cid === 2) {
+        $companyHdr = [
+            'name'  => 'AMEROP PHILIPPINES, INC.',
+            'tin'   => 'TIN- 762-592-927-000',
+            'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
+            'addr2' => 'Brgy. Mandalagan, Bacolod City',
+        ];
+    }
+
+    // Company block (ONLY ONCE)
+    $sheet->setCellValue("A{$row}", $companyHdr['name']);
+    $sheet->mergeCells("A{$row}:H{$row}");
+    $bold("A{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setSize(15);
+    $row++;
+
+    $sheet->setCellValue("A{$row}", $companyHdr['tin']);
+    $sheet->mergeCells("A{$row}:H{$row}");
+    $bold("A{$row}");
+    $sheet->getStyle("A{$row}")->getFont()->setSize(12);
+    $row++;
+
+    $sheet->setCellValue("A{$row}", $companyHdr['addr1']);
+    $sheet->mergeCells("A{$row}:H{$row}");
+    $bold("A{$row}");
+    $row++;
+
+    $sheet->setCellValue("A{$row}", $companyHdr['addr2']);
+    $sheet->mergeCells("A{$row}:H{$row}");
+    $bold("A{$row}");
+    $row++;
+
+    $row += 2; // spacing after company header
+
+    // Freeze only once, at the first account header row
+    $didFreeze = false;
+
+    // Prefix mapping for Reference #
+    $prefixMap = [
+        'S' => 'SV-', // Sales Journal (cash_sales)
+        'R' => 'RV-', // Cash Receipt (cash_receipts)
+        'D' => 'CV-', // Cash Disbursement (cash_disbursement)
+        'P' => 'RR-', // Purchase Journal (cash_purchase)
+        'G' => 'JE-', // General Accounting (general_accounting)
+    ];
+
     foreach ($report as $acctCode => $rows) {
         if (empty($rows)) continue;
 
         $acctDesc = (string)($rows[0]['acct_desc'] ?? '');
         $mainAcct = (string)($rows[0]['main_acct'] ?? '');
 
-        // ✅ Company-aware header (company_id aware)
-        $cid = (int)($this->companyId ?? 0);
-
-        $companyHdr = [
-            'name'  => 'SUCDEN PHILIPPINES, INC.',
-            'tin'   => 'TIN-000-105-267-000',
-            'addr1' => 'Unit 2202 The Podium West Tower',
-            'addr2' => 'Ortigas Center, Mandaluyong City',
-        ];
-
-        if ($cid === 2) {
-            $companyHdr = [
-                'name'  => 'AMEROP PHILIPPINES, INC.',
-                'tin'   => 'TIN- 762-592-927-000',
-                'addr1' => 'Com. Unit 301-B Sitari Bldg., Lacson St. cor. C.I Montelibano Ave.,',
-                'addr2' => 'Brgy. Mandalagan, Bacolod City',
-            ];
-        }
-
-        // Company block
-        $sheet->setCellValue("A{$row}", $companyHdr['name']);
-        $sheet->mergeCells("A{$row}:H{$row}");
-        $bold("A{$row}");
-        $sheet->getStyle("A{$row}")->getFont()->setSize(15);
-        $row++;
-
-        $sheet->setCellValue("A{$row}", $companyHdr['tin']);
-        $sheet->mergeCells("A{$row}:H{$row}");
-        $bold("A{$row}");
-        $sheet->getStyle("A{$row}")->getFont()->setSize(12);
-        $row++;
-
-        $sheet->setCellValue("A{$row}", $companyHdr['addr1']);
-        $sheet->mergeCells("A{$row}:H{$row}");
-        $bold("A{$row}");
-        $row++;
-
-        $sheet->setCellValue("A{$row}", $companyHdr['addr2']);
-        $sheet->mergeCells("A{$row}:H{$row}");
-        $bold("A{$row}");
-        $row++;
-
-        $row++;
+        // Account section header (no more repeated company header)
         $sheet->setCellValue("A{$row}", "GENERAL LEDGER - ({$mainAcct})");
         $sheet->mergeCells("A{$row}:H{$row}");
         $bold("A{$row}");
@@ -1115,8 +1146,7 @@ private function writeXls(array $report, string $sdate, string $edate): array
         $bold("A{$row}");
         $row++;
 
-        // Header row
-        $row++;
+        $row++; // blank line before column headers
 
         // =================== BEGIN OVERWRITE: XLS headers (remove Post Date + Batch #) ===================
         $headers = [
@@ -1135,12 +1165,16 @@ private function writeXls(array $report, string $sdate, string $edate): array
         foreach ($headers as $h) {
             $sheet->setCellValue("{$col}{$row}", $h);
             $sheet->getStyle("{$col}{$row}")->getFont()->setSize(12);
+            $sheet->getStyle("{$col}{$row}")->getFont()->setBold(true);
             $col++;
         }
 
-        if ($row === 9) { // freeze only once the first time
+        // ✅ freeze once on the first account header row
+        if (!$didFreeze) {
             $sheet->freezePane("A".($row+1));
+            $didFreeze = true;
         }
+
         $row++;
 
         // =================== BEGIN OVERWRITE: XLS row rendering (supports month-opening rows) ===================
@@ -1167,7 +1201,15 @@ private function writeXls(array $report, string $sdate, string $edate): array
             $credit = (float)($r['credit'] ?? 0);
             $ending = (float)($r['ending'] ?? 0);
 
-            $ref    = (string)($r['reference_no'] ?? '');
+            $cat    = (string)($r['category'] ?? '');
+            $refRaw = (string)($r['reference_no'] ?? '');
+            $ref    = $refRaw;
+
+            // ✅ apply prefix for detail rows
+            if ($refRaw !== '' && isset($prefixMap[$cat])) {
+                $ref = $prefixMap[$cat] . $refRaw;
+            }
+
             $party  = (string)($r['party'] ?? '');
             $comm   = (string)($r['comment'] ?? '');
 
@@ -1209,7 +1251,7 @@ private function writeXls(array $report, string $sdate, string $edate): array
         $sheet->setCellValue("H{$row}", $finalEnding);
 
         $row++; $sheet->setCellValue("F{$row}", '-----------------'); $sheet->setCellValue("G{$row}", '-----------------'); $sheet->setCellValue("H{$row}", '-----------------');
-        $row += 3;
+        $row += 4; // spacing before next account
         // =================== END OVERWRITE: XLS row rendering (supports month-opening rows) ===================
     }
 
@@ -1227,6 +1269,7 @@ private function writeXls(array $report, string $sdate, string $edate): array
 
     return $target;
 }
+
 
 
 

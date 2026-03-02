@@ -501,8 +501,15 @@ setSumDebit(sumD);
 setSumCredit(sumC);
 setIsBalanced(balanced);
 
-// Amount box mirrors total CREDIT (same legacy rule)
-setReceiptAmount(sumC);
+// ✅ Amount + Amount in Words must match BANK line amount (workstation_id === 'BANK')
+const bank = details.find((r: DetailRow) => String(r.workstation_id || '').toUpperCase() === 'BANK');
+const bankAmount =
+  bank
+    ? (Number(bank.debit || 0) > 0 ? Number(bank.debit || 0) : Number(bank.credit || 0))
+    : sumC; // fallback
+
+setReceiptAmount(bankAmount);
+
 
 
 

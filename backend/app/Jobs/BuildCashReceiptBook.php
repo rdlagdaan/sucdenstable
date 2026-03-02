@@ -369,127 +369,164 @@ $pdf->writeHTML($grandHtml, true, false, false, false, '');
         Storage::disk('local')->put($file, $pdf->Output('cash-receipts.pdf', 'S'));
     }
 
-    private function buildExcel(string $file, callable $progress): void
-    {
-        $cid = (int) $this->companyId;
-        $co  = $this->companyHeader();
+private function buildExcel(string $file, callable $progress): void
+{
+    $cid = (int) $this->companyId;
+    $co  = $this->companyHeader();
 
-        // ✅ show range as mm/dd/yyyy in the header lines
-        $from = Carbon::parse($this->startDate)->format('m/d/Y');
-        $to   = Carbon::parse($this->endDate)->format('m/d/Y');
+    // ✅ show range as mm/dd/yyyy in the header lines
+    $from = Carbon::parse($this->startDate)->format('m/d/Y');
+    $to   = Carbon::parse($this->endDate)->format('m/d/Y');
 
-        $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $ws = $wb->getActiveSheet();
-        $ws->setTitle('Cash Receipts Book');
+    $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $ws = $wb->getActiveSheet();
+    $ws->setTitle('Cash Receipts Book');
 
-        $r = 1;
-        $ws->setCellValue("A{$r}", 'CASH RECEIPTS BOOK'); $r++;
-        $ws->setCellValue("A{$r}", $co['name']); $r++;
-        $ws->setCellValue("A{$r}", $co['tin']); $r++;
-        $ws->setCellValue("A{$r}", $co['addr1']); $r++;
-        $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
+    $r = 1;
 
-        $ws->setCellValue("A{$r}", 'CASH RECEIPTS JOURNAL'); $r++;
-        $ws->setCellValue("A{$r}", "For the period covering: {$from} to {$to}"); $r += 2;
-        $ws->fromArray(['', '', '', '', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
+    // Header
+    $ws->setCellValue("A{$r}", 'CASH RECEIPTS BOOK'); $r++;
+    $ws->setCellValue("A{$r}", $co['name']); $r++;
+    $ws->setCellValue("A{$r}", $co['tin']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr1']); $r++;
+    $ws->setCellValue("A{$r}", $co['addr2']); $r += 2;
 
-        foreach (range('A','G') as $col) $ws->getColumnDimension($col)->setWidth(18);
+    $ws->setCellValue("A{$r}", 'CASH RECEIPTS JOURNAL'); $r++;
+    $ws->setCellValue("A{$r}", "For the period covering: {$from} to {$to}"); $r += 2;
 
-        $done = 0;
-$grandDebit  = 0.0;
-$grandCredit = 0.0;
+    /**
+     * ✅ REMOVE columns C and D by shifting the layout to A..E only:
+     * A = code / labels
+     * B = description / details
+     * C = DEBIT
+     * D = CREDIT
+     * E = TOTAL label column (for TOTAL/GRAND TOTAL rows)
+     *
+     * So we no longer write anything to C/D as blank “spacer” columns.
+     */
+    $ws->fromArray(['', '', 'DEBIT', 'CREDIT'], null, "A{$r}"); $r++;
 
-        DB::table('cash_receipts as r')
-            ->selectRaw("
-                r.id,
-                to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-                r.cr_no,
-                r.collection_receipt,
-                r.details,
-                bk.bank_name as bank_name,
-                json_agg(json_build_object(
-                    'acct_code', d.acct_code,
-                    'acct_desc', COALESCE(a.acct_desc,''),
-                    'debit', d.debit,
-                    'credit', d.credit
-                ) ORDER BY d.id) as lines
-            ")
-            ->leftJoin('bank as bk', function ($j) use ($cid) {
-                $j->on('bk.bank_id', '=', 'r.bank_id')
-                  ->where('bk.company_id', '=', $cid);
-            })
-            ->join('cash_receipt_details as d', function ($j) {
-                $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
-            })
-            ->leftJoin('account_code as a', function ($j) use ($cid) {
-                $j->on('a.acct_code', '=', 'd.acct_code')
-                  ->where('a.company_id', '=', $cid);
-            })
-            ->where('r.company_id', $cid)
-            ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
-            ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
-            ->orderBy('r.id')
-            ->chunk(200, function($chunk) use (&$r, $ws, &$done, &$grandDebit, &$grandCredit, $progress) {
-                foreach ($chunk as $row) {
-                    $crbId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
+    // Column widths (A..D only)
+    $ws->getColumnDimension('A')->setWidth(22);
+    $ws->getColumnDimension('B')->setWidth(45);
+    $ws->getColumnDimension('C')->setWidth(18);
+    $ws->getColumnDimension('D')->setWidth(18);
 
-                    $ws->setCellValue("A{$r}", $crbId); $r++;
-                    $ws->setCellValue("A{$r}", $row->receipt_date); $r++;
+    $done = 0;
+    $grandDebit  = 0.0;
+    $grandCredit = 0.0;
 
-                    $ws->setCellValue("A{$r}", "RV - {$row->cr_no}");
-                    $ws->setCellValue("B{$r}", "OR#: {$row->collection_receipt}"); $r++;
+    DB::table('cash_receipts as r')
+        ->selectRaw("
+            r.id,
+            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+            r.cr_no,
+            r.collection_receipt,
+            r.details,
+            bk.bank_name as bank_name,
+            json_agg(json_build_object(
+                'acct_code', d.acct_code,
+                'acct_desc', COALESCE(a.acct_desc,''),
+                'debit', d.debit,
+                'credit', d.credit
+            ) ORDER BY d.id) as lines
+        ")
+        ->leftJoin('bank as bk', function ($j) use ($cid) {
+            $j->on('bk.bank_id', '=', 'r.bank_id')
+              ->where('bk.company_id', '=', $cid);
+        })
+        ->join('cash_receipt_details as d', function ($j) {
+            $j->on(DB::raw('CAST(d.transaction_id AS BIGINT)'), '=', 'r.id');
+        })
+        ->leftJoin('account_code as a', function ($j) use ($cid) {
+            $j->on('a.acct_code', '=', 'd.acct_code')
+              ->where('a.company_id', '=', $cid);
+        })
+        ->where('r.company_id', $cid)
+        ->whereBetween('r.receipt_date', [$this->startDate, $this->endDate])
+        ->groupBy('r.id','r.receipt_date','r.cr_no','r.collection_receipt','r.details','bk.bank_name')
+        ->orderBy('r.id')
+        ->chunk(200, function($chunk) use (&$r, $ws, &$done, &$grandDebit, &$grandCredit, $progress) {
 
-                    $ws->setCellValue("A{$r}", $row->bank_name);
-                    $ws->setCellValue("B{$r}", $row->details); $r++;
+            foreach ($chunk as $row) {
+                $crbId = 'ARCR-'.str_pad((string)$row->id, 6, '0', STR_PAD_LEFT);
 
-                    $itemDebit=0; $itemCredit=0;
-                    foreach (json_decode($row->lines,true) as $ln) {
-                        $debit  = (float)($ln['debit'] ?? 0);
-                        $credit = (float)($ln['credit'] ?? 0);
+                // Header lines per receipt
+                $ws->setCellValue("A{$r}", $crbId); $r++;
+                $ws->setCellValue("A{$r}", $row->receipt_date); $r++;
 
-                        $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
-                        $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
-                        $ws->setCellValue("F{$r}", $debit);
-                        $ws->setCellValue("G{$r}", $credit);
-                        $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                $ws->setCellValue("A{$r}", "RV - {$row->cr_no}");
+                $ws->setCellValue("B{$r}", "OR#: {$row->collection_receipt}");
+                $r++;
 
-                        $itemDebit  += $debit;
-                        $itemCredit += $credit;
-                        $r++;
+                $ws->setCellValue("A{$r}", $row->bank_name);
+                $ws->setCellValue("B{$r}", $row->details);
+                $r++;
 
-$grandDebit  += $debit;
-$grandCredit += $credit;
+                // Detail lines
+                $itemDebit  = 0.0;
+                $itemCredit = 0.0;
 
-                    }
+                foreach (json_decode($row->lines, true) as $ln) {
+                    $debit  = (float)($ln['debit'] ?? 0);
+                    $credit = (float)($ln['credit'] ?? 0);
 
-                    $ws->setCellValue("E{$r}", 'TOTAL');
-                    $ws->setCellValue("F{$r}", $itemDebit);
-                    $ws->setCellValue("G{$r}", $itemCredit);
-                    $ws->getStyle("F{$r}:G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
-                    $r += 2;
+                    $ws->setCellValue("A{$r}", $ln['acct_code'] ?? '');
+                    $ws->setCellValue("B{$r}", $ln['acct_desc'] ?? '');
+                    $ws->setCellValue("C{$r}", $debit);
+                    $ws->setCellValue("D{$r}", $credit);
 
-                    $done++; $progress($done);
+                    $ws->getStyle("C{$r}:D{$r}")
+                        ->getNumberFormat()
+                        ->setFormatCode('#,##0.00');
+
+                    $itemDebit  += $debit;
+                    $itemCredit += $credit;
+
+                    $grandDebit  += $debit;
+                    $grandCredit += $credit;
+
+                    $r++;
                 }
-            });
-$ws->setCellValue("E{$r}", 'GRAND TOTAL');
-$ws->setCellValue("F{$r}", $grandDebit);
-$ws->setCellValue("G{$r}", $grandCredit);
 
-$ws->getStyle("E{$r}")->getFont()->setBold(true);
-$ws->getStyle("F{$r}:G{$r}")->getFont()->setBold(true);
-$ws->getStyle("F{$r}:G{$r}")
-    ->getNumberFormat()
-    ->setFormatCode('#,##0.00');
+                // TOTAL line (now uses B + C + D only; no more E/F/G)
+                $ws->setCellValue("B{$r}", 'TOTAL');
+                $ws->setCellValue("C{$r}", $itemDebit);
+                $ws->setCellValue("D{$r}", $itemCredit);
 
+                $ws->getStyle("B{$r}")->getFont()->setBold(true);
+                $ws->getStyle("C{$r}:D{$r}")
+                    ->getNumberFormat()
+                    ->setFormatCode('#,##0.00');
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
-        $stream = fopen('php://temp', 'r+');
-        $writer->save($stream);
-        rewind($stream);
-        Storage::disk('local')->put($file, stream_get_contents($stream));
-        fclose($stream);
+                $r += 2;
 
-        $wb->disconnectWorksheets();
-        unset($writer);
-    }
+                $done++;
+                $progress($done);
+            }
+        });
+
+    // GRAND TOTAL line
+    $ws->setCellValue("B{$r}", 'GRAND TOTAL');
+    $ws->setCellValue("C{$r}", $grandDebit);
+    $ws->setCellValue("D{$r}", $grandCredit);
+
+    $ws->getStyle("B{$r}")->getFont()->setBold(true);
+    $ws->getStyle("C{$r}:D{$r}")->getFont()->setBold(true);
+    $ws->getStyle("C{$r}:D{$r}")
+        ->getNumberFormat()
+        ->setFormatCode('#,##0.00');
+
+    // Write file
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
+    $stream = fopen('php://temp', 'r+');
+    $writer->save($stream);
+    rewind($stream);
+    Storage::disk('local')->put($file, stream_get_contents($stream));
+    fclose($stream);
+
+    $wb->disconnectWorksheets();
+    unset($writer);
+}
+
 }

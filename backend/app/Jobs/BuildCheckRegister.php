@@ -319,22 +319,49 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
     $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
     $yearDesc  = Carbon::parse($start)->year;
 
-    // ✅ simple company header per your requirement
-    $companyName = ($cid === 2) ? 'AMEROP PHILIPPINES, INC' : 'SUCDEN PHILIPPINES, INC';
+    // ✅ simple company header
+    $companyName = ($cid === 2)
+        ? 'AMEROP PHILIPPINES, INC'
+        : 'SUCDEN PHILIPPINES, INC';
 
     $r = 1;
     $ws->setCellValue("A{$r}", $companyName); $r++;
     $ws->setCellValue("A{$r}", 'CHECK REGISTER'); $r++;
-    $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
+    $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}");
+    $r += 2;
 
-    // Keep the same header layout your current sheet expects
-    $ws->fromArray(['Date','Check Voucher','Bank Account','Vendor','','Particular','','Check Number','Amount'], null, "A{$r}");
-    $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
+    /**
+     * ✅ REMOVED columns E and G
+     * Final layout (A..G):
+     * A = Date
+     * B = Check Voucher (CV- prefixed)
+     * C = Bank Account
+     * D = Vendor
+     * E = Particular
+     * F = Check Number
+     * G = Amount
+     */
+    $ws->fromArray(
+        ['Date','Check Voucher','Bank Account','Vendor','Particular','Check Number','Amount'],
+        null,
+        "A{$r}"
+    );
+    $ws->getStyle("A{$r}:G{$r}")->getFont()->setBold(true);
     $r++;
 
-    foreach (range('A','I') as $col) $ws->getColumnDimension($col)->setWidth(18);
+    // Column widths (A..G only)
+    $ws->getColumnDimension('A')->setWidth(14);
+    $ws->getColumnDimension('B')->setWidth(18);
+    $ws->getColumnDimension('C')->setWidth(22);
+    $ws->getColumnDimension('D')->setWidth(28);
+    $ws->getColumnDimension('E')->setWidth(38);
+    $ws->getColumnDimension('F')->setWidth(20);
+    $ws->getColumnDimension('G')->setWidth(18);
 
-    $pageTotal = 0.0; $grandTotal = 0.0; $linesOnPage = 0; $done = 0;
+    $pageTotal = 0.0;
+    $grandTotal = 0.0;
+    $linesOnPage = 0;
+    $done = 0;
 
     DB::table('cash_disbursement as r')
         ->selectRaw("
@@ -351,9 +378,7 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
                 ->selectRaw("transaction_id, credit as bank_amount")
                 ->where('workstation_id', 'BANK'),
             'bk',
-            function ($j) {
-                $j->on('bk.transaction_id', '=', 'r.id');
-            }
+            fn ($j) => $j->on('bk.transaction_id', '=', 'r.id')
         )
         ->leftJoin('bank as b', function ($j) use ($cid) {
             $j->on('b.bank_id', '=', 'r.bank_id');
@@ -371,51 +396,73 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
         ->whereBetween('r.disburse_date', [$start, $end])
         ->orderBy('r.cd_no', 'asc')
         ->orderBy('r.disburse_date', 'asc')
-        ->chunk(300, function($chunk) use (&$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
+        ->chunk(300, function ($chunk) use (
+            &$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress
+        ) {
             foreach ($chunk as $row) {
                 $amt = (float)($row->bank_amount ?? 0);
+
                 $pageTotal  += $amt;
                 $grandTotal += $amt;
                 $linesOnPage++;
 
                 $ws->fromArray([
                     $row->disburse_date ?? '',
-                    $row->cd_no ?? '',
+                    $row->cd_no ? 'CV-' . $row->cd_no : '',
                     $row->bank_account_number ?? '',
-                    $row->vend_name ?? '', '',
-                    $row->explanation ?? '', '',
+                    $row->vend_name ?? '',
+                    $row->explanation ?? '',
                     $row->check_ref_no ?? '',
                     $amt
                 ], null, "A{$r}");
-                $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+
+                $ws->getStyle("G{$r}")
+                    ->getNumberFormat()
+                    ->setFormatCode('#,##0.00');
+
                 $r++;
 
+                // Page break logic (unchanged behavior)
                 if ($linesOnPage >= 45) {
-                    $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
-                    $ws->setCellValue("I{$r}", $pageTotal);
-                    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                    $ws->setCellValue("F{$r}", 'PAGE TOTAL AMOUNT:');
+                    $ws->setCellValue("G{$r}", $pageTotal);
+                    $ws->getStyle("G{$r}")
+                        ->getNumberFormat()
+                        ->setFormatCode('#,##0.00');
                     $r += 2;
 
                     $linesOnPage = 0;
                     $pageTotal = 0.0;
 
-                    // repeat header like your current behavior
-                    $ws->fromArray(['Date','Check Voucher','Bank Account','Vendor','','Particular','','Check Number','Amount'], null, "A{$r}");
-                    $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
+                    // repeat column headers
+                    $ws->fromArray(
+                        ['Date','Check Voucher','Bank Account','Vendor','Particular','Check Number','Amount'],
+                        null,
+                        "A{$r}"
+                    );
+                    $ws->getStyle("A{$r}:G{$r}")->getFont()->setBold(true);
                     $r++;
                 }
 
-                $done++; $progress($done);
+                $done++;
+                $progress($done);
             }
         });
 
-    $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
-    $ws->setCellValue("I{$r}", $pageTotal);
-    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00'); $r++;
+    // Final page total
+    $ws->setCellValue("F{$r}", 'PAGE TOTAL AMOUNT:');
+    $ws->setCellValue("G{$r}", $pageTotal);
+    $ws->getStyle("G{$r}")
+        ->getNumberFormat()
+        ->setFormatCode('#,##0.00');
+    $r++;
 
-    $ws->setCellValue("H{$r}", 'GRAND TOTAL AMOUNT:');
-    $ws->setCellValue("I{$r}", $grandTotal);
-    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+    // Grand total
+    $ws->setCellValue("F{$r}", 'GRAND TOTAL AMOUNT:');
+    $ws->setCellValue("G{$r}", $grandTotal);
+    $ws->getStyle("G{$r}")
+        ->getNumberFormat()
+        ->setFormatCode('#,##0.00');
 
     $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
     $stream = fopen('php://temp', 'r+');

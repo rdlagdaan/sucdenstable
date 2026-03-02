@@ -41,6 +41,8 @@ const GeneralJournalBook       = lazy(() => import('./components/accounting/repo
 const GeneralLedger            = lazy(() => import('./components/accounting/reports/GeneralLedger'));
 const ReceiptRegister          = lazy(() => import('./components/accounting/reports/ReceiptRegister'));
 const TrialBalance             = lazy(() => import('./components/accounting/reports/TrialBalance'));
+const CustomerSummaryReport    = lazy(() => import('./components/accounting/reports/CustomerSummaryReport'));
+const VendorSummaryReport    = lazy(() => import('./components/accounting/reports/VendorSummaryReport'));
 
 
 
@@ -85,7 +87,9 @@ const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>>
   general_ledger: GeneralLedger,
   receipt_register: ReceiptRegister,
   trial_balance: TrialBalance,
-
+  customer_summary_report: CustomerSummaryReport,
+  vendor_summary_report: VendorSummaryReport,
+  
   approvals_center: ApprovalCenter,
   approvals_inbox: ApprovalsInbox,
   approvals_outbox: ApprovalsOutbox,

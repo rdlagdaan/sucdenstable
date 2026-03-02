@@ -125,6 +125,64 @@ export default function CashDisbursementForm() {
   const [payMethodId, setPayMethodId] = useState('');
   const [explanation, setExplanation] = useState('');
   const [checkRefNo, setCheckRefNo] = useState('');
+
+  const user = useMemo(() => {
+    const s = localStorage.getItem('user');
+    return s ? JSON.parse(s) : null;
+  }, []);
+  const companyId = user?.company_id;
+
+  // ✅ Check/Ref # duplicate guard (per company)
+  const [checkRefChecking, setCheckRefChecking] = useState(false);
+  const [checkRefDup, setCheckRefDup] = useState(false);
+  const [checkRefDupMsg, setCheckRefDupMsg] = useState<string>('');
+
+  const normCheckRef = (s: string) => String(s || '').trim();
+
+  const checkRefExists = useCallback(
+    async (ref: string) => {
+      const v = normCheckRef(ref);
+      if (!companyId || !v) {
+        setCheckRefDup(false);
+        setCheckRefDupMsg('');
+        return { exists: false };
+      }
+
+      setCheckRefChecking(true);
+      try {
+        const { data } = await napi.get('/cash-disbursement/check-ref-exists', {
+          params: {
+            company_id: companyId,
+            check_ref_no: v,
+            exclude_id: mainId ?? '', // ✅ exclude current record when editing
+          },
+        });
+
+        const exists = !!data?.exists;
+        setCheckRefDup(exists);
+
+        if (exists) {
+          const cd = String(data?.cd_no || '').trim();
+          setCheckRefDupMsg(cd ? `Check / Ref # already exists (CV ${cd}).` : 'Check / Ref # already exists.');
+        } else {
+          setCheckRefDupMsg('');
+        }
+
+        return data || { exists };
+      } catch {
+        // If checker fails, do NOT block typing; backend will still enforce on save.
+        setCheckRefDup(false);
+        setCheckRefDupMsg('');
+        return { exists: false };
+      } finally {
+        setCheckRefChecking(false);
+      }
+    },
+    [companyId, mainId]
+  );
+
+
+
   const [_locked, setLocked] = useState(false);       // legacy (we will still set it)
   const [_gridLocked, setGridLocked] = useState(true); // grid lock (separate)
   const [isCancelled, setIsCancelled] = useState(false);
@@ -188,14 +246,33 @@ const [isExported, setIsExported] = useState(false); // ✅ locks spreadsheet on
   }, [tableData.length, maxGridHeight]);
 
   // user/company from localStorage
-  const user = useMemo(() => {
-    const s = localStorage.getItem('user');
-    return s ? JSON.parse(s) : null;
-  }, []);
-  const companyId = user?.company_id;
+
 
   // amount words follow header amount
   useEffect(() => { setAmountWords(pesoWords(disburseAmount)); }, [disburseAmount]);
+
+  // ✅ Live duplicate check (debounced) while typing Check / Ref #
+  useEffect(() => {
+    const v = normCheckRef(checkRefNo);
+
+    // no value => clear state
+    if (!v) {
+      setCheckRefDup(false);
+      setCheckRefDupMsg('');
+      return;
+    }
+
+    // if cancelled, do not check
+    if (isCancelled) return;
+
+    const t = window.setTimeout(() => {
+      checkRefExists(v);
+    }, 450);
+
+    return () => window.clearTimeout(t);
+  }, [checkRefNo, isCancelled, checkRefExists]);
+
+
 
   /* ---------------- approval (EDIT/CANCEL/DELETE/UNCANCEL) ---------------- */
   const MODULE = 'cash_disbursement'; // must match what backend will use later
@@ -341,6 +418,20 @@ const canEditNow =
   };
 
 const handleSaveChanges = async () => {
+
+  // ✅ hard stop if Check/Ref duplicates (re-check right before save)
+  const ref = normCheckRef(checkRefNo);
+  if (companyId && ref) {
+    const chk = await checkRefExists(ref);
+    if (chk?.exists) {
+      return Swal.fire({
+        icon: 'error',
+        title: 'Duplicate Check / Ref #',
+        text: checkRefDupMsg || 'Check / Ref # already exists.',
+      });
+    }
+  }
+
   if (!mainId) return toast.info('Save or select a disbursement first.');
   if (isCancelled) return toast.error('Cannot save changes on cancelled transaction.');
 
@@ -392,6 +483,21 @@ const handleSaveChanges = async () => {
 
 
 const handleSaveMainNoApproval = async () => {
+
+  // ✅ hard stop if Check/Ref duplicates (re-check right before save)
+  const ref = normCheckRef(checkRefNo);
+  if (companyId && ref) {
+    const chk = await checkRefExists(ref);
+    if (chk?.exists) {
+      return Swal.fire({
+        icon: 'error',
+        title: 'Duplicate Check / Ref #',
+        text: checkRefDupMsg || 'Check / Ref # already exists.',
+      });
+    }
+  }
+
+
   if (!mainId) return toast.info('Save or select a disbursement first.');
   if (isCancelled) return toast.error('Cancelled transaction cannot be modified.');
 
@@ -568,6 +674,21 @@ setIsExported(!!m.exported_at);
 
   /* --------- main actions --------- */
   const handleSaveMain = async () => {
+
+    // ✅ hard stop if Check/Ref duplicates (re-check right before save)
+    const ref = normCheckRef(checkRefNo);
+    if (companyId && ref) {
+      const chk = await checkRefExists(ref);
+      if (chk?.exists) {
+        return Swal.fire({
+          icon: 'error',
+          title: 'Duplicate Check / Ref #',
+          text: checkRefDupMsg || 'Check / Ref # already exists.',
+        });
+      }
+    }
+
+
     if (!vendId || !disburseDate || !bankId || !payMethodId || !checkRefNo) {
       return toast.error('Please complete Vendor, Date, Bank, Payment Method, and Check/Ref #.');
     }
@@ -1074,8 +1195,16 @@ setIsExported(!!m.exported_at);
               value={checkRefNo}
               disabled={isCancelled}
               onChange={(e) => setCheckRefNo(e.target.value)}
-              className="w-full border p-2 bg-blue-100 text-blue-900"
+              className={`w-full border p-2 bg-blue-100 text-blue-900 ${
+                checkRefDup ? 'border-red-500 ring-1 ring-red-300' : ''
+              }`}
             />
+            {!isCancelled && checkRefChecking && (
+              <div className="mt-1 text-xs text-gray-600 font-semibold">Checking…</div>
+            )}
+            {!isCancelled && !checkRefChecking && checkRefDup && (
+              <div className="mt-1 text-xs text-red-700 font-semibold">{checkRefDupMsg}</div>
+            )}
           </div>
 
           {/* Amount in words */}
@@ -1118,7 +1247,15 @@ setIsExported(!!m.exported_at);
         {/* Actions */}
         <div className="flex flex-wrap gap-2 mt-3 items-center">
           {!isSaved ? (
-            <button onClick={handleSaveMain} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">
+            <button
+              onClick={handleSaveMain}
+              disabled={checkRefChecking || checkRefDup}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded ${
+                (checkRefChecking || checkRefDup)
+                  ? 'bg-blue-300 text-white cursor-not-allowed'
+                  : 'bg-blue-600 text-white hover:bg-blue-700'
+              }`}
+            >
               <CheckCircleIcon className="h-5 w-5" />
               Save
             </button>

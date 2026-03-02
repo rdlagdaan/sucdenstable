@@ -176,8 +176,8 @@ export default function GeneralLedger() {
   const [startAccount, setStartAccount] = useState<string>("");
   const [endAccount, setEndAccount] = useState<string>("");
 
-  const [startDate, setStartDate] = useState<string>("2025-01-01");
-  const [endDate, setEndDate] = useState<string>("2025-01-16");
+  const [startDate, setStartDate] = useState<string>("");
+  const [endDate, setEndDate] = useState<string>("");
 
   const [ticket, setTicket] = useState<string | null>(null);
   const [job, setJob] = useState<JobState | null>(null);
@@ -230,10 +230,10 @@ export default function GeneralLedger() {
         }));
         const filtered = rows.filter((r) => r.acct_code);
         setAccounts(filtered);
-        if (filtered.length) {
-          setStartAccount(filtered[0].acct_code);
-          setEndAccount(filtered[filtered.length - 1].acct_code);
-        }
+        //if (filtered.length) {
+        //  setStartAccount(filtered[0].acct_code);
+        //  setEndAccount(filtered[filtered.length - 1].acct_code);
+        //}
       } catch (err: any) {
         setLoadError(err?.message ?? "Failed to load accounts.");
       } finally {

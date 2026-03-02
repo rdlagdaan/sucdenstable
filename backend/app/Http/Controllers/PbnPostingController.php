@@ -8,6 +8,70 @@ use Illuminate\Support\Facades\Log;
 
 class PbnPostingController extends Controller
 {
+    
+// ===== START ADD: safe table + column resolvers (prevents 500) =====
+private function tableExists(string $table): bool
+{
+    try {
+        return DB::table('information_schema.tables')
+            ->whereRaw("table_schema = 'public'")
+            ->whereRaw('table_name = ?', [$table])
+            ->exists();
+    } catch (\Throwable $e) {
+        return false;
+    }
+}
+
+
+private function colExists(string $table, string $column): bool
+{
+    try {
+        return DB::table('information_schema.columns')
+            ->whereRaw("table_schema = 'public'")
+            ->whereRaw('table_name = ?', [$table])
+            ->whereRaw('column_name = ?', [$column])
+            ->exists();
+    } catch (\Throwable $e) {
+        return false;
+    }
+}
+
+
+private function pbnDetailsTable(): string
+{
+    // most common alternates in Sucden builds
+    $candidates = ['pbn_entry_details', 'sucden_pbn_details'];
+    foreach ($candidates as $t) {
+        if ($this->tableExists($t)) return $t;
+    }
+    return 'pbn_entry_details'; // fallback
+}
+
+/**
+ * Determine how details link to main:
+ *  - preferred: pbn_entry_id = main.id
+ *  - fallback: pbn_number / PBNNo / pbn_no = main.pbn_number
+ */
+private function pbnDetailsLink(string $detailsTable): array
+{
+    // link-by-id
+    if ($this->colExists($detailsTable, 'pbn_entry_id')) {
+        return ['type' => 'id', 'col' => 'pbn_entry_id'];
+    }
+
+    // link-by-number
+    foreach (['pbn_number', 'pbn_no', 'PBNNo', 'pbnNo'] as $col) {
+        if ($this->colExists($detailsTable, $col)) {
+            return ['type' => 'number', 'col' => $col];
+        }
+    }
+
+    // unknown schema: return "none" so caller can safely return empty details (no 500)
+    return ['type' => 'none', 'col' => null];
+}
+// ===== END ADD: safe table + column resolvers (prevents 500) =====
+    
+    
     /**
      * IMPORTANT:
      * Receiving-side usage table may differ in your project.
@@ -34,71 +98,75 @@ private function receivingTable(): string
      *  - status: unposted|posted|closed|all (optional; default unposted)
      *  - q (optional)
      */
-    public function list(Request $req)
-    {
-        $data = $req->validate([
-            'company_id' => ['required','integer'],
-            'status'     => ['nullable','string'],
-            'q'          => ['nullable','string'],
+public function list(Request $req)
+{
+    $data = $req->validate([
+        'company_id' => ['required','integer'],
+        'status'     => ['nullable','string'],
+        'q'          => ['nullable','string'],
+    ]);
+
+    $companyId = (int) $data['company_id'];
+    $status    = strtolower((string) ($data['status'] ?? 'unposted'));
+    $q         = trim((string) ($data['q'] ?? ''));
+
+    /**
+     * ✅ FIX for your 500:
+     * Your flags can be SMALLINT (or VARCHAR in some builds). Using NULLIF(flag,'') breaks
+     * when flag is SMALLINT because '' cannot be cast to SMALLINT.
+     *
+     * Solution: always cast flag to TEXT first, then NULLIF/trim, then cast to int.
+     */
+    $deleteZero = "COALESCE(NULLIF(trim(p.delete_flag::text), '' )::int, 0) = 0";
+    $postedZero = "COALESCE(NULLIF(trim(p.posted_flag::text), '' )::int, 0) = 0";
+    $postedOne  = "COALESCE(NULLIF(trim(p.posted_flag::text), '' )::int, 0) = 1";
+    $closeZero  = "COALESCE(NULLIF(trim(p.close_flag::text),  '' )::int, 0) = 0";
+    $closeOne   = "COALESCE(NULLIF(trim(p.close_flag::text),  '' )::int, 0) = 1";
+
+    $query = DB::table('pbn_entry as p')
+        ->where('p.company_id', $companyId)
+        ->whereRaw($deleteZero);
+
+    // Status filter
+    if ($status === 'unposted') {
+        $query->whereRaw($postedZero)->whereRaw($closeZero);
+    } elseif ($status === 'posted') {
+        $query->whereRaw($postedOne)->whereRaw($closeZero);
+    } elseif ($status === 'closed') {
+        $query->whereRaw($closeOne);
+    } // 'all' => no extra filter
+
+    // Search filter
+    if ($q !== '') {
+        $qq = strtolower($q);
+        $query->where(function ($w) use ($qq) {
+            $w->whereRaw("LOWER(COALESCE(p.pbn_number, '')) LIKE ?", ["%{$qq}%"])
+              ->orWhereRaw("LOWER(COALESCE(p.vendor_name, '')) LIKE ?", ["%{$qq}%"])
+              ->orWhereRaw("LOWER(COALESCE(p.vend_code,   '')) LIKE ?", ["%{$qq}%"]);
+        });
+    }
+
+    $rows = $query
+        ->orderByDesc('p.id')
+        ->limit(200)
+        ->get([
+            'p.id',
+            'p.pbn_number',
+            'p.pbn_date',
+            'p.sugar_type',
+            'p.crop_year',
+            'p.vend_code',
+            'p.vendor_name',
+            'p.posted_flag',
+            'p.close_flag',
         ]);
 
-        $companyId = (int) $data['company_id'];
-        $status    = strtolower((string) ($data['status'] ?? 'unposted'));
-        $q         = trim((string) ($data['q'] ?? ''));
+    return response()->json($rows);
+}
 
-        $query = DB::table('pbn_entry as p')
-            ->where('p.company_id', $companyId)
-            ->where(function ($w) {
-                // keep only visible rows if your module uses visible_flag
-                $w->whereNull('p.visible_flag')->orWhere('p.visible_flag', 1);
-            })
-            ->where(function ($w) {
-                // exclude deleted if your module uses delete_flag
-                $w->whereNull('p.delete_flag')->orWhere('p.delete_flag', 0);
-            });
 
-        if ($status === 'unposted') {
-            $query->where(function ($w) {
-                $w->whereNull('p.posted_flag')->orWhere('p.posted_flag', 0);
-            })->where(function ($w) {
-                $w->whereNull('p.close_flag')->orWhere('p.close_flag', 0);
-            });
-        } elseif ($status === 'posted') {
-            $query->where('p.posted_flag', 1)
-                  ->where(function ($w) {
-                      $w->whereNull('p.close_flag')->orWhere('p.close_flag', 0);
-                  });
-        } elseif ($status === 'closed') {
-            $query->where('p.close_flag', 1);
-        } // else "all" => no extra filter
 
-        if ($q !== '') {
-            $qq = strtolower($q);
-            $query->where(function ($w) use ($qq) {
-                $w->whereRaw('LOWER(COALESCE(p.pbn_number, \'\')) LIKE ?', ["%{$qq}%"])
-                  ->orWhereRaw('LOWER(COALESCE(p.vendor_name, \'\')) LIKE ?', ["%{$qq}%"])
-                  ->orWhereRaw('LOWER(COALESCE(p.vend_code, \'\')) LIKE ?', ["%{$qq}%"]);
-            });
-        }
 
-        $rows = $query
-            ->orderByDesc('p.pbn_date')
-            ->orderByDesc('p.pbn_number')
-            ->limit(200)
-            ->get([
-                'p.id',
-                'p.pbn_number',
-                'p.pbn_date',
-                'p.sugar_type',
-                'p.crop_year',
-                'p.vend_code',
-                'p.vendor_name',
-                'p.posted_flag',
-                'p.close_flag',
-            ]);
-
-        return response()->json($rows);
-    }
 
     /**
      * GET /api/pbn/posting/{id}
@@ -122,25 +190,102 @@ private function receivingTable(): string
             ->first();
 
         if (!$main) {
-            return response()->json(['message' => 'PBN not found'], 404);
+            return response()->json(['message' => 'PO not found'], 404);
         }
 
-        $details = DB::table('pbn_entry_details as d')
-            ->where('d.pbn_entry_id', $id)
-            ->where(function ($w) {
-                $w->whereNull('d.delete_flag')->orWhere('d.delete_flag', 0);
-            })
-            ->orderBy('d.row')
-            ->get([
-                'd.id',
-                'd.row',
-                'd.mill_code',
-                'd.mill',
-                'd.quantity',
-                'd.unit_cost',
-                'd.commission',
-                'd.selected_flag',
-            ]);
+// ===== START REPLACE: details query (schema-safe) =====
+$detailsTable = $this->pbnDetailsTable();
+$link = $this->pbnDetailsLink($detailsTable);
+
+try {
+    $dq = DB::table($detailsTable . ' as d');
+
+    // deleted flag filter only if the column exists
+    if ($this->colExists($detailsTable, 'delete_flag')) {
+        $dq->where(function ($w) {
+            $w->whereNull('d.delete_flag')->orWhere('d.delete_flag', 0);
+        });
+    }
+
+    // apply link
+    if ($link['type'] === 'id') {
+        $dq->where('d.' . $link['col'], $id);
+    } elseif ($link['type'] === 'number') {
+        $dq->where('d.' . $link['col'], (string)($main->pbn_number ?? ''));
+    } else {
+        // unknown schema -> return empty (but no 500)
+// unknown schema -> return empty (but no 500)
+$details = collect([]);
+// goto DETAILS_DONE;
+
+    }
+
+    // order: prefer row, else itemNo if present
+    if ($this->colExists($detailsTable, 'row')) {
+        $dq->orderBy('d.row');
+    } elseif ($this->colExists($detailsTable, 'itemNo')) {
+        $dq->orderBy('d.itemNo');
+    }
+
+    // select safely (use what exists)
+    $select = [];
+
+    // required id-like field
+    if ($this->colExists($detailsTable, 'id')) {
+        $select[] = 'd.id';
+    } else {
+        // fallback key
+        $select[] = DB::raw("ROW_NUMBER() OVER() as id");
+    }
+
+    // row number
+    if ($this->colExists($detailsTable, 'row')) {
+        $select[] = 'd.row';
+    } elseif ($this->colExists($detailsTable, 'itemNo')) {
+        $select[] = 'd.itemNo as row';
+    } else {
+        $select[] = DB::raw('0 as row');
+    }
+
+    // mill
+    if ($this->colExists($detailsTable, 'mill_code')) $select[] = 'd.mill_code';
+    elseif ($this->colExists($detailsTable, 'millCode')) $select[] = 'd.millCode as mill_code';
+    elseif ($this->colExists($detailsTable, 'millID')) $select[] = 'd.millID as mill_code';
+    else $select[] = DB::raw("'' as mill_code");
+
+    if ($this->colExists($detailsTable, 'mill')) $select[] = 'd.mill';
+    else $select[] = DB::raw("'' as mill");
+
+    // quantity
+    if ($this->colExists($detailsTable, 'quantity')) $select[] = 'd.quantity';
+    elseif ($this->colExists($detailsTable, 'qty')) $select[] = 'd.qty as quantity';
+    else $select[] = DB::raw('0 as quantity');
+
+    // unit_cost
+    if ($this->colExists($detailsTable, 'unit_cost')) $select[] = 'd.unit_cost';
+    elseif ($this->colExists($detailsTable, 'price')) $select[] = 'd.price as unit_cost';
+    else $select[] = DB::raw('0 as unit_cost');
+
+    // commission
+    if ($this->colExists($detailsTable, 'commission')) $select[] = 'd.commission';
+    else $select[] = DB::raw('0 as commission');
+
+    // selected_flag
+    if ($this->colExists($detailsTable, 'selected_flag')) $select[] = 'd.selected_flag';
+    else $select[] = DB::raw('0 as selected_flag');
+
+    $details = $dq->get($select);
+} catch (\Throwable $e) {
+    Log::warning('PO posting: details query failed', [
+        'details_table' => $detailsTable,
+        'err' => $e->getMessage(),
+    ]);
+    $details = collect([]);
+}
+
+
+// ===== END REPLACE: details query (schema-safe) =====
+
 
         // Compute used quantities from Receiving module (best-effort).
         // If your receiving table/columns differ, update RECEIVING_DETAILS_TABLE and the query inside getUsedMap().
@@ -181,41 +326,58 @@ private function receivingTable(): string
      * Best-effort: if Receiving table doesn't exist yet / different schema,
      * this will return an empty map (used=0) but won't crash.
      */
-    private function getUsedMapSafe(int $companyId, int $pbnEntryId): array
-    {
-        try {
-            // Expected:
-            // receiving_details.pbn_entry_id = pbn_entry.id
-            // receiving_details.pbn_detail_id = pbn_entry_details.id
-            // receiving_details.quantity = used qty
-$rows = DB::table($this->receivingTable())
-                ->where('company_id', $companyId)
-                ->where('pbn_entry_id', $pbnEntryId)
-                ->when($this->tableHasColumn(self::RECEIVING_DETAILS_TABLE, 'delete_flag'), function ($q) {
-                    $q->where(function ($w) {
-                        $w->whereNull('delete_flag')->orWhere('delete_flag', 0);
-                    });
-                })
-                ->groupBy('pbn_detail_id')
-                ->get([
-                    'pbn_detail_id',
-                    DB::raw('SUM(quantity) as used_qty'),
-                ]);
+private function getUsedMapSafe(int $companyId, int $pbnEntryId): array
+{
+    try {
+        $table = $this->receivingTable();
 
-            $map = [];
-            foreach ($rows as $r) {
-                $k = (int) ($r->pbn_detail_id ?? 0);
-                if ($k > 0) $map[$k] = (float) ($r->used_qty ?? 0);
-            }
-            return $map;
-        } catch (\Throwable $e) {
-            Log::warning('PBN posting: receiving usage map not available yet', [
-'table' => $this->receivingTable(),
-                'err'   => $e->getMessage(),
-            ]);
+        // if receiving table doesn't exist yet, just return empty
+        if (!$this->tableExists($table)) return [];
+
+        $q = DB::table($table)
+            ->where('company_id', $companyId);
+
+        // link by pbn_entry_id if present
+        if ($this->colExists($table, 'pbn_entry_id')) {
+            $q->where('pbn_entry_id', $pbnEntryId);
+        } else {
+            // schema not ready for usage tracking
             return [];
         }
+
+        if ($this->colExists($table, 'delete_flag')) {
+            $q->where(function ($w) {
+                $w->whereNull('delete_flag')->orWhere('delete_flag', 0);
+            });
+        }
+
+        // we need pbn_detail_id + quantity
+        if (!$this->colExists($table, 'pbn_detail_id') || !$this->colExists($table, 'quantity')) {
+            return [];
+        }
+
+        $rows = $q->groupBy('pbn_detail_id')
+            ->get([
+                'pbn_detail_id',
+                DB::raw('SUM(quantity) as used_qty'),
+            ]);
+
+        $map = [];
+        foreach ($rows as $r) {
+            $k = (int) ($r->pbn_detail_id ?? 0);
+            if ($k > 0) $map[$k] = (float) ($r->used_qty ?? 0);
+        }
+        return $map;
+
+    } catch (\Throwable $e) {
+        Log::warning('PO posting: receiving usage map not available yet', [
+            'table' => $this->receivingTable(),
+            'err'   => $e->getMessage(),
+        ]);
+        return [];
     }
+}
+
 
     private function tableHasColumn(string $table, string $column): bool
     {
@@ -255,16 +417,16 @@ public function requestPost(Request $req, int $id)
         ->where('company_id', $companyId)
         ->first();
 
-    if (!$pbn) return response()->json(['message' => 'PBN not found'], 404);
+    if (!$pbn) return response()->json(['message' => 'PO not found'], 404);
 
     if ((int)($pbn->delete_flag ?? 0) === 1) {
-        return response()->json(['message' => 'PBN is deleted/hidden.'], 409);
+        return response()->json(['message' => 'PO is deleted/hidden.'], 409);
     }
     if ((int)($pbn->close_flag ?? 0) === 1) {
-        return response()->json(['message' => 'PBN is already closed.'], 409);
+        return response()->json(['message' => 'PO is already closed.'], 409);
     }
     if ((int)($pbn->posted_flag ?? 0) === 1) {
-        return response()->json(['message' => 'PBN is already posted.'], 409);
+        return response()->json(['message' => 'PO is already posted.'], 409);
     }
 
     return $this->createOrReuseApproval($req, $companyId, 'pbn_posting', $id, 'post', $reason);
@@ -289,16 +451,16 @@ public function requestUnpostUnused(Request $req, int $id)
         ->where('company_id', $companyId)
         ->first();
 
-    if (!$pbn) return response()->json(['message' => 'PBN not found'], 404);
+    if (!$pbn) return response()->json(['message' => 'PO not found'], 404);
 
     if ((int)($pbn->delete_flag ?? 0) === 1) {
-        return response()->json(['message' => 'PBN is deleted/hidden.'], 409);
+        return response()->json(['message' => 'PO is deleted/hidden.'], 409);
     }
     if ((int)($pbn->close_flag ?? 0) === 1) {
-        return response()->json(['message' => 'PBN is closed. Unpost is not allowed.'], 409);
+        return response()->json(['message' => 'PO is closed. Unpost is not allowed.'], 409);
     }
     if ((int)($pbn->posted_flag ?? 0) !== 1) {
-        return response()->json(['message' => 'PBN must be posted first.'], 409);
+        return response()->json(['message' => 'PO must be posted first.'], 409);
     }
 
     return $this->createOrReuseApproval($req, $companyId, 'pbn_posting', $id, 'unpost_unused', $reason);
@@ -323,16 +485,16 @@ public function requestClose(Request $req, int $id)
         ->where('company_id', $companyId)
         ->first();
 
-    if (!$pbn) return response()->json(['message' => 'PBN not found'], 404);
+    if (!$pbn) return response()->json(['message' => 'PO not found'], 404);
 
     if ((int)($pbn->delete_flag ?? 0) === 1) {
-        return response()->json(['message' => 'PBN is deleted/hidden.'], 409);
+        return response()->json(['message' => 'PO is deleted/hidden.'], 409);
     }
     if ((int)($pbn->close_flag ?? 0) === 1) {
-        return response()->json(['message' => 'PBN is already closed.'], 409);
+        return response()->json(['message' => 'PO is already closed.'], 409);
     }
     if ((int)($pbn->posted_flag ?? 0) !== 1) {
-        return response()->json(['message' => 'PBN must be posted before it can be closed.'], 409);
+        return response()->json(['message' => 'PO must be posted before it can be closed.'], 409);
     }
 
     return $this->createOrReuseApproval($req, $companyId, 'pbn_posting', $id, 'close', $reason);

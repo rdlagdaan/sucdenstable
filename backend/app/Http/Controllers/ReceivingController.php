@@ -121,7 +121,7 @@ class ReceivingController extends Controller
         $row = PbnEntryDetail::query()
             ->where('pbn_number', $pbn)
             ->where('row', $item)
-            ->select('unit_cost','commission','mill','mill_code')
+            ->select('price as unit_cost','commission','mill','mill_code')
             ->first();
 
         return response()->json($row ?: []);
@@ -224,7 +224,7 @@ public function batchInsertDetails(Request $req)
             ->where('row', $entry->item_number)
             ->first();
 
-        $unitCost   = (float) ($pbnItem->unit_cost ?? 0);
+        $unitCost   = (float) ($pbnItem->price ?? 0);
         $commission = (float) ($pbnItem->commission ?? 0);
 
         // receipt_date ISO (works whether casted or string)
@@ -672,46 +672,118 @@ public function createEntry(\Illuminate\Http\Request $req)
 
 public function pricingContext(Request $req)
 {
-    $pbnNumber  = (string) $req->get('pbn_number');
-    $itemNo     = (string) $req->get('item_no');
-    $millName   = (string) $req->get('mill_name');
-    $companyId  = (int) ($req->header('X-Company-ID') ?: $req->get('company_id'));
+    try {
+        $pbnNumber  = trim((string) $req->get('pbn_number', ''));
+        $itemNo     = trim((string) $req->get('item_no', ''));
+        $millName   = trim((string) $req->get('mill_name', ''));
+        $companyId  = (int) ($req->get('company_id') ?: $req->header('X-Company-ID') ?: 0);
 
-    if (!$pbnNumber || $itemNo === '' || !$millName || !$companyId) {
-        return response()->json([
-            'unit_cost' => 0, 'commission' => 0,
-            'insurance_rate' => 0, 'storage_rate' => 0, 'days_free' => 0,
-            'crop_year' => null, 'mill' => $millName,
+        if ($companyId <= 0) {
+            return response()->json(['message' => 'Missing company_id (param or X-Company-ID header).'], 422);
+        }
+
+        if ($pbnNumber === '' || $itemNo === '' || $millName === '') {
+            return response()->json([
+                'unit_cost' => 0, 'commission' => 0,
+                'insurance_rate' => 0, 'storage_rate' => 0, 'days_free' => 0,
+                'crop_year' => null, 'mill' => $millName,
+            ]);
+        }
+
+        // 1) Resolve PBN header (needed for pbn_entry_id + crop_year)
+        $pbn = \App\Models\PbnEntry::query()
+            ->where('company_id', $companyId)
+            ->where('pbn_number', $pbnNumber)
+            ->first();
+
+        $cropYear = (string)($pbn?->crop_year ?: $req->get('crop_year', ''));
+
+        if (!$pbn) {
+            return response()->json([
+                'unit_cost' => 0, 'commission' => 0,
+                'insurance_rate' => 0, 'storage_rate' => 0, 'days_free' => 0,
+                'crop_year' => $cropYear !== '' ? $cropYear : null,
+                'mill' => $millName,
+            ]);
+        }
+
+        // 2) Detect actual detail columns (your error shows unit_cost does NOT exist)
+        $pickCol = function (string $table, array $candidates): ?string {
+            foreach ($candidates as $c) {
+                if (\Illuminate\Support\Facades\Schema::hasColumn($table, $c)) return $c;
+            }
+            return null;
+        };
+
+        $detailTable = 'pbn_entry_details';
+
+        $unitCol = $pickCol($detailTable, [
+            'unit_cost', 'unitcost', 'price_lkg', 'price_per_lkg', 'unit_price', 'price'
         ]);
+        $commCol = $pickCol($detailTable, [
+            'commission', 'comm', 'commission_amount', 'comm_amount'
+        ]);
+        $millCol = $pickCol($detailTable, [
+            'mill', 'mill_name', 'mill_id', 'millcode', 'mill_code'
+        ]);
+
+        // If none found, fail safely (no 500)
+        if (!$unitCol && !$commCol && !$millCol) {
+            return response()->json([
+                'unit_cost' => 0, 'commission' => 0,
+                'insurance_rate' => 0, 'storage_rate' => 0, 'days_free' => 0,
+                'crop_year' => $cropYear !== '' ? $cropYear : null,
+                'mill' => $millName,
+                'debug' => 'No recognized pricing columns found in pbn_entry_details.',
+            ]);
+        }
+
+        // 3) Load the PBN item row by pbn_entry_id + row (item_no)
+        // Use DB::table so we can alias whichever real columns exist -> unit_cost/commission/mill
+        $selects = [];
+        $selects[] = $unitCol ? \DB::raw("\"{$unitCol}\" as unit_cost") : \DB::raw("0 as unit_cost");
+        $selects[] = $commCol ? \DB::raw("\"{$commCol}\" as commission") : \DB::raw("0 as commission");
+        $selects[] = $millCol ? \DB::raw("\"{$millCol}\" as mill") : \DB::raw("NULL as mill");
+
+        $pbnItem = \DB::table($detailTable)
+            ->where('pbn_entry_id', (int)$pbn->id)
+            ->where('row', $itemNo)
+            ->first($selects);
+
+        $unitCost   = (float)($pbnItem->unit_cost ?? 0);
+        $commission = (float)($pbnItem->commission ?? 0);
+
+        // Prefer mill from pbn detail if present else mill_name from request
+        $finalMill = trim((string)(($pbnItem->mill ?? '') !== '' ? $pbnItem->mill : $millName));
+
+        // 4) Resolve mill rates using your existing helper
+        $rate = $this->resolveMillRateByCropYear($finalMill, $companyId, $cropYear);
+
+        return response()->json([
+            'unit_cost'      => $unitCost,
+            'commission'     => $commission,
+            'insurance_rate' => (float)($rate['insurance_rate'] ?? 0),
+            'storage_rate'   => (float)($rate['storage_rate'] ?? 0),
+            'days_free'      => (int)  ($rate['days_free'] ?? 0),
+            'crop_year'      => $cropYear !== '' ? $cropYear : null,
+            'mill'           => $finalMill,
+        ]);
+    } catch (\Throwable $e) {
+        \Log::error('pricingContext failed', [
+            'err' => $e->getMessage(),
+            'payload' => $req->all(),
+            'company_id_param' => $req->get('company_id'),
+            'company_id_header' => $req->header('X-Company-ID'),
+        ]);
+
+        return response()->json([
+            'message' => 'Server Error',
+            'debug'   => $e->getMessage(),
+        ], 500);
     }
-
-    $pbn = PbnEntry::where('pbn_number', $pbnNumber)
-        ->where('company_id', $companyId)
-        ->first();
-
-    $cropYear = $pbn?->crop_year ?? null;
-
-    $pbnItem = PbnEntryDetail::query()
-        ->where('pbn_number', $pbnNumber)
-        ->where('row', $itemNo)
-        ->select('unit_cost','commission','mill')
-        ->first();
-
-    // prefer mill from pbn detail if present
-    $finalMill = (string) ($pbnItem?->mill ?: $millName);
-
-    $rate = $this->resolveMillRateByCropYear($finalMill, $companyId, (string)$cropYear);
-
-    return response()->json([
-        'unit_cost'      => (float)($pbnItem?->unit_cost ?? 0),
-        'commission'     => (float)($pbnItem?->commission ?? 0),
-        'insurance_rate' => (float)($rate['insurance_rate'] ?? 0),
-        'storage_rate'   => (float)($rate['storage_rate'] ?? 0),
-        'days_free'      => (int)  ($rate['days_free'] ?? 0),
-        'crop_year'      => $cropYear,
-        'mill'           => $finalMill,
-    ]);
 }
+
+
 
 
 

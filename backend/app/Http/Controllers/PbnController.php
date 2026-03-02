@@ -59,43 +59,97 @@ class PbnController extends Controller
     // Item # combobox for a given PBN
 public function items(Request $req)
 {
-    $data = $req->validate([
-        'company_id'  => 'required|integer',
-        'pbn_number'  => 'required|string',
-    ]);
+    try {
+        $data = $req->validate([
+            'company_id' => 'required|integer',
+            'pbn_number' => 'required|string',
+        ]);
 
-    $rows = DB::table('pbn_entry_details as d')
-        ->join('pbn_entry as e', 'e.id', '=', 'd.pbn_entry_id')
-        ->where('e.company_id', (int) $data['company_id'])
-        ->where('e.pbn_number', $data['pbn_number'])  // ✅ FIX: filter on header
+        $companyId = (int) $data['company_id'];
+        $pbnNumber = trim((string) $data['pbn_number']); // ✅ preserve leading zeros
 
-        ->where('e.posted_flag', 1)                   // ✅ keep consistent with list()
-        ->where(function ($w) {                       // ✅ not closed
-            $w->whereNull('e.close_flag')->orWhere('e.close_flag', 0);
-        })
-        ->where(function ($w) {                       // ✅ not deleted/hidden
-            $w->whereNull('e.delete_flag')->orWhere('e.delete_flag', 0);
-        })
+        // ✅ Header scope: ensure PBN belongs to this company and is eligible (posted, not closed, not deleted)
+        $pbn = DB::table('pbn_entry as e')
+            ->where('e.company_id', $companyId)
+            ->where('e.pbn_number', $pbnNumber)
+            ->where('e.posted_flag', 1)
+            ->where(function ($w) { $w->whereNull('e.close_flag')->orWhere('e.close_flag', 0); })
+            ->where(function ($w) { $w->whereNull('e.delete_flag')->orWhere('e.delete_flag', 0); })
+            ->first(['e.id']);
 
-        ->where(function ($w) { // ✅ only posted/selected detail rows
-            $w->whereNull('d.selected_flag')->orWhere('d.selected_flag', 1);
-        })
-        ->where(function ($w) { // ✅ exclude deleted detail rows
-            $w->whereNull('d.delete_flag')->orWhere('d.delete_flag', 0);
-        })
+        if (!$pbn) {
+            // No eligible PBN for this company => return empty list (no 500)
+            return response()->json([]);
+        }
 
-        ->orderBy('d.row')
-        ->get([
-            'd.row',
-            'd.mill',
-            'd.quantity',
-            'd.unit_cost',
-            'd.commission',
+        $detailTable = 'pbn_entry_details';
+        if (!\Illuminate\Support\Facades\Schema::hasTable($detailTable)) {
+            // If your build uses a different name, log clearly
+            \Log::error('PBN items failed: missing table', ['table' => $detailTable]);
+            return response()->json(['message' => 'Server Error'], 500);
+        }
+
+        // Some builds use 'row', others use 'item_no'
+        $itemCol = \Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'row')
+            ? 'row'
+            : (\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'item_no') ? 'item_no' : null);
+
+        if (!$itemCol) {
+            \Log::error('PBN items failed: missing item column', ['table' => $detailTable]);
+            return response()->json(['message' => 'Server Error'], 500);
+        }
+
+        // Relationship may be via pbn_entry_id OR via pbn_number (varies by schema/build)
+        $hasPbnEntryId = \Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'pbn_entry_id');
+        $hasPbnNumber  = \Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'pbn_number');
+
+        $q = DB::table($detailTable . ' as d');
+
+        if ($hasPbnEntryId) {
+            // ✅ Join-less filter (fast) since we already validated header row above
+            $q->where('d.pbn_entry_id', (int) $pbn->id);
+        } elseif ($hasPbnNumber) {
+            // ✅ Direct string match (preserves leading zeros)
+            $q->where('d.pbn_number', $pbnNumber);
+        } else {
+            \Log::error('PBN items failed: no link column found', [
+                'table' => $detailTable,
+                'expected' => ['pbn_entry_id', 'pbn_number'],
+            ]);
+            return response()->json(['message' => 'Server Error'], 500);
+        }
+
+        // ✅ only posted/selected detail rows (if columns exist)
+        if (\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'selected_flag')) {
+            $q->where(function ($w) { $w->whereNull('d.selected_flag')->orWhere('d.selected_flag', 1); });
+        }
+        if (\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'delete_flag')) {
+            $q->where(function ($w) { $w->whereNull('d.delete_flag')->orWhere('d.delete_flag', 0); });
+        }
+
+        $rows = $q->orderBy('d.' . $itemCol, 'asc')->get([
+            DB::raw('d.' . $itemCol . ' as row'),
+            DB::raw('d.' . $itemCol . ' as item_no'),
+            DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'mill') ? 'd.mill' : "NULL as mill"),
+            DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'quantity') ? 'd.quantity' : "0 as quantity"),
+            DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'unit_cost') ? 'd.unit_cost' : "0 as unit_cost"),
+            DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'commission') ? 'd.commission' : "0 as commission"),
             DB::raw('NULL as mill_code'),
         ]);
 
-    return response()->json($rows);
+        return response()->json($rows);
+
+    } catch (\Throwable $e) {
+        \Log::error('PbnController.items failed', [
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString(),
+            'company_id' => $req->input('company_id'),
+            'pbn_number' => $req->input('pbn_number'),
+        ]);
+        return response()->json(['message' => 'Server Error'], 500);
+    }
 }
+
 
 
 

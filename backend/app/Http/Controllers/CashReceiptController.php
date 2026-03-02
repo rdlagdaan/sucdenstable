@@ -23,14 +23,62 @@ use PhpOffice\PhpSpreadsheet\Style\Border;
  * - Exposes setters for created date/time text (footer)
  */
 class MyReceiptVoucherPDF extends \TCPDF {
+
+    public $companyId = null;
     public $receiptDate;
     public $receiptTime;
+
+    public $preparedByInitials = '';
+
+    public function setCompanyId(?int $companyId): void
+    {
+        $this->companyId = $companyId;
+    }
+
+    public function setPreparedByInitials(string $initials): void
+    {
+        $this->preparedByInitials = $initials;
+    }
 
     public function setDataReceiptDate($date) { $this->receiptDate = $date; }
     public function setDataReceiptTime($time) { $this->receiptTime = $time; }
 
-    public function Header() {
-        // Try several common logo locations & extensions
+    public function Header()
+    {
+        $companyId = (int)($this->companyId ?? 0);
+
+        // =========================
+        // COMPANY 2 — AMEROP
+        // =========================
+        if ($companyId === 2) {
+
+            $logo = public_path('ameropLogo.jpg');
+            if (is_file($logo)) {
+                $this->Image(
+                    $logo,
+                    15,   // left
+                    12,   // top
+                    22,   // small logo width
+                    '', '', '', 'T',
+                    false, 300
+                );
+            }
+
+            // Text to the RIGHT of logo
+            $this->SetTextColor(40, 85, 160);
+            $this->SetFont('helvetica', 'B', 14);
+            $this->Text(40, 14, 'AMEROP');
+
+            $this->SetFont('helvetica', '', 9);
+            $this->Text(40, 20, 'PHILIPPINES, INC.');
+
+            $this->SetTextColor(0, 0, 0);
+            return;
+        }
+
+        // =========================
+        // DEFAULT — SUCDEN
+        // =========================
         $candidates = [
             public_path('images/sucdenLogo.jpg'),
             public_path('images/sucdenLogo.png'),
@@ -39,7 +87,6 @@ class MyReceiptVoucherPDF extends \TCPDF {
         ];
         foreach ($candidates as $image) {
             if ($image && is_file($image)) {
-                // x=15, y=10, width=50 matches your legacy layout
                 $this->Image(
                     $image, 15, 10, 50, '', '', '', 'T',
                     false, 300, '', false, false, 0, false, false, false
@@ -49,18 +96,42 @@ class MyReceiptVoucherPDF extends \TCPDF {
         }
     }
 
-    public function Footer() {
+    public function Footer()
+    {
         $this->SetY(-50);
         $this->SetFont('helvetica','I',8);
 
         $currentDate = date('M d, Y');
         $currentTime = date('h:i:sa');
 
+        // ✅ Company label in footer (company_id 1 vs 2)
+        $companyId = (int)($this->companyId ?? 0);
+        $receivedFrom = ($companyId === 2)
+            ? 'AMEROP PHILIPPINES, INC.'
+            : 'SUCDEN PHILIPPINES, INC.';
+
+        // Build the HTML normally (no risky inline concatenation for company name)
         $html = '
         <table border="0"><tr>
           <td width="70%">
             <table border="1" cellpadding="5"><tr>
-              <td><font size="8">Prepared:<br><br><br><br><br></font></td>
+
+              <td width="25%">
+                <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                  <tr>
+                    <td valign="top" align="left"><font size="8">Prepared:</font></td>
+                  </tr>
+                  <tr>
+                    <td height="42"></td>
+                  </tr>
+                  <tr>
+                    <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
+                      <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+
               <td><font size="8">Checked:<br><br><br><br><br></font></td>
               <td><font size="8">Noted by:<br><br><br><br><br></font></td>
               <td><font size="8">Posted by:<br><br><br><br><br></font></td>
@@ -69,7 +140,7 @@ class MyReceiptVoucherPDF extends \TCPDF {
           <td width="5%"></td>
           <td width="25%">
             <table border="1" cellpadding="5">
-              <tr><td align="center"><font size="8">Received from SUCDEN PHILIPPINES, INC.</font><br><br></td></tr>
+              <tr><td align="center"><font size="8">Received from __RECEIVED_FROM__</font><br><br></td></tr>
               <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
             </table>
           </td>
@@ -89,12 +160,36 @@ class MyReceiptVoucherPDF extends \TCPDF {
             <td></td>
           </tr>
         </table>';
+
+        // ✅ Inject company name safely (no quote issues)
+        $html = str_replace('__RECEIVED_FROM__', htmlspecialchars($receivedFrom), $html);
+
         $this->writeHTML($html, true, false, false, false, '');
     }
+
 }
+
 
 class CashReceiptController extends Controller
 {
+    
+protected function userInitials(?int $userId): string
+{
+    if (empty($userId)) return '';
+
+    if (\Illuminate\Support\Facades\Schema::hasTable('users_employees')) {
+        $u = (string) DB::table('users_employees')
+            ->where('id', (int)$userId)
+            ->value('username');
+
+        $u = strtoupper(trim((string)$u));
+        if ($u !== '') return $u;
+    }
+
+    return 'U' . (int)$userId;
+}
+    
+    
     // === 1) Generate next CR number ===
     public function generateCrNumber(Request $req)
     {
@@ -675,75 +770,100 @@ CashReceipts::where('id', (int) $data['id'])
     }
 
     // === 10) Print Receipt Voucher (PDF) ===
-    public function formPdf(Request $req, $id)
-    {
-$companyId = $req->query('company_id');
+public function formPdf(Request $req, $id)
+{
+    $companyId = $req->query('company_id');
 
-$header = DB::table('cash_receipts as r')
-    ->leftJoin('customer_list as c', function ($j) use ($companyId) {
-        $j->on('r.cust_id', '=', 'c.cust_id');
-        if ($companyId) $j->where('c.company_id', '=', $companyId);
-    })
-            ->select(
-                'r.id','r.cr_no','r.cust_id','r.receipt_amount','r.pay_method',
-                'r.bank_id','r.details','r.is_cancel','r.collection_receipt',
-                DB::raw("to_char(r.receipt_date, 'MM/DD/YYYY') as receipt_date"),
-                'c.cust_name','r.amount_in_words','r.workstation_id','r.user_id','r.created_at'
-            )
-    ->where('r.id', $id)
-    ->when($companyId, fn($q) => $q->where('r.company_id', $companyId))
-    ->first();
+    $header = DB::table('cash_receipts as r')
+        ->leftJoin('customer_list as c', function ($j) use ($companyId) {
+            $j->on('r.cust_id', '=', 'c.cust_id');
+            if ($companyId) $j->where('c.company_id', '=', $companyId);
+        })
+        ->select(
+            'r.id','r.cr_no','r.cust_id','r.receipt_amount','r.pay_method',
+            'r.bank_id','r.details','r.is_cancel','r.collection_receipt',
+            DB::raw("to_char(r.receipt_date, 'MM/DD/YYYY') as receipt_date"),
+            'c.cust_name','r.amount_in_words','r.workstation_id','r.user_id','r.created_at'
+        )
+        ->where('r.id', $id)
+        ->when($companyId, fn($q) => $q->where('r.company_id', $companyId))
+        ->first();
 
-if (!$header || in_array($header->is_cancel, ['c','d'], true)) {
-    abort(404, 'Receipt Voucher not found or cancelled');
-}
+    if (!$header || in_array($header->is_cancel, ['c','d'], true)) {
+        abort(404, 'Receipt Voucher not found or cancelled');
+    }
 
+    // ✅ Details (BANK first)
+    $details = DB::table('cash_receipt_details as d')
+        ->join('account_code as a', function ($j) use ($companyId) {
+            $j->on('d.acct_code', '=', 'a.acct_code');
+            if ($companyId) $j->where('a.company_id', '=', $companyId);
+        })
+        ->where('d.transaction_id', $id)
+        ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
+        ->orderByRaw("CASE WHEN d.workstation_id = 'BANK' THEN 0 ELSE 1 END ASC")
+        ->orderBy('d.id', 'asc')
+        ->select('d.acct_code','a.acct_desc','d.debit','d.credit','d.workstation_id')
+        ->get();
 
-$companyId = $req->query('company_id');
+    $totalDebit  = (float)$details->sum('debit');
+    $totalCredit = (float)$details->sum('credit');
 
-$details = DB::table('cash_receipt_details as d')
-    ->join('account_code as a', function ($j) use ($companyId) {
-        $j->on('d.acct_code', '=', 'a.acct_code');
-        if ($companyId) $j->where('a.company_id', '=', $companyId);
-    })
-    ->where('d.transaction_id', $id)
-    ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
-    ->orderBy('d.workstation_id','desc')
-    ->orderBy('d.debit','desc')
-    ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
-    ->get();
+    // ✅ Amount source: BANK row amount (prefer DEBIT, fallback CREDIT)
+    $bankRow = CashReceiptDetails::where('transaction_id', (int) $id)
+        ->where('workstation_id', 'BANK')
+        ->first(['debit', 'credit']);
 
+    $bankAmount = 0.0;
+    if ($bankRow) {
+        $bankAmount = (float) (($bankRow->debit ?? 0) > 0 ? $bankRow->debit : ($bankRow->credit ?? 0));
+    }
 
-        $totalDebit  = (float)$details->sum('debit');
-        $totalCredit = (float)$details->sum('credit');
+    // Amount in words + amount box must reflect BANK amount
+    $amountInWords = $this->pesoWords($bankAmount);
+    $receiptAmtFmt = number_format($bankAmount, 2);
 
-        // Amount in words must reflect the figure printed
-        $receiptAmount   = (float)($header->receipt_amount ?? 0);
-        $amountInWords   = $this->pesoWords($receiptAmount);
-        $receiptAmtFmt   = number_format($receiptAmount, 2);
+    $pdf = new MyReceiptVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
 
-        $pdf = new MyReceiptVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
-        $pdf->setPrintHeader(true);
-        $pdf->setPrintFooter(true);
-        $pdf->setImageScale(1.25);
-        $pdf->SetMargins(15,30,15);   // left, top, right
-        $pdf->SetHeaderMargin(8);
-        $pdf->SetFooterMargin(10);
-        $pdf->AddPage();
-        $pdf->SetFont('helvetica','',7);
+    // ✅ pass company_id so Header() can choose logo
+    $pdf->setCompanyId($companyId ? (int)$companyId : null);
 
-        $pdf->setDataReceiptDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
-        $pdf->setDataReceiptTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
+    // ✅ Prepared by initials (URL user_id, else header user_id)
+    $preparedUserId = (int) ($req->query('user_id') ?: 0);
+    if ($preparedUserId <= 0) {
+        $preparedUserId = (int) ($header->user_id ?? 0);
+    }
+    $pdf->setPreparedByInitials($this->userInitials($preparedUserId));
 
-        $rvNumber        = $header->cr_no;
-        $receiptDateText = $header->receipt_date;
-        $collectionNo    = $header->collection_receipt;
-        $custName        = (string)($header->cust_name ?? $header->cust_id);
-        $explanation     = (string)($header->details ?? '');
+    $pdf->setPrintHeader(true);
+    $pdf->setPrintFooter(true);
+    $pdf->setImageScale(1.25);
+    $pdf->SetMargins(15,30,15);
+    $pdf->SetHeaderMargin(8);
+    $pdf->SetFooterMargin(10);
 
-        $tbl = <<<EOD
+    // ✅ Reserve footer space + clean page breaks
+    $pdf->SetAutoPageBreak(true, 55);
+
+    $pdf->AddPage();
+    $pdf->SetFont('helvetica','',7);
+
+    $pdf->setDataReceiptDate(\Carbon\Carbon::parse($header->created_at)->format('M d, Y'));
+    $pdf->setDataReceiptTime(\Carbon\Carbon::parse($header->created_at)->format('h:i:sa'));
+
+    // ✅ RV number pad to 6 digits when numeric
+    $rawRvNo  = (string)($header->cr_no ?? '');
+    $rvNumber = ctype_digit($rawRvNo) ? str_pad($rawRvNo, 6, '0', STR_PAD_LEFT) : $rawRvNo;
+
+    $receiptDateText = $header->receipt_date;
+    $collectionNo    = $header->collection_receipt;
+    $custName        = (string)($header->cust_name ?? $header->cust_id);
+    $explanation     = (string)($header->details ?? '');
+
+    // =================== TOP (header + details box) ===================
+    $tblTop = <<<EOD
 <br><br>
-<table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
+<table border="0" cellpadding="1" cellspacing="0" width="100%">
 <tr>
   <td width="10%"></td>
   <td width="20%"></td>
@@ -789,66 +909,100 @@ $details = DB::table('cash_receipt_details as d')
 </table>
 
 <table><tr><td><br><br></td></tr></table>
-<table border="1" cellpadding="3" cellspacing="0" nobr="true" width="100%">
- <tr>
-  <td width="20%" align="center"><font size="10"><b>ACCOUNT</b></font></td>
-  <td width="40%" align="center"><font size="10"><b>GL ACCOUNT</b></font></td>
-  <td width="20%" align="center"><font size="10"><b>DEBIT</b></font></td>
-  <td width="20%" align="center"><font size="10"><b>CREDIT</b></font></td>
- </tr>
 EOD;
 
-        foreach ($details as $d) {
-            $debit  = $d->debit  ? number_format((float)$d->debit, 2) : '';
-            $credit = $d->credit ? number_format((float)$d->credit, 2) : '';
-            $tbl .= <<<EOD
+    $pdf->writeHTML($tblTop, true, false, false, false, '');
+
+    // =================== GL TABLE (chunked per page) ===================
+    $glHeader = <<<EOD
+<table border="1" cellpadding="3" cellspacing="0" width="100%">
   <tr>
-    <td align="left"><font size="10">{$d->acct_code}</font></td>
-    <td align="left"><font size="10">{$d->acct_desc}</font></td>
+    <td width="20%" align="center"><font size="10"><b>ACCOUNT</b></font></td>
+    <td width="40%" align="center"><font size="10"><b>GL ACCOUNT</b></font></td>
+    <td width="20%" align="center"><font size="10"><b>DEBIT</b></font></td>
+    <td width="20%" align="center"><font size="10"><b>CREDIT</b></font></td>
+  </tr>
+EOD;
+
+    $rowsPerPage = 12;
+    $rows = $details->values();
+
+    for ($i = 0; $i < $rows->count(); $i += $rowsPerPage) {
+
+        if ($i > 0) {
+            $pdf->AddPage();
+            $pdf->SetFont('helvetica','',7);
+        }
+
+        $chunk = $rows->slice($i, $rowsPerPage);
+
+        $tblGl = $glHeader;
+
+        foreach ($chunk as $d) {
+            // ✅ blank 0.00 even when DB returns strings like "0.00"
+            $debitVal  = (float)($d->debit  ?? 0);
+            $creditVal = (float)($d->credit ?? 0);
+
+            $debit  = ($debitVal  > 0) ? number_format($debitVal, 2) : '';
+            $credit = ($creditVal > 0) ? number_format($creditVal, 2) : '';
+
+            $acct = (string)$d->acct_code;
+            $desc = (string)$d->acct_desc;
+
+            $tblGl .= <<<EOD
+  <tr>
+    <td align="left"><font size="10">{$acct}</font></td>
+    <td align="left"><font size="10">{$desc}</font></td>
     <td align="right"><font size="10">{$debit}</font></td>
     <td align="right"><font size="10">{$credit}</font></td>
   </tr>
 EOD;
         }
 
-        $fmtD = number_format($totalDebit, 2);
-        $fmtC = number_format($totalCredit, 2);
-        $tbl .= <<<EOD
+        // TOTAL only on last chunk
+        if ($i + $rowsPerPage >= $rows->count()) {
+            $fmtD = number_format($totalDebit, 2);
+            $fmtC = number_format($totalCredit, 2);
+            $tblGl .= <<<EOD
   <tr>
     <td></td>
     <td align="left"><font size="10">TOTAL</font></td>
     <td align="right"><font size="10">{$fmtD}</font></td>
     <td align="right"><font size="10">{$fmtC}</font></td>
   </tr>
-</table>
 EOD;
-
-        $pdf->writeHTML($tbl, true, false, false, false, '');
-
-        // Don’t allow printing if not balanced
-        if (abs($totalDebit - $totalCredit) > 0.005) {
-            $html = sprintf(
-                '<!doctype html><meta charset="utf-8">
-                <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
-                <h2>Cannot print Receipt Voucher</h2>
-                <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
-                <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
-                number_format($totalDebit, 2),
-                number_format($totalCredit, 2)
-            );
-            return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
         }
 
-        $pdfContent = $pdf->Output('receiptVoucher.pdf', 'S');
-CashReceipts::where('id', $id)->update([
-    'exported_at' => now(),
-    'exported_by' => auth()->id(),
-]);
-
-        return response($pdfContent, 200)
-            ->header('Content-Type', 'application/pdf')
-            ->header('Content-Disposition', 'inline; filename="receiptVoucher.pdf"');
+        $tblGl .= "</table>";
+        $pdf->writeHTML($tblGl, true, false, false, false, '');
     }
+
+    // Don’t allow printing if not balanced
+    if (abs($totalDebit - $totalCredit) > 0.005) {
+        $html = sprintf(
+            '<!doctype html><meta charset="utf-8">
+            <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px}</style>
+            <h2>Cannot print Receipt Voucher</h2>
+            <p>Details are not balanced. Please ensure <b>Debit = Credit</b> before printing.</p>
+            <p><b>Debit:</b> %s<br><b>Credit:</b> %s</p>',
+            number_format($totalDebit, 2),
+            number_format($totalCredit, 2)
+        );
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    $pdfContent = $pdf->Output('receiptVoucher.pdf', 'S');
+
+    CashReceipts::where('id', $id)->update([
+        'exported_at' => now(),
+        'exported_by' => auth()->id(),
+    ]);
+
+    return response($pdfContent, 200)
+        ->header('Content-Type', 'application/pdf')
+        ->header('Content-Disposition', 'inline; filename="receiptVoucher.pdf"');
+}
+
 
     // === 10b) Excel (XLSX default; ?format=xls optional) ===
     public function formExcel(Request $req, $id)
@@ -883,7 +1037,8 @@ $details = DB::table('cash_receipt_details as d')
     })
     ->where('d.transaction_id', $id)
     ->when($companyId, fn($q) => $q->where('d.company_id', $companyId))
-    ->orderBy('d.workstation_id','desc')
+    ->orderByRaw("CASE WHEN d.workstation_id = 'BANK' THEN 0 ELSE 1 END ASC")
+    ->orderBy('d.id', 'asc')
     ->orderBy('d.debit','desc')
     ->select('d.acct_code','a.acct_desc','d.debit','d.credit')
     ->get();
@@ -891,8 +1046,19 @@ $details = DB::table('cash_receipt_details as d')
 
         $totalDebit  = (float)$details->sum('debit');
         $totalCredit = (float)$details->sum('credit');
-        $receiptAmount = (float)($header->receipt_amount ?? 0);
+        // ✅ Amount source: BANK row amount (prefer DEBIT, fallback CREDIT)
+        $bankRow = CashReceiptDetails::where('transaction_id', (int) $id)
+            ->where('workstation_id', 'BANK')
+            ->first(['debit', 'credit']);
+
+        $bankAmount = 0.0;
+        if ($bankRow) {
+            $bankAmount = (float) (($bankRow->debit ?? 0) > 0 ? $bankRow->debit : ($bankRow->credit ?? 0));
+        }
+
+        $receiptAmount = (float) $bankAmount;
         $amountInWords = $this->pesoWords($receiptAmount);
+
 
         // Build spreadsheet
         $ss = new Spreadsheet();
@@ -901,7 +1067,13 @@ $details = DB::table('cash_receipt_details as d')
 
         $row = 1;
         $sheet->setCellValue("A{$row}", 'RECEIPT VOUCHER'); $row++;
-        $sheet->setCellValue("A{$row}", 'RV Number:');      $sheet->setCellValue("B{$row}", $header->cr_no); $row++;
+        $sheet->setCellValue("A{$row}", 'RV Number:');      
+        $rawRvNo  = (string)($header->cr_no ?? '');
+        $rvNumber = ctype_digit($rawRvNo) ? str_pad($rawRvNo, 6, '0', STR_PAD_LEFT) : $rawRvNo;
+        $sheet->setCellValue("B{$row}", $rvNumber);
+        $row++;
+        
+        
         $sheet->setCellValue("A{$row}", 'Date:');           $sheet->setCellValue("B{$row}", $header->receipt_date); $row++;
         $sheet->setCellValue("A{$row}", 'Receipt Number:'); $sheet->setCellValue("B{$row}", $header->collection_receipt); $row++;
         $sheet->setCellValue("A{$row}", 'Payor:');          $sheet->setCellValue("B{$row}", (string)($header->cust_name ?? $header->cust_id)); $row++;
@@ -932,8 +1104,9 @@ $details = DB::table('cash_receipt_details as d')
         foreach ($details as $d) {
             $sheet->setCellValue("A{$row}", $d->acct_code);
             $sheet->setCellValue("B{$row}", $d->acct_desc);
-            if ($d->debit)  $sheet->setCellValue("C{$row}", (float)$d->debit);
-            if ($d->credit) $sheet->setCellValue("D{$row}", (float)$d->credit);
+            if (((float)($d->debit ?? 0)) > 0)  $sheet->setCellValue("C{$row}", (float)$d->debit);
+            if (((float)($d->credit ?? 0)) > 0) $sheet->setCellValue("D{$row}", (float)$d->credit);
+
             $sheet->getStyle("A{$row}:D{$row}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
             $sheet->getStyle("C{$row}:D{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
             $row++;

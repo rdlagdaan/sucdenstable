@@ -229,15 +229,25 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
     $done        = 0;
 
     $q = DB::table('cash_receipts as r')
-->selectRaw("
-    to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-    r.cr_no,
-    r.details,
-    r.collection_receipt,
-    r.receipt_amount,
-    COALESCE(c.cust_name, r.cust_id) as cust_name,
-    COALESCE(b.bank_account_number, r.bank_id) as bank_account_number
-")
+        ->selectRaw("
+            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+            r.cr_no,
+            r.details,
+            r.collection_receipt,
+
+            /* ✅ BANK row debit, linked by transaction_id (varchar) = r.id::text */
+            COALESCE((
+                SELECT d.debit
+                FROM cash_receipt_details d
+                WHERE d.transaction_id = (r.id)::text
+                  AND d.workstation_id = 'BANK'
+                ORDER BY d.id ASC
+                LIMIT 1
+            ), 0) as bank_amount,
+
+            COALESCE(c.cust_name, r.cust_id) as cust_name,
+            COALESCE(b.bank_account_number, r.bank_id) as bank_account_number
+        ")
         ->leftJoin('customer_list as c', function ($j) use ($cid) {
             $j->on('c.cust_id', '=', 'r.cust_id');
             if (Schema::hasColumn('customer_list', 'company_id')) {
@@ -255,7 +265,7 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
 
     if ($this->query) {
         $needle = '%'.$this->escapeLike($this->query).'%';
-        $q->where(function($w) use($needle) {
+        $q->where(function($w) use ($needle) {
             $w->where('c.cust_name','ILIKE',$needle)
               ->orWhere('r.details','ILIKE',$needle)
               ->orWhere('r.cr_no','ILIKE',$needle)
@@ -269,7 +279,8 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
       ->orderBy('r.receipt_date', 'asc')
       ->chunk(300, function($chunk) use (&$rowsHtml, $openRowsTable, $addHeader, $pdf, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
           foreach ($chunk as $row) {
-              $amt = (float)$row->receipt_amount;
+              $amt = (float)($row->bank_amount ?? 0);
+
               $pageTotal  += $amt;
               $grandTotal += $amt;
               $linesOnPage++;
@@ -309,7 +320,8 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
                   $rowsHtml = $openRowsTable();
               }
 
-              $done++; $progress($done);
+              $done++;
+              $progress($done);
           }
       });
 
@@ -339,6 +351,7 @@ private function buildPdf(string $file, int $cid, string $start, string $end, ca
     Storage::disk('local')->put($file, $pdf->Output('receipt-register.pdf', 'S'));
 }
 
+
 private function buildExcel(string $file, int $cid, string $start, string $end, callable $progress): void
 {
     $wb = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
@@ -348,37 +361,55 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
     $monthDesc = Carbon::parse($start)->isoFormat('MMMM');
     $yearDesc  = Carbon::parse($start)->year;
 
-    // ✅ same simple company header as check register
     $companyName = ($cid === 2) ? 'AMEROP PHILIPPINES, INC' : 'SUCDEN PHILIPPINES, INC';
 
     $r = 1;
     $ws->setCellValue("A{$r}", $companyName); $r++;
     $ws->setCellValue("A{$r}", 'RECEIPT REGISTER'); $r++;
-    $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}"); $r += 2;
+    $ws->setCellValue("A{$r}", "For the Month of {$monthDesc} {$yearDesc}");
+    $r += 2;
 
-    $ws->fromArray(['Date','Receipt Voucher','Bank Account','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
-    $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
+    $ws->fromArray(
+        ['Date','Receipt Voucher','Bank Account','Customer','Particular','Collection Receipt','Amount'],
+        null,
+        "A{$r}"
+    );
+    $ws->getStyle("A{$r}:G{$r}")->getFont()->setBold(true);
     $r++;
 
-    foreach (range('A','I') as $col) $ws->getColumnDimension($col)->setWidth(18);
-    $ws->getColumnDimension('D')->setWidth(28);
-    $ws->getColumnDimension('E')->setWidth(4);
-    $ws->getColumnDimension('F')->setWidth(30);
-    $ws->getColumnDimension('G')->setWidth(4);
+    $ws->getColumnDimension('A')->setWidth(14);
+    $ws->getColumnDimension('B')->setWidth(18);
     $ws->getColumnDimension('C')->setWidth(22);
+    $ws->getColumnDimension('D')->setWidth(28);
+    $ws->getColumnDimension('E')->setWidth(38);
+    $ws->getColumnDimension('F')->setWidth(22);
+    $ws->getColumnDimension('G')->setWidth(18);
 
-    $pageTotal = 0.0; $grandTotal = 0.0; $linesOnPage = 0; $done = 0;
+    $pageTotal   = 0.0;
+    $grandTotal  = 0.0;
+    $linesOnPage = 0;
+    $done        = 0;
 
     $q = DB::table('cash_receipts as r')
-->selectRaw("
-    to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
-    r.cr_no,
-    r.details,
-    r.collection_receipt,
-    r.receipt_amount,
-    COALESCE(c.cust_name, r.cust_id) as cust_name,
-    COALESCE(b.bank_account_number, r.bank_id) as bank_account_number
-")
+        ->selectRaw("
+            to_char(r.receipt_date,'MM/DD/YYYY') as receipt_date,
+            r.cr_no,
+            r.details,
+            r.collection_receipt,
+
+            /* ✅ BANK row debit, linked by transaction_id (varchar) = r.id::text */
+            COALESCE((
+                SELECT d.debit
+                FROM cash_receipt_details d
+                WHERE d.transaction_id = (r.id)::text
+                  AND d.workstation_id = 'BANK'
+                ORDER BY d.id ASC
+                LIMIT 1
+            ), 0) as bank_amount,
+
+            COALESCE(c.cust_name, r.cust_id) as cust_name,
+            COALESCE(b.bank_account_number, r.bank_id) as bank_account_number
+        ")
         ->leftJoin('customer_list as c', function ($j) use ($cid) {
             $j->on('c.cust_id', '=', 'r.cust_id');
             if (Schema::hasColumn('customer_list', 'company_id')) {
@@ -396,7 +427,7 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
 
     if ($this->query) {
         $needle = '%'.$this->escapeLike($this->query).'%';
-        $q->where(function($w) use($needle) {
+        $q->where(function($w) use ($needle) {
             $w->where('c.cust_name','ILIKE',$needle)
               ->orWhere('r.details','ILIKE',$needle)
               ->orWhere('r.cr_no','ILIKE',$needle)
@@ -409,54 +440,67 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
     $q->orderBy('r.cr_no', 'asc')
       ->orderBy('r.receipt_date', 'asc')
       ->chunk(300, function($chunk) use (&$r, $ws, &$pageTotal, &$grandTotal, &$linesOnPage, &$done, $progress) {
+
           foreach ($chunk as $row) {
-              $amt = (float)$row->receipt_amount;
+              $amt = (float)($row->bank_amount ?? 0);
+
               $pageTotal  += $amt;
               $grandTotal += $amt;
               $linesOnPage++;
 
               $ws->fromArray([
                   $row->receipt_date ?? '',
-                  $row->cr_no ?? '',
+                  ($row->cr_no ? 'RV-' . $row->cr_no : ''),
                   $row->bank_account_number ?? '',
-                  $row->cust_name ?? '', '',
-                  $row->details ?? '', '',
+                  $row->cust_name ?? '',
+                  $row->details ?? '',
                   $row->collection_receipt ?? '',
                   $amt
               ], null, "A{$r}");
 
               // keep bank as string (avoid excel numeric mangling)
-              $ws->getCell("C{$r}")->setValueExplicit((string)($row->bank_account_number ?? ''), DataType::TYPE_STRING);
+              $ws->getCell("C{$r}")
+                 ->setValueExplicit((string)($row->bank_account_number ?? ''), DataType::TYPE_STRING);
 
-              $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+              $ws->getStyle("G{$r}")
+                 ->getNumberFormat()
+                 ->setFormatCode('#,##0.00');
+
               $r++;
 
               if ($linesOnPage >= 45) {
-                  $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
-                  $ws->setCellValue("I{$r}", $pageTotal);
-                  $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+                  $ws->setCellValue("F{$r}", 'PAGE TOTAL AMOUNT:');
+                  $ws->setCellValue("G{$r}", $pageTotal);
+                  $ws->getStyle("G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
                   $r += 2;
 
                   $linesOnPage = 0;
                   $pageTotal   = 0.0;
 
-                  $ws->fromArray(['Date','Receipt Voucher','Bank Account','Customer','','Particular','','Collection Receipt','Amount'], null, "A{$r}");
-                  $ws->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
+                  $ws->fromArray(
+                      ['Date','Receipt Voucher','Bank Account','Customer','Particular','Collection Receipt','Amount'],
+                      null,
+                      "A{$r}"
+                  );
+                  $ws->getStyle("A{$r}:G{$r}")->getFont()->setBold(true);
                   $r++;
               }
 
-              $done++; $progress($done);
+              $done++;
+              $progress($done);
           }
       });
 
-    $ws->setCellValue("H{$r}", 'PAGE TOTAL AMOUNT:');
-    $ws->setCellValue("I{$r}", $pageTotal);
-    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+    // final page total
+    $ws->setCellValue("F{$r}", 'PAGE TOTAL AMOUNT:');
+    $ws->setCellValue("G{$r}", $pageTotal);
+    $ws->getStyle("G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
     $r++;
 
-    $ws->setCellValue("H{$r}", 'GRAND TOTAL AMOUNT:');
-    $ws->setCellValue("I{$r}", $grandTotal);
-    $ws->getStyle("I{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
+    // grand total
+    $ws->setCellValue("F{$r}", 'GRAND TOTAL AMOUNT:');
+    $ws->setCellValue("G{$r}", $grandTotal);
+    $ws->getStyle("G{$r}")->getNumberFormat()->setFormatCode('#,##0.00');
 
     $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xls($wb);
     $stream = fopen('php://temp', 'r+');
@@ -469,6 +513,7 @@ private function buildExcel(string $file, int $cid, string $start, string $end, 
     $wb->disconnectWorksheets();
     unset($writer);
 }
+
 
     private function escapeLike(string $s): string
     {
