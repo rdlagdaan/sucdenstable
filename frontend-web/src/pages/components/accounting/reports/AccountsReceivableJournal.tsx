@@ -127,7 +127,7 @@ const res = await napi.get(
 
   return (
     <div className="p-4 space-y-3">
-      <div className="text-lg font-semibold">ACCOUNTS RECEIVABLE JOURNAL</div>
+      <div className="text-lg font-semibold">SALES JOURNAL</div>
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <div>

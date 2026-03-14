@@ -7,12 +7,15 @@ import napi from '../../../../utils/axiosnapi';
 
 type ApprovalRow = {
   id: number;
+  company_id?: number;
   subject_type: string;
   subject_id: number;
   action: string | null;
   reason: string | null;
   status: string;
   created_at: string;
+  transaction_label?: string | null;
+  transaction_no?: string | null;
 };
 
 const statusLabelClass: Record<string, string> = {
@@ -40,6 +43,10 @@ const [totalPages, setTotalPages] = useState(1);
 const [_processPreviewOpen, setProcessPreviewOpen] = useState(false);
 const [_processPreview, setProcessPreview] = useState<any>(null);
 const [_processApprovalId, setProcessApprovalId] = useState<number | null>(null);
+
+const [viewingRow, setViewingRow] = useState<ApprovalRow | null>(null);
+const [viewingDetails, setViewingDetails] = useState<any>(null);
+const [viewLoading, setViewLoading] = useState(false);
 
   const user = useMemo(() => {
     const s = localStorage.getItem('user');
@@ -353,6 +360,104 @@ const confirmProcessApproval = async (approvalId: number, preview: any) => {
 };
 
 
+const handleOpenTransaction = async (row: ApprovalRow) => {
+  try {
+    setViewingRow(row);
+    setViewLoading(true);
+
+    const params: any = {};
+    if (user?.company_id) {
+      params.company_id = user.company_id;
+    }
+
+    const { data } = await napi.get(`/approvals/${row.id}`, { params });
+    setViewingDetails(data);
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to load transaction details.');
+    setViewingRow(null);
+    setViewingDetails(null);
+  } finally {
+    setViewLoading(false);
+  }
+};
+
+const closeTransactionModal = () => {
+  setViewingRow(null);
+  setViewingDetails(null);
+  setViewLoading(false);
+};
+
+const renderTransactionSummary = () => {
+  const context = viewingDetails?.context || {};
+  const main = context?.transaction_main || null;
+  const details = Array.isArray(context?.transaction_details) ? context.transaction_details : [];
+  const transactionType = context?.transaction_type || viewingRow?.transaction_label || 'Transaction';
+  const transactionNo = context?.transaction_no || viewingRow?.transaction_no || '—';
+
+  if (!main) {
+    return (
+      <div className="text-sm text-gray-500">
+        No transaction details available for this approval.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <div className="text-lg font-semibold text-gray-800">{transactionType}</div>
+        <div className="text-sm text-gray-500">{transactionNo}</div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        {Object.entries(main).map(([key, value]) => (
+          <div key={key} className="border rounded p-2 bg-gray-50">
+            <div className="text-xs uppercase tracking-wide text-gray-500">{key}</div>
+            <div className="mt-1 text-gray-800 break-words">
+              {value === null || value === '' ? '—' : String(value)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="border rounded overflow-hidden">
+        <div className="px-3 py-2 bg-gray-50 border-b font-medium text-sm">
+          Transaction Details
+        </div>
+        <div className="overflow-auto max-h-80">
+          <table className="min-w-full text-sm">
+            <thead className="bg-white sticky top-0">
+              <tr>
+                <th className="px-3 py-2 text-left">Acct Code</th>
+                <th className="px-3 py-2 text-left">Description</th>
+                <th className="px-3 py-2 text-right">Debit</th>
+                <th className="px-3 py-2 text-right">Credit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {details.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-3 py-4 text-center text-gray-400">
+                    No detail rows found.
+                  </td>
+                </tr>
+              ) : (
+                details.map((d: any) => (
+                  <tr key={d.id} className="border-t">
+                    <td className="px-3 py-2">{d.acct_code || '—'}</td>
+                    <td className="px-3 py-2">{d.acct_desc || '—'}</td>
+                    <td className="px-3 py-2 text-right">{d.debit ?? '—'}</td>
+                    <td className="px-3 py-2 text-right">{d.credit ?? '—'}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 
 
@@ -444,8 +549,7 @@ const confirmProcessApproval = async (approvalId: number, preview: any) => {
             <tr>
               <th className="px-3 py-2 text-left">#</th>
               <th className="px-3 py-2 text-left">Module</th>
-              <th className="px-3 py-2 text-left">Record ID</th>
-              <th className="px-3 py-2 text-left">Action</th>
+              <th className="px-3 py-2 text-left">Transaction</th>              <th className="px-3 py-2 text-left">Action</th>
               <th className="px-3 py-2 text-left">Reason</th>
               <th className="px-3 py-2 text-left">Status</th>
               <th className="px-3 py-2 text-left">Requested At</th>
@@ -492,7 +596,22 @@ const confirmProcessApproval = async (approvalId: number, preview: any) => {
                       {row.subject_type || '—'}
                     </td>
                     <td className="px-3 py-2">
-                      {row.subject_id || '—'}
+                      {row.transaction_label || row.transaction_no ? (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenTransaction(row)}
+                          className="text-left hover:underline"
+                        >
+                          <div className="font-medium text-gray-900">
+                            {row.transaction_label || 'Transaction'}
+                          </div>
+                          <div className="text-xs text-blue-600">
+                            {row.transaction_no || row.subject_id || '—'}
+                          </div>
+                        </button>
+                      ) : (
+                        <span>{row.subject_id || '—'}</span>
+                      )}
                     </td>
                     <td className="px-3 py-2">
                       <span className="uppercase text-xs font-semibold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded">
@@ -581,6 +700,37 @@ const confirmProcessApproval = async (approvalId: number, preview: any) => {
 
 
       </div>
+      {viewingRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-5xl bg-white rounded-lg shadow-xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <div>
+                <div className="text-lg font-semibold text-gray-800">
+                  Approval Transaction Details
+                </div>
+                <div className="text-sm text-gray-500">
+                  Approval #{viewingRow.id}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeTransactionModal}
+                className="px-3 py-1.5 text-sm rounded-md border bg-white hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-4 max-h-[80vh] overflow-auto">
+              {viewLoading ? (
+                <div className="text-sm text-gray-500">Loading transaction details...</div>
+              ) : (
+                renderTransactionSummary()
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -43,56 +43,44 @@ export default function Pbn_posting() {
   const [loadingPbn, setLoadingPbn] = useState(false);
 
 
-// ===== START ADD: approval request states =====
+// ===== START ADD: direct action states =====
 const [busyAction, setBusyAction] = useState<string>('');
-const [approvalPost, setApprovalPost] = useState<any>(null);
-const [approvalUnpost, setApprovalUnpost] = useState<any>(null);
-const [approvalClose, setApprovalClose] = useState<any>(null);
 
-const loadApprovals = async (pbnId: number) => {
-  const base = { params: { module: 'pbn_posting', record_id: pbnId, company_id: companyId } };
+const processAction = async (kind: 'post' | 'unpost' | 'close') => {
+  if (!selectedId || !companyId) return;
 
-  const [post, unpost, close] = await Promise.all([
-    napi.get('/approvals/status', { ...base, params: { ...base.params, action: 'post' } }),
-    napi.get('/approvals/status', { ...base, params: { ...base.params, action: 'unpost_unused' } }),
-    napi.get('/approvals/status', { ...base, params: { ...base.params, action: 'close' } }),
-  ]);
+  const label =
+    kind === 'post'
+      ? 'post'
+      : kind === 'unpost'
+      ? 'unpost'
+      : 'close';
 
-  setApprovalPost(post.data || null);
-  setApprovalUnpost(unpost.data || null);
-  setApprovalClose(close.data || null);
-};
-
-const requestAction = async (kind: 'post' | 'unpost_unused' | 'close') => {
-  if (!selectedId) return;
-const reason = prompt(`Reason for ${kind.toUpperCase()} approval request:`);
-if (reason === null) return;
-if (reason.trim() === '') return;
-
-
+  const ok = window.confirm(`Are you sure you want to ${label.toUpperCase()} this PO?`);
+  if (!ok) return;
 
   setBusyAction(kind);
   try {
     const url =
       kind === 'post'
-        ? `/pbn/posting/${selectedId}/request-post`
-        : kind === 'unpost_unused'
-        ? `/pbn/posting/${selectedId}/request-unpost-unused`
-        : `/pbn/posting/${selectedId}/request-close`;
+        ? `/pbn/posting/${selectedId}/post`
+        : kind === 'unpost'
+        ? `/pbn/posting/${selectedId}/unpost`
+        : `/pbn/posting/${selectedId}/close`;
 
-    await napi.post(url, { company_id: companyId, reason });
+    const res = await napi.post(url, { company_id: companyId });
 
-    // refresh approval status
-    await loadApprovals(selectedId);
+    await loadPbn(selectedId);
+    await loadList();
 
-    alert('Approval request submitted (or reused). Check Inbox for approval.');
+    alert(res?.data?.message || `PO ${label}ed successfully.`);
   } catch (e: any) {
-    alert(e?.response?.data?.message || 'Request failed.');
+    alert(e?.response?.data?.message || 'Action failed.');
   } finally {
     setBusyAction('');
   }
 };
-// ===== END ADD: approval request states =====
+// ===== END ADD: direct action states =====
 
 
 
@@ -163,7 +151,6 @@ const loadList = async () => {
       });
       setMain(data?.main || null);
       setDetails(Array.isArray(data?.details) ? data.details : []);
-      await loadApprovals(id);
     } finally {
       setLoadingPbn(false);
     }
@@ -308,67 +295,57 @@ const loadList = async () => {
           </div>
 
           {/* Posting buttons will be added in the next drop (approval-aligned) */}
-{/* ===== START REPLACE: Posting action buttons (approval-aligned) ===== */}
+{/* ===== START REPLACE: Posting action buttons (direct actions) ===== */}
 {main && (
   <div className="border rounded bg-white p-3 space-y-2">
-    <div className="font-semibold">Posting Actions (Approval Required)</div>
-
-    <div className="text-sm text-gray-600">
-      Current approvals:
-      <div className="mt-1 text-xs">
-        POST: {approvalPost?.status || 'none'} | UNPOST_UNUSED: {approvalUnpost?.status || 'none'} | CLOSE: {approvalClose?.status || 'none'}
-      </div>
-    </div>
+    <div className="font-semibold">Posting Actions</div>
 
     <div className="flex gap-2 flex-wrap">
       <button
         className="px-4 py-2 rounded border bg-white hover:bg-gray-50 disabled:opacity-50"
         disabled={!selectedId || busyAction !== '' || main.posted_flag == 1 || main.close_flag == 1}
-        onClick={() => requestAction('post')}
-        title={main.close_flag == 1 ? 'Closed' : main.posted_flag == 1 ? 'Already posted' : 'Request POST approval'}
+        onClick={() => processAction('post')}
+        title={main.close_flag == 1 ? 'Closed' : main.posted_flag == 1 ? 'Already posted' : 'Post transaction'}
       >
-        {busyAction === 'post' ? 'Requesting…' : 'Request POST Approval'}
+        {busyAction === 'post' ? 'Processing…' : 'Post'}
       </button>
 
       <button
         className="px-4 py-2 rounded border bg-white hover:bg-gray-50 disabled:opacity-50"
         disabled={!selectedId || busyAction !== '' || main.posted_flag != 1 || main.close_flag == 1}
-        onClick={() => requestAction('unpost_unused')}
-        title={main.close_flag == 1 ? 'Closed' : main.posted_flag != 1 ? 'Must be posted first' : 'Request UNPOST_UNUSED approval'}
+        onClick={() => processAction('unpost')}
+        title={main.close_flag == 1 ? 'Closed' : main.posted_flag != 1 ? 'Must be posted first' : 'Unpost transaction'}
       >
-        {busyAction === 'unpost_unused' ? 'Requesting…' : 'Request UNPOST_UNUSED Approval'}
+        {busyAction === 'unpost' ? 'Processing…' : 'Unpost'}
       </button>
 
       <button
         className="px-4 py-2 rounded border bg-white hover:bg-gray-50 disabled:opacity-50"
         disabled={!selectedId || busyAction !== '' || main.posted_flag != 1 || main.close_flag == 1}
-        onClick={() => requestAction('close')}
-        title={main.close_flag == 1 ? 'Already closed' : main.posted_flag != 1 ? 'Must be posted first' : 'Request CLOSE approval'}
+        onClick={() => processAction('close')}
+        title={main.close_flag == 1 ? 'Already closed' : main.posted_flag != 1 ? 'Must be posted first' : 'Close transaction'}
       >
-        {busyAction === 'close' ? 'Requesting…' : 'Request CLOSE Approval'}
+        {busyAction === 'close' ? 'Processing…' : 'Close'}
       </button>
 
       <button
         className="px-4 py-2 rounded border bg-yellow-50 hover:bg-yellow-100 disabled:opacity-50"
         disabled={!selectedId}
-// ===== START FIX: refresh selectedId null guard =====
-onClick={() => {
-  if (selectedId != null) loadPbn(selectedId);
-}}
-// ===== END FIX: refresh selectedId null guard =====
-        title="Refresh preview + remaining qty + approval status"
+        onClick={() => {
+          if (selectedId != null) loadPbn(selectedId);
+        }}
+        title="Refresh preview + remaining qty"
       >
         Refresh Preview
       </button>
     </div>
 
     <div className="text-xs text-gray-500">
-      Note: Actions apply only after supervisor approves in Approvals Inbox.
+      Unpost is allowed only when the PO has no used quantity in receiving.
     </div>
   </div>
 )}
-{/* ===== END REPLACE: Posting action buttons (approval-aligned) ===== */}
-
+{/* ===== END REPLACE: Posting action buttons (direct actions) ===== */}
         </div>
       </div>
     </div>

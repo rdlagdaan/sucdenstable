@@ -517,13 +517,12 @@ protected function resolveMillRate(string $millName, ?int $companyId, ?string $c
             $counterRow = DB::table('application_settings')
                 ->where('appset_code', 'RRNo')
                 ->where('company_id', $v['company_id'])
-                ->where('type', $sugarType)
                 ->lockForUpdate()
                 ->first();
 
             if (!$counterRow) {
                 DB::rollBack();
-                return response()->json(['message' => 'RR counter missing for this sugar type.'], 422);
+                return response()->json(['message' => 'RR counter missing for this company.'], 422);
             }
 
             $current = (int) ($counterRow->value ?? 0);
@@ -612,13 +611,12 @@ public function createEntry(\Illuminate\Http\Request $req)
         $counterRow = \DB::table('application_settings')
             ->where($codeCol, 'RRNo')
             ->where('company_id', $v['company_id'])
-            ->where('type', $sugarType)
             ->lockForUpdate()
             ->first();
 
         if (!$counterRow) {
             \DB::rollBack();
-            return response()->json(['message' => 'RR counter missing for this sugar type in application_settings.'], 422);
+            return response()->json(['message' => 'RR counter missing for this company in application_settings.'], 422);
         }
 
         $current = (int) ($counterRow->{$valueCol} ?? 0);
@@ -1229,9 +1227,7 @@ $pdf = new class($logoPath) extends \TCPDF {
         $currentDate = date('M d, Y');
         $currentTime = date('h:i');
 
-        $preparedBy = session('userName', '');
         $checkedBy  = session('checkedBy', '');
-        $notedBy    = session('notedBy', '');
         $postedBy   = session('postedBy', '');
         $encodedBy  = session('encodedBy', '');
 
@@ -1241,18 +1237,16 @@ $pdf = new class($logoPath) extends \TCPDF {
         $html .= '    <td width="28%">';
         $html .= '      <table border="0" cellpadding="5">';
         $html .= '        <tr><td align="left"><font size="6"><br><br><br></font></td></tr>';
-        $html .= '        <tr><td><font size="7">APV #________<br>Print Date: '.$currentDate.' '.$currentTime.'</font></td></tr>';
+        $html .= '        <tr><td><font size="7">PJ #________<br>Print Date: '.$currentDate.' '.$currentTime.'</font></td></tr>';
         $html .= '      </table>';
         $html .= '    </td>';
         $html .= '    <td width="2%"></td>';
         $html .= '    <td width="70%">';
         $html .= '      <table border="1" cellpadding="5">';
         $html .= '        <tr>';
-        $html .= '          <td><font size="8">Encoded by:<br><br><br><br><br>'.$encodedBy.'</font></td>';
-        $html .= '          <td><font size="8">Prepared by:<br><br><br><br><br>'.$preparedBy.'</font></td>';
-        $html .= '          <td><font size="8">Checked by:<br><br><br><br><br>'.$checkedBy.'</font></td>';
-        $html .= '          <td><font size="8">Noted by:<br><br><br><br><br>'.$notedBy.'</font></td>';
-        $html .= '          <td><font size="8">Posted by:<br><br><br><br><br>'.$postedBy.'</font></td>';
+        $html .= '          <td width="33.33%"><font size="8">Encoded by:<br><br><br><br><br>'.$encodedBy.'</font></td>';
+        $html .= '          <td width="33.33%"><font size="8">Checked by:<br><br><br><br><br>'.$checkedBy.'</font></td>';
+        $html .= '          <td width="33.34%"><font size="8">Posted by:<br><br><br><br><br>'.$postedBy.'</font></td>';
         $html .= '        </tr>';
         $html .= '      </table>';
         $html .= '    </td>';
@@ -1383,42 +1377,42 @@ $pdf = new class($logoPath) extends \TCPDF {
     $tbl .= '  <tr><td colspan="9">
                 <table cellspacing="2" cellpadding="2">
                   <tr>
-                    <td colspan="7"></td>
+                    <td colspan="6"></td>
                     <td align="left"><font size="8">Assoc Due</font></td>
                     <td align="right"></td>
                     <td align="right"><font size="8">'.$assocDuesV.'</font></td>
                   </tr>
                   <tr>
-                    <td colspan="7"></td>
+                    <td colspan="6"></td>
                     <td align="left"><font size="8">Insurance</font></td>
                     <td align="right"></td>
                     <td align="right"><font size="8">'.$totalInsV.'</font></td>
                   </tr>
                   <tr>
-                    <td colspan="7"></td>
+                    <td colspan="6"></td>
                     <td align="left"><font size="8">Storage</font></td>
                     <td align="right"></td>
                     <td align="right"><font size="8">'.$totalStoV.'</font></td>
                   </tr>
                   <tr>
-                    <td colspan="7"></td>
+                    <td colspan="6"></td>
                     <td align="left" colspan="2"><font size="8">Withholding Tax%</font></td>
                     <td align="right"><font size="8">'.$withHoldingTaxV.'</font></td>
                   </tr>
                   <tr>
-                    <td colspan="7"></td>
+                    <td colspan="6"></td>
                     <td align="left"></td>
                     <td align="right" colspan="2"><hr></td>
                   </tr>
                   <tr>
-                    <td colspan="7"></td>
+                    <td colspan="6"></td>
                     <td align="left"><font size="8">Net AP</font></td>
                     <td align="right"></td>
                     <td align="right"><font size="8">'.$netAPV.'</font></td>
                   </tr>
                   <tr>
-                    <td colspan="7"></td>
-                    <td align="left"></td>
+                    <td colspan="5"></td>
+                    <td align="left" colspan="2"></td>
                     <td align="right" colspan="2"><hr height="2px"></td>
                   </tr>
                 </table>

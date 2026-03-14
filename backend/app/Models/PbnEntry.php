@@ -10,22 +10,23 @@ class PbnEntry extends Model
 
     protected $table = 'pbn_entry';
 
-    protected $fillable = [
-    // ✅ Main identity (keep pbn_number for backward compatibility)
+protected $fillable = [
+    // identity
     'po_number',
     'pbn_number',
 
-    // ✅ Main fields
+    // main fields
     'pbn_date',
     'sugar_type',
     'crop_year',
     'vend_code',
     'vendor_name',
 
-    // ✅ NEW
+    // new fields
     'note',
+    'terms',
 
-    // ✅ Existing flags/audit
+    // flags / audit
     'company_id',
     'delete_flag', 'delete_by',
     'posted_flag', 'posted_by',

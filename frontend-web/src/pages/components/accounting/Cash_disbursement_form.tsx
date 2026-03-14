@@ -924,13 +924,25 @@ setIsExported(!!m.exported_at);
   const handleOpenPdf = () => {
     if (!mainId) return toast.info('Save or select a disbursement first.');
     if (!canExport) return toast.info('Cannot print: transaction is cancelled or unbalanced.');
-    const url = `/api/cash-disbursement/form-pdf/${mainId}?company_id=${encodeURIComponent(companyId || '')}`;
+
+    const preparedBy = String(
+      user?.username ??
+      user?.user_name ??
+      user?.name ??
+      ''
+    ).trim();
+
+    const url =
+      `/api/cash-disbursement/form-pdf/${mainId}` +
+      `?company_id=${encodeURIComponent(companyId || '')}` +
+      `&prepared_by=${encodeURIComponent(preparedBy)}` +
+      `&_=${Date.now()}`;
+
     setPdfUrl(url);
     setShowPdf(true);
 
     // ✅ Immediately apply lock rule client-side (server will set exported_at during PDF generation)
     setIsExported(true);
-
   };
 
   const handleOpenCheckPdf = () => {
@@ -944,7 +956,7 @@ setIsExported(!!m.exported_at);
 
     setPdfUrl(url);
     setShowPdf(true);
-
+    console.log('PDF URL:', url);
     // ✅ Immediately apply lock rule client-side (server marks exported_at during check pdf)
     setIsExported(true);
   };
@@ -1474,7 +1486,7 @@ remove_row: {
                   className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-blue-50"
                 >
                   <DocumentArrowDownIcon className="h-5 w-5 text-blue-600" />
-                  <span className="truncate">Disbursement Voucher – Excel</span>
+                  <span className="truncate">Check Voucher – Excel</span>
                   <span className="ml-auto text-[10px] font-semibold">XLSX</span>
                 </button>
               </div>
@@ -1522,7 +1534,7 @@ remove_row: {
                   className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
                 >
                   <DocumentTextIcon className="h-5 w-5 text-red-600" />
-                  <span className="truncate">Disbursement Voucher – PDF</span>
+                  <span className="truncate">Check Voucher – PDF</span>
                   <span className="ml-auto text-[10px] font-semibold text-red-600">PDF</span>
                 </button>
               </div>
@@ -1548,7 +1560,7 @@ remove_row: {
           <div className="bg-white rounded-lg shadow-xl w-[90vw] h-[85vh] relative">
             <button onClick={() => setShowPdf(false)} className="absolute top-2 right-2 rounded-full px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200" aria-label="Close">✕</button>
             <div className="h-full w-full pt-8">
-              <iframe title="Disbursement Voucher PDF" src={pdfUrl} className="w-full h-full" style={{ border: 'none' }} />
+              <iframe title="Check Voucher PDF" src={pdfUrl} className="w-full h-full" style={{ border: 'none' }} />
             </div>
           </div>
         </div>

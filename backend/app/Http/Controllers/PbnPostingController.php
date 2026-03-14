@@ -23,6 +23,49 @@ private function tableExists(string $table): bool
 }
 
 
+    private function currentUsername(Request $req): string
+    {
+        try {
+            $u = $req->user();
+            if ($u) {
+                foreach (['username', 'user_name', 'userid', 'user_id', 'login', 'login_id', 'account', 'account_name', 'email', 'name'] as $k) {
+                    $v = trim((string) data_get($u, $k, ''));
+                    if ($v !== '') return $v;
+                }
+            }
+        } catch (\Throwable $e) {}
+
+        try {
+            $u = auth('sanctum')->user();
+            if ($u) {
+                foreach (['username', 'user_name', 'userid', 'user_id', 'login', 'login_id', 'account', 'account_name', 'email', 'name'] as $k) {
+                    $v = trim((string) data_get($u, $k, ''));
+                    if ($v !== '') return $v;
+                }
+            }
+        } catch (\Throwable $e) {}
+
+        return 'system';
+    }
+
+    private function loadPbnRow(int $companyId, int $id)
+    {
+        return DB::table('pbn_entry')
+            ->where('id', $id)
+            ->where('company_id', $companyId)
+            ->first();
+    }
+
+    private function hasAnyUsedQty(int $companyId, int $pbnEntryId): bool
+    {
+        $usedMap = $this->getUsedMapSafe($companyId, $pbnEntryId);
+        foreach ($usedMap as $qty) {
+            if ((float) $qty > 0) return true;
+        }
+        return false;
+    }
+
+
 private function colExists(string $table, string $column): bool
 {
     try {
@@ -394,213 +437,155 @@ private function getUsedMapSafe(int $companyId, int $pbnEntryId): array
     }
 
 
-// ===== START ADD: Approval-aligned PBN posting actions =====
+// ===== START ADD: Direct PBN posting actions =====
 
 /**
- * POST /api/pbn/posting/{id}/request-post
- * Creates/reuses an approval request with:
- *  - module = pbn_posting
- *  - action = post
+ * POST /api/pbn/posting/{id}/post
+ * Directly posts the transaction.
  */
-public function requestPost(Request $req, int $id)
+public function post(Request $req, int $id)
 {
     $data = $req->validate([
         'company_id' => ['required','integer'],
-        'reason'     => ['nullable','string'],
     ]);
 
     $companyId = (int) $data['company_id'];
-    $reason    = (string) ($data['reason'] ?? '');
+    $now       = now();
+    $username  = $this->currentUsername($req);
 
-    $pbn = DB::table('pbn_entry')
-        ->where('id', $id)
-        ->where('company_id', $companyId)
-        ->first();
+    $pbn = $this->loadPbnRow($companyId, $id);
 
-    if (!$pbn) return response()->json(['message' => 'PO not found'], 404);
+    if (!$pbn) {
+        return response()->json(['message' => 'PO not found'], 404);
+    }
 
     if ((int)($pbn->delete_flag ?? 0) === 1) {
         return response()->json(['message' => 'PO is deleted/hidden.'], 409);
     }
+
     if ((int)($pbn->close_flag ?? 0) === 1) {
         return response()->json(['message' => 'PO is already closed.'], 409);
     }
+
     if ((int)($pbn->posted_flag ?? 0) === 1) {
         return response()->json(['message' => 'PO is already posted.'], 409);
     }
 
-    return $this->createOrReuseApproval($req, $companyId, 'pbn_posting', $id, 'post', $reason);
+    DB::table('pbn_entry')
+        ->where('id', $id)
+        ->where('company_id', $companyId)
+        ->update([
+            'posted_flag' => 1,
+            'posted_by'   => $username,
+            'updated_at'  => $now,
+        ]);
+
+    return response()->json([
+        'ok'      => true,
+        'message' => 'PO posted successfully.',
+    ]);
 }
 
 /**
- * POST /api/pbn/posting/{id}/request-unpost-unused
- * Approval action: unpost_unused
+ * POST /api/pbn/posting/{id}/unpost
+ * Directly unposts the transaction, but only if unused.
  */
-public function requestUnpostUnused(Request $req, int $id)
+public function unpost(Request $req, int $id)
 {
     $data = $req->validate([
         'company_id' => ['required','integer'],
-        'reason'     => ['nullable','string'],
     ]);
 
     $companyId = (int) $data['company_id'];
-    $reason    = (string) ($data['reason'] ?? '');
+    $now       = now();
 
-    $pbn = DB::table('pbn_entry')
-        ->where('id', $id)
-        ->where('company_id', $companyId)
-        ->first();
+    $pbn = $this->loadPbnRow($companyId, $id);
 
-    if (!$pbn) return response()->json(['message' => 'PO not found'], 404);
+    if (!$pbn) {
+        return response()->json(['message' => 'PO not found'], 404);
+    }
 
     if ((int)($pbn->delete_flag ?? 0) === 1) {
         return response()->json(['message' => 'PO is deleted/hidden.'], 409);
     }
+
     if ((int)($pbn->close_flag ?? 0) === 1) {
         return response()->json(['message' => 'PO is closed. Unpost is not allowed.'], 409);
     }
+
     if ((int)($pbn->posted_flag ?? 0) !== 1) {
-        return response()->json(['message' => 'PO must be posted first.'], 409);
+        return response()->json(['message' => 'PO is not posted yet.'], 409);
     }
 
-    return $this->createOrReuseApproval($req, $companyId, 'pbn_posting', $id, 'unpost_unused', $reason);
+    if ($this->hasAnyUsedQty($companyId, $id)) {
+        return response()->json(['message' => 'Cannot unpost. This PO already has used quantity in receiving.'], 409);
+    }
+
+    DB::table('pbn_entry')
+        ->where('id', $id)
+        ->where('company_id', $companyId)
+        ->update([
+            'posted_flag' => 0,
+            'posted_by'   => null,
+            'updated_at'  => $now,
+        ]);
+
+    return response()->json([
+        'ok'      => true,
+        'message' => 'PO unposted successfully.',
+    ]);
 }
 
 /**
- * POST /api/pbn/posting/{id}/request-close
- * Approval action: close
+ * POST /api/pbn/posting/{id}/close
+ * Directly closes the transaction.
  */
-public function requestClose(Request $req, int $id)
+public function close(Request $req, int $id)
 {
     $data = $req->validate([
         'company_id' => ['required','integer'],
-        'reason'     => ['nullable','string'],
     ]);
 
     $companyId = (int) $data['company_id'];
-    $reason    = (string) ($data['reason'] ?? '');
+    $now       = now();
+    $username  = $this->currentUsername($req);
 
-    $pbn = DB::table('pbn_entry')
-        ->where('id', $id)
-        ->where('company_id', $companyId)
-        ->first();
+    $pbn = $this->loadPbnRow($companyId, $id);
 
-    if (!$pbn) return response()->json(['message' => 'PO not found'], 404);
+    if (!$pbn) {
+        return response()->json(['message' => 'PO not found'], 404);
+    }
 
     if ((int)($pbn->delete_flag ?? 0) === 1) {
         return response()->json(['message' => 'PO is deleted/hidden.'], 409);
     }
+
     if ((int)($pbn->close_flag ?? 0) === 1) {
         return response()->json(['message' => 'PO is already closed.'], 409);
     }
+
     if ((int)($pbn->posted_flag ?? 0) !== 1) {
         return response()->json(['message' => 'PO must be posted before it can be closed.'], 409);
     }
 
-    return $this->createOrReuseApproval($req, $companyId, 'pbn_posting', $id, 'close', $reason);
-}
-
-/**
- * Create or reuse an approval request (same rules as your ApprovalController.requestEdit):
- * - auto-expire unused elapsed approvals
- * - reuse active pending/approved unconsumed approvals
- * - otherwise insert a new pending request with incremented request_ctr
- */
-private function createOrReuseApproval(Request $req, int $companyId, string $module, int $recordId, string $action, string $reason)
-{
-    $action = strtolower(trim($action));
-    $module = trim($module);
-
-    $now = now();
-
-    // Resolve requester id the same “safe” way as ApprovalController (simple fallback)
-    $requesterId = optional($req->user())->id;
-    if (!$requesterId) {
-        try { $requesterId = auth('sanctum')->id(); } catch (\Throwable $e) {}
-    }
-
-    // 0) expire unused approvals whose window elapsed
-    DB::table('approvals')
-        ->where('module', $module)
-        ->where('record_id', $recordId)
+    DB::table('pbn_entry')
+        ->where('id', $id)
         ->where('company_id', $companyId)
-        ->whereRaw('LOWER(action) = ?', [$action])
-        ->whereIn('status', ['pending','approved'])
-        ->whereNull('consumed_at')
-        ->whereNull('first_edit_at')
-        ->whereNotNull('expires_at')
-        ->where('expires_at', '<=', $now)
         ->update([
-            'status'      => 'expired',
-            'consumed_at' => $now,
-            'updated_at'  => $now,
+            'close_flag' => 1,
+            'close_by'   => $username,
+            'updated_at' => $now,
         ]);
-
-    // 1) reuse active approval
-    $existing = DB::table('approvals')
-        ->where('module', $module)
-        ->where('record_id', $recordId)
-        ->where('company_id', $companyId)
-        ->whereRaw('LOWER(action) = ?', [$action])
-        ->whereIn('status', ['pending','approved'])
-        ->whereNull('consumed_at')
-        ->where(function ($q) use ($now) {
-            $q->whereNull('expires_at')->orWhere('expires_at', '>', $now);
-        })
-        ->orderByDesc('id')
-        ->first();
-
-    if ($existing) {
-        if ($existing->status === 'pending') {
-            DB::table('approvals')->where('id', $existing->id)->update([
-                'reason'     => $reason,
-                'updated_at' => $now,
-            ]);
-        }
-
-        return response()->json([
-            'ok'          => true,
-            'id'          => $existing->id,
-            'status'      => $existing->status,
-            'reused'      => true,
-            'request_ctr' => $existing->request_ctr ?? null,
-        ]);
-    }
-
-    // 2) new request_ctr
-    $latestCtr = DB::table('approvals')
-        ->where('module', $module)
-        ->where('record_id', $recordId)
-        ->where('company_id', $companyId)
-        ->whereRaw('LOWER(action) = ?', [$action])
-        ->max('request_ctr');
-
-    $nextCtr = $latestCtr ? ((int)$latestCtr + 1) : 1;
-
-    // 3) insert new approval
-    $id = DB::table('approvals')->insertGetId([
-        'company_id'   => $companyId,
-        'module'       => $module,
-        'record_id'    => $recordId,
-        'action'       => $action,
-        'reason'       => $reason,
-        'status'       => 'pending',
-        'requester_id' => $requesterId,
-        'request_ctr'  => $nextCtr,
-        'created_at'   => $now,
-        'updated_at'   => $now,
-    ]);
 
     return response()->json([
-        'ok'          => true,
-        'id'          => $id,
-        'status'      => 'pending',
-        'reused'      => false,
-        'request_ctr' => $nextCtr,
+        'ok'      => true,
+        'message' => 'PO closed successfully.',
     ]);
 }
 
-// ===== END ADD: Approval-aligned PBN posting actions =====
+// ===== END ADD: Direct PBN posting actions =====
+
+
 
 
 

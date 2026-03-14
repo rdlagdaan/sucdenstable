@@ -5,12 +5,14 @@ import { toast } from 'react-toastify';
 type Row = {
   id: number;
   company_id: number;
-  subject_type: string;   // e.g. "cash_disbursement" (comes from COALESCE(module,''))
-  subject_id: number;     // record id (comes from COALESCE(record_id,0))
-  action: string;         // e.g. "edit" (COALESCE(action,'edit'))
+  subject_type: string;
+  subject_id: number;
+  action: string;
   reason?: string;
   status: 'pending' | 'approved' | 'rejected';
   created_at: string;
+  transaction_label?: string | null;
+  transaction_no?: string | null;
 };
 
 type StatusFilter = 'pending' | 'approved' | 'rejected' | 'all';
@@ -130,7 +132,7 @@ export default function ApprovalCenter() {
               <tr>
                 <th className="px-3 py-2 text-left w-[170px]">When</th>
                 <th className="px-3 py-2 text-left">Module</th>
-                <th className="px-3 py-2 text-left">Record</th>
+                <th className="px-3 py-2 text-left">Transaction</th>
                 <th className="px-3 py-2 text-left">Action</th>
                 <th className="px-3 py-2 text-left">Reason</th>
                 <th className="px-3 py-2 text-right w-[160px]"></th>

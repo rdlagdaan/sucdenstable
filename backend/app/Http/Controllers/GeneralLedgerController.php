@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\BuildGeneralLedger;
+use App\Jobs\BuildGeneralLedgerTaxReport;
+use App\Jobs\BuildMonthlyExpenseReport;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -111,6 +113,291 @@ if ($companyId <= 0) {
         return response()->json(['ticket' => $ticket]);
     }
 
+
+    /** Start Monthly Expense report job. */
+    public function startExpenseReport(Request $request)
+    {
+        $validated = $request->validate([
+            'startAccount' => 'required|string|max:75',
+            'endAccount'   => 'required|string|max:75',
+            'startDate'    => 'required|date',
+            'endDate'      => 'required|date|after_or_equal:startDate',
+            'format'       => 'nullable|in:pdf,xls,xlsx',
+            'company_id'   => 'nullable|integer',
+        ]);
+
+        $ticket    = (string) Str::uuid();
+        $format    = $validated['format'] ?? 'pdf';
+        $companyId = (int) ($validated['company_id'] ?? 0);
+
+        if ($companyId <= 0) {
+            return response()->json(['error' => 'Missing company_id'], 422);
+        }
+
+        $state = [
+            'status'        => 'queued',
+            'progress'      => 0,
+            'message'       => 'Queued',
+            'format'        => $format,
+            'startAccount'  => $validated['startAccount'],
+            'endAccount'    => $validated['endAccount'],
+            'startDate'     => $validated['startDate'],
+            'endDate'       => $validated['endDate'],
+            'file_rel'      => null,
+            'file_abs'      => null,
+            'file_url'      => null,
+            'file_disk'     => 'local',
+            'download_name' => null,
+        ];
+
+        Cache::put($this->expenseCacheKey($ticket), $state, now()->addHours(6));
+
+        BuildMonthlyExpenseReport::dispatchSync(
+            ticket:       $ticket,
+            startAccount: $validated['startAccount'],
+            endAccount:   $validated['endAccount'],
+            startDate:    $validated['startDate'],
+            endDate:      $validated['endDate'],
+            format:       $format,
+            companyId:    $companyId
+        );
+
+        return response()->json(['ticket' => $ticket]);
+    }
+
+    /** Poll Monthly Expense report job status. */
+    public function expenseStatus(string $ticket)
+    {
+        $state = Cache::get($this->expenseCacheKey($ticket));
+        if (!$state) {
+            return response()->json(['status' => 'missing', 'message' => 'Ticket not found'], 404);
+        }
+        return response()->json($state);
+    }
+
+    /** Inline view (PDF only; Excel forced to download). */
+    public function expenseView(string $ticket)
+    {
+        $state = Cache::get($this->expenseCacheKey($ticket));
+        if (!$state || ($state['status'] ?? null) !== 'done') {
+            return response()->json(['error' => 'File not ready'], 400);
+        }
+
+        $name = $state['download_name'] ?? basename($state['file_rel'] ?? 'report.pdf');
+        $fmt  = strtolower($state['format'] ?? pathinfo($name, PATHINFO_EXTENSION) ?: 'pdf');
+        $abs  = $state['file_abs'] ?? null;
+        $disk = $state['file_disk'] ?? 'local';
+        $rel  = $state['file_rel'] ?? null;
+
+        $excelCtype = ($fmt === 'xlsx')
+            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : 'application/vnd.ms-excel';
+
+        if ($abs && is_file($abs)) {
+            if ($fmt === 'pdf') {
+                return response()->file($abs, [
+                    'Content-Type'        => 'application/pdf',
+                    'Content-Disposition' => 'inline; filename="'.$name.'"',
+                ]);
+            }
+            return response()->download($abs, $name, [
+                'Content-Type' => $excelCtype,
+            ]);
+        }
+
+        if ($rel && Storage::disk($disk)->exists($rel)) {
+            $bytes = Storage::disk($disk)->get($rel);
+
+            if ($fmt === 'pdf') {
+                return Response::make($bytes, 200, [
+                    'Content-Type'        => 'application/pdf',
+                    'Content-Disposition' => 'inline; filename="'.$name.'"',
+                ]);
+            }
+
+            return Response::make($bytes, 200, [
+                'Content-Type'        => $excelCtype,
+                'Content-Disposition' => 'attachment; filename="'.$name.'"',
+            ]);
+        }
+
+        return response()->json(['error' => 'File missing'], 404);
+    }
+
+    /** Download endpoint (any format). */
+    public function expenseDownload(string $ticket)
+    {
+        $state = Cache::get($this->expenseCacheKey($ticket));
+        if (!$state || ($state['status'] ?? null) !== 'done') {
+            return response()->json(['error' => 'File not ready'], 400);
+        }
+
+        $name = $state['download_name'] ?? basename($state['file_rel'] ?? 'report.bin');
+        $abs  = $state['file_abs'] ?? null;
+        $disk = $state['file_disk'] ?? 'local';
+        $rel  = $state['file_rel'] ?? null;
+
+        if ($abs && is_file($abs)) {
+            return response()->download($abs, $name);
+        }
+
+        if ($rel && Storage::disk($disk)->exists($rel)) {
+            return Storage::disk($disk)->download($rel, $name);
+        }
+
+        return response()->json(['error' => 'File missing'], 404);
+    }
+
+
+    /** Start Tax List report job. */
+    public function startTaxReport(Request $request)
+    {
+        try {
+            $validated = $request->validate([
+                'startAccount' => 'required|string|max:75',
+                'endAccount'   => 'required|string|max:75',
+                'startDate'    => 'required|date',
+                'endDate'      => 'required|date|after_or_equal:startDate',
+                'format'       => 'nullable|in:pdf,xls,xlsx',
+                'company_id'   => 'nullable|integer',
+            ]);
+
+            $ticket    = (string) Str::uuid();
+            $format    = $validated['format'] ?? 'pdf';
+            $companyId = (int) ($validated['company_id'] ?? 0);
+
+            if ($companyId <= 0) {
+                return response()->json(['error' => 'Missing company_id'], 422);
+            }
+
+            $state = [
+                'status'        => 'queued',
+                'progress'      => 0,
+                'message'       => 'Queued',
+                'format'        => $format,
+                'startAccount'  => $validated['startAccount'],
+                'endAccount'    => $validated['endAccount'],
+                'startDate'     => $validated['startDate'],
+                'endDate'       => $validated['endDate'],
+                'file_rel'      => null,
+                'file_abs'      => null,
+                'file_url'      => null,
+                'file_disk'     => 'local',
+                'download_name' => null,
+            ];
+
+            Cache::put($this->taxCacheKey($ticket), $state, now()->addHours(6));
+
+            BuildGeneralLedgerTaxReport::dispatchSync(
+                ticket:       $ticket,
+                startAccount: $validated['startAccount'],
+                endAccount:   $validated['endAccount'],
+                startDate:    $validated['startDate'],
+                endDate:      $validated['endDate'],
+                format:       $format,
+                companyId:    $companyId
+            );
+
+            return response()->json(['ticket' => $ticket]);
+        } catch (\Throwable $e) {
+            \Log::error('startTaxReport failed', [
+                'message' => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+                'trace'   => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ], 500);
+        }
+    }
+
+    /** Poll Tax List report job status. */
+    public function taxStatus(string $ticket)
+    {
+        $state = Cache::get($this->taxCacheKey($ticket));
+        if (!$state) {
+            return response()->json(['status' => 'missing', 'message' => 'Ticket not found'], 404);
+        }
+        return response()->json($state);
+    }
+
+    /** Inline view (PDF only; Excel forced to download). */
+    public function taxView(string $ticket)
+    {
+        $state = Cache::get($this->taxCacheKey($ticket));
+        if (!$state || ($state['status'] ?? null) !== 'done') {
+            return response()->json(['error' => 'File not ready'], 400);
+        }
+
+        $name = $state['download_name'] ?? basename($state['file_rel'] ?? 'report.pdf');
+        $fmt  = strtolower($state['format'] ?? pathinfo($name, PATHINFO_EXTENSION) ?: 'pdf');
+        $abs  = $state['file_abs'] ?? null;
+        $disk = $state['file_disk'] ?? 'local';
+        $rel  = $state['file_rel'] ?? null;
+
+        $excelCtype = ($fmt === 'xlsx')
+            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : 'application/vnd.ms-excel';
+
+        if ($abs && is_file($abs)) {
+            if ($fmt === 'pdf') {
+                return response()->file($abs, [
+                    'Content-Type'        => 'application/pdf',
+                    'Content-Disposition' => 'inline; filename="'.$name.'"',
+                ]);
+            }
+            return response()->download($abs, $name, [
+                'Content-Type' => $excelCtype,
+            ]);
+        }
+
+        if ($rel && Storage::disk($disk)->exists($rel)) {
+            $bytes = Storage::disk($disk)->get($rel);
+
+            if ($fmt === 'pdf') {
+                return Response::make($bytes, 200, [
+                    'Content-Type'        => 'application/pdf',
+                    'Content-Disposition' => 'inline; filename="'.$name.'"',
+                ]);
+            }
+
+            return Response::make($bytes, 200, [
+                'Content-Type'        => $excelCtype,
+                'Content-Disposition' => 'attachment; filename="'.$name.'"',
+            ]);
+        }
+
+        return response()->json(['error' => 'File missing'], 404);
+    }
+
+    /** Download endpoint (any format). */
+    public function taxDownload(string $ticket)
+    {
+        $state = Cache::get($this->taxCacheKey($ticket));
+        if (!$state || ($state['status'] ?? null) !== 'done') {
+            return response()->json(['error' => 'File not ready'], 400);
+        }
+
+        $name = $state['download_name'] ?? basename($state['file_rel'] ?? 'report.bin');
+        $abs  = $state['file_abs'] ?? null;
+        $disk = $state['file_disk'] ?? 'local';
+        $rel  = $state['file_rel'] ?? null;
+
+        if ($abs && is_file($abs)) {
+            return response()->download($abs, $name);
+        }
+
+        if ($rel && Storage::disk($disk)->exists($rel)) {
+            return Storage::disk($disk)->download($rel, $name);
+        }
+
+        return response()->json(['error' => 'File missing'], 404);
+    }
+
     /** Poll job status. */
     public function status(string $ticket)
     {
@@ -202,6 +489,16 @@ public function view(string $ticket)
     private function cacheKey(string $ticket): string
     {
         return "gl:{$ticket}";
+    }
+
+    private function taxCacheKey(string $ticket): string
+    {
+        return "gltax:{$ticket}";
+    }
+
+    private function expenseCacheKey(string $ticket): string
+    {
+        return "glx:{$ticket}";
     }
 
  

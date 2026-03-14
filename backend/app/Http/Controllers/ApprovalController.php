@@ -194,43 +194,208 @@ public function show($id)
     $req = Approval::findOrFail($id);
     $this->authorizeView($req);
 
-    $module = strtolower(trim((string) $req->module));
-    $action = strtolower(trim((string) $req->action));
+    $module    = strtolower(trim((string) $req->module));
+    $action    = strtolower(trim((string) $req->action));
+    $companyId = (int) ($req->company_id ?? 0);
+    $recordId  = (int) ($req->record_id ?? 0);
 
     $context = null;
 
-    if ($module === 'receiving_entries' && $action === 'process') {
-        $companyId = (int) ($req->company_id ?? 0);
-        $recordId  = (int) ($req->record_id ?? 0);
+    if (in_array($module, ['cash_receipt', 'cash_receipts'], true)) {
+        $main = DB::table('cash_receipts')
+            ->where('id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+            ->first();
 
+        $details = DB::table('cash_receipt_details as d')
+            ->where('d.transaction_id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('d.company_id', $companyId))
+            ->leftJoin('account_code as a', function ($j) use ($companyId) {
+                $j->on('d.acct_code', '=', 'a.acct_code');
+                if ($companyId > 0) {
+                    $j->where('a.company_id', '=', $companyId);
+                }
+            })
+            ->orderBy('d.id')
+            ->get([
+                'd.id',
+                'd.transaction_id',
+                'd.acct_code',
+                DB::raw("COALESCE(a.acct_desc, '') as acct_desc"),
+                'd.debit',
+                'd.credit',
+                'd.workstation_id',
+            ]);
+
+        $context = [
+            'transaction_type'  => 'Receipt',
+            'transaction_no'    => $main->cr_no ?? null,
+            'transaction_main'  => $main,
+            'transaction_details' => $details,
+        ];
+    }
+
+    if (in_array($module, ['cash_disbursement', 'cash_disbursements'], true)) {
+        $main = DB::table('cash_disbursement')
+            ->where('id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+            ->first();
+
+        $details = DB::table('cash_disbursement_details as d')
+            ->where('d.transaction_id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('d.company_id', $companyId))
+            ->leftJoin('account_code as a', function ($j) use ($companyId) {
+                $j->on('d.acct_code', '=', 'a.acct_code');
+                if ($companyId > 0) {
+                    $j->where('a.company_id', '=', $companyId);
+                }
+            })
+            ->orderBy('d.id')
+            ->get([
+                'd.id',
+                'd.transaction_id',
+                'd.acct_code',
+                DB::raw("COALESCE(a.acct_desc, '') as acct_desc"),
+                'd.debit',
+                'd.credit',
+                'd.workstation_id',
+            ]);
+
+        $context = [
+            'transaction_type'  => 'Disbursement',
+            'transaction_no'    => $main->cd_no ?? null,
+            'transaction_main'  => $main,
+            'transaction_details' => $details,
+        ];
+    }
+
+    if ($module === 'sales_journal') {
+        $main = DB::table('cash_sales')
+            ->where('id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+            ->first();
+
+        $details = DB::table('cash_sales_details as d')
+            ->where('d.transaction_id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('d.company_id', $companyId))
+            ->leftJoin('account_code as a', function ($j) use ($companyId) {
+                $j->on('d.acct_code', '=', 'a.acct_code');
+                if ($companyId > 0) {
+                    $j->where('a.company_id', '=', $companyId);
+                }
+            })
+            ->orderBy('d.id')
+            ->get([
+                'd.id',
+                'd.transaction_id',
+                'd.acct_code',
+                DB::raw("COALESCE(a.acct_desc, '') as acct_desc"),
+                'd.debit',
+                'd.credit',
+            ]);
+
+        $context = [
+            'transaction_type'  => 'Sales',
+            'transaction_no'    => $main->cs_no ?? null,
+            'transaction_main'  => $main,
+            'transaction_details' => $details,
+        ];
+    }
+
+    if ($module === 'purchase_journal') {
+        $main = DB::table('cash_purchase')
+            ->where('id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+            ->first();
+
+        $details = DB::table('cash_purchase_details as d')
+            ->where('d.transaction_id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('d.company_id', $companyId))
+            ->leftJoin('account_code as a', function ($j) use ($companyId) {
+                $j->on('d.acct_code', '=', 'a.acct_code');
+                if ($companyId > 0) {
+                    $j->where('a.company_id', '=', $companyId);
+                }
+            })
+            ->orderBy('d.id')
+            ->get([
+                'd.id',
+                'd.transaction_id',
+                'd.acct_code',
+                DB::raw("COALESCE(a.acct_desc, '') as acct_desc"),
+                'd.debit',
+                'd.credit',
+            ]);
+
+        $context = [
+            'transaction_type'  => 'Purchase',
+            'transaction_no'    => $main->cp_no ?? null,
+            'transaction_main'  => $main,
+            'transaction_details' => $details,
+        ];
+    }
+
+    if ($module === 'general_accounting') {
+        $main = DB::table('general_accounting')
+            ->where('id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+            ->first();
+
+        $details = DB::table('general_accounting_details as d')
+            ->where('d.transaction_id', $recordId)
+            ->when($companyId > 0, fn ($q) => $q->where('d.company_id', $companyId))
+            ->leftJoin('account_code as a', function ($j) use ($companyId) {
+                $j->on('d.acct_code', '=', 'a.acct_code');
+                if ($companyId > 0) {
+                    $j->where('a.company_id', '=', $companyId);
+                }
+            })
+            ->orderBy('d.id')
+            ->get([
+                'd.id',
+                'd.transaction_id',
+                'd.acct_code',
+                DB::raw("COALESCE(a.acct_desc, '') as acct_desc"),
+                'd.debit',
+                'd.credit',
+                'd.company_id',
+            ]);
+
+        $context = [
+            'transaction_type'  => 'General',
+            'transaction_no'    => $main->ga_no ?? null,
+            'transaction_main'  => $main,
+            'transaction_details' => $details,
+        ];
+    }
+
+    if ($module === 'receiving_entries' && $action === 'process') {
         $receiving = DB::table('receiving_entry')
             ->where('id', $recordId)
             ->when($companyId > 0, fn($q) => $q->where('company_id', $companyId))
             ->first();
 
-$preview = null;
-$previewError = null;
+        $preview = null;
+        $previewError = null;
 
-try {
-    $svc = app(\App\Services\ReceivingPurchaseJournalService::class);
-    $preview = $svc->buildJournalPreview($companyId, $recordId);
-} catch (\Throwable $e) {
-    $previewError = $e->getMessage(); // ✅ send to frontend
-    \Log::error('Approval show(): buildJournalPreview failed', [
-        'approval_id' => $req->id,
-        'company_id'  => $companyId,
-        'record_id'   => $recordId,
-        'err'         => $e->getMessage(),
-    ]);
-}
+        try {
+            $svc = app(\App\Services\ReceivingPurchaseJournalService::class);
+            $preview = $svc->buildJournalPreview($companyId, $recordId);
+        } catch (\Throwable $e) {
+            $previewError = $e->getMessage();
+            \Log::error('Approval show(): buildJournalPreview failed', [
+                'approval_id' => $req->id,
+                'company_id'  => $companyId,
+                'record_id'   => $recordId,
+                'err'         => $e->getMessage(),
+            ]);
+        }
 
-
-$context = [
-  'receiving' => $receiving,
-  'purchase_journal_preview' => $preview,
-  'purchase_journal_preview_error' => $previewError, // ✅ add
-];
-
+        $context = [
+            'receiving' => $receiving,
+            'purchase_journal_preview' => $preview,
+            'purchase_journal_preview_error' => $previewError,
+        ];
     }
 
     return response()->json([
@@ -238,7 +403,6 @@ $context = [
         'context'  => $context,
     ]);
 }
-
 
 public function statusBySubject(\Illuminate\Http\Request $req)
 {
@@ -809,7 +973,7 @@ public function reject(Request $request, int $id)
      */
 public function inbox(Request $req)
 {
-    $status     = $req->query('status', null);   // allow "all"
+    $status     = $req->query('status', null);
     $companyId  = $req->query('company_id');
     $search     = trim((string)$req->query('search', ''));
     $page       = max((int)$req->query('page', 1), 1);
@@ -825,7 +989,6 @@ public function inbox(Request $req)
         $q->where('company_id', $companyId);
     }
 
-    // 🔍 Search by module, record_id, reason
     if ($search !== '') {
         $qq = strtolower($search);
         $q->where(function ($w) use ($qq) {
@@ -842,6 +1005,7 @@ public function inbox(Request $req)
         ->limit($perPage)
         ->get([
             'id',
+            'company_id',
             DB::raw("COALESCE(module,'') as subject_type"),
             DB::raw("COALESCE(record_id,0) as subject_id"),
             'action',
@@ -849,6 +1013,49 @@ public function inbox(Request $req)
             'status',
             'created_at',
         ]);
+
+    $rows = $rows->map(function ($row) {
+        $module    = strtolower((string)($row->subject_type ?? ''));
+        $subjectId = (int)($row->subject_id ?? 0);
+        $companyId = (int)($row->company_id ?? 0);
+
+        $row->transaction_label = null;
+        $row->transaction_no    = null;
+
+        if (in_array($module, ['cash_receipt', 'cash_receipts'], true)) {
+            $row->transaction_label = 'Receipt';
+            $row->transaction_no = DB::table('cash_receipts')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('cr_no');
+        } elseif (in_array($module, ['cash_disbursement', 'cash_disbursements'], true)) {
+            $row->transaction_label = 'Disbursement';
+            $row->transaction_no = DB::table('cash_disbursement')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('cd_no');
+        } elseif ($module === 'sales_journal') {
+            $row->transaction_label = 'Sales';
+            $row->transaction_no = DB::table('cash_sales')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('cs_no');
+        } elseif ($module === 'purchase_journal') {
+            $row->transaction_label = 'Purchase';
+            $row->transaction_no = DB::table('cash_purchase')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('cp_no');
+        } elseif ($module === 'general_accounting') {
+            $row->transaction_label = 'General';
+            $row->transaction_no = DB::table('general_accounting')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('ga_no');
+        }
+
+        return $row;
+    })->values();
 
     return response()->json([
         'data'       => $rows,
@@ -867,10 +1074,8 @@ public function inbox(Request $req)
      */
 public function outbox(Request $req)
 {
-    // requester_id from auth user or explicit query param
     $uid = optional($req->user())->id ?: (int) $req->query('requester_id', 0);
 
-    // 🔍 search & pagination
     $search   = trim((string) $req->query('search', ''));
     $page     = max(1, (int) $req->query('page', 1));
     $perPage  = max(1, min(200, (int) $req->query('per_page', 20)));
@@ -890,7 +1095,6 @@ public function outbox(Request $req)
         });
     }
 
-    // total count BEFORE limit/offset
     $total = (clone $base)->count();
 
     $rows = $base
@@ -899,6 +1103,7 @@ public function outbox(Request $req)
         ->limit($perPage)
         ->get([
             'id',
+            'company_id',
             DB::raw("COALESCE(module,'') as subject_type"),
             DB::raw("COALESCE(record_id,0) as subject_id"),
             'action',
@@ -906,6 +1111,49 @@ public function outbox(Request $req)
             'status',
             'created_at',
         ]);
+
+    $rows = $rows->map(function ($row) {
+        $module    = strtolower((string)($row->subject_type ?? ''));
+        $subjectId = (int)($row->subject_id ?? 0);
+        $companyId = (int)($row->company_id ?? 0);
+
+        $row->transaction_label = null;
+        $row->transaction_no    = null;
+
+        if (in_array($module, ['cash_receipt', 'cash_receipts'], true)) {
+            $row->transaction_label = 'Receipt';
+            $row->transaction_no = DB::table('cash_receipts')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('cr_no');
+        } elseif (in_array($module, ['cash_disbursement', 'cash_disbursements'], true)) {
+            $row->transaction_label = 'Disbursement';
+            $row->transaction_no = DB::table('cash_disbursement')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('cd_no');
+        } elseif ($module === 'sales_journal') {
+            $row->transaction_label = 'Sales';
+            $row->transaction_no = DB::table('cash_sales')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('cs_no');
+        } elseif ($module === 'purchase_journal') {
+            $row->transaction_label = 'Purchase';
+            $row->transaction_no = DB::table('cash_purchase')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('cp_no');
+        } elseif ($module === 'general_accounting') {
+            $row->transaction_label = 'General';
+            $row->transaction_no = DB::table('general_accounting')
+                ->where('id', $subjectId)
+                ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                ->value('ga_no');
+        }
+
+        return $row;
+    })->values();
 
     return response()->json([
         'data'        => $rows,
@@ -915,8 +1163,6 @@ public function outbox(Request $req)
         'total_pages' => $total > 0 ? (int) ceil($total / $perPage) : 1,
     ]);
 }
-
-
     // ================= Authorization helpers =================
 
     private function authorizeView(Approval $req): void

@@ -97,58 +97,21 @@ class MyPurchaseVoucherPDF extends \TCPDF {
 
 public function Footer()
 {
-    $this->SetY(-50);
-    $this->SetFont('helvetica','I',8);
+    $this->SetY(-24);
+    $this->SetFont('helvetica', 'I', 8);
 
     $currentDate = date('M d, Y');
     $currentTime = date('h:i:sa');
 
-    // ✅ Company label in footer (company_id 1 vs 2)
-    $companyId = (int)($this->companyId ?? 0);
-    $receivedFrom = ($companyId === 2)
-        ? 'AMEROP PHILIPPINES, INC.'
-        : 'SUCDEN PHILIPPINES, INC.';
-
     $html = '
-    <table border="0"><tr>
-      <td width="70%">
-        <table border="1" cellpadding="5"><tr>
-
-<td width="16%">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
-    <tr>
-      <td valign="top" align="left"><font size="8">Prepared:</font></td>
-    </tr>
-
-    <tr>
-      <td height="42"></td>
-    </tr>
-
-    <tr>
-      <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
-        <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
-      </td>
-    </tr>
-  </table>
-</td>
-
-          <td><font size="8">Accted by:<br><br><br><br><br></font></td>
-          <td><font size="8">Checked:<br><br><br><br><br></font></td>
-          <td><font size="8">Approved:<br><br><br><br><br></font></td>
-          <td><font size="8">Noted by:<br><br><br><br><br></font></td>
-          <td><font size="8">Posted by:<br><br><br><br><br></font></td>
-        </tr></table>
-      </td>
-      <td width="5%"></td>
-      <td width="25%">
-        <table border="1" cellpadding="5">
-          <tr><td align="center"><font size="8">Received from __RECEIVED_FROM__</font><br><br></td></tr>
-          <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
-        </table>
-      </td>
-    </tr></table>
-    <br>
-    <table border="0">
+    <table border="0" cellpadding="0" cellspacing="0" width="100%">
+      <tr>
+        <td width="100%">
+          <hr>
+        </td>
+      </tr>
+    </table>
+    <table border="0" cellpadding="1" cellspacing="0" width="100%">
       <tr>
         <td width="10%"><font size="8">Printed:</font></td>
         <td width="15%"><font size="8">'.$currentDate.'</font></td>
@@ -156,15 +119,12 @@ public function Footer()
         <td width="60%"></td>
       </tr>
       <tr>
-        <td><font size="8">Created:</font></td>
+        <td width="10%"><font size="8">Created:</font></td>
         <td width="15%"><font size="8">'.$this->createdDate.'</font></td>
         <td width="15%"><font size="8">'.$this->createdTime.'</font></td>
-        <td></td>
+        <td width="60%"></td>
       </tr>
     </table>';
-
-    // ✅ Safe inject to avoid quote/concat parse errors
-    $html = str_replace('__RECEIVED_FROM__', htmlspecialchars($receivedFrom), $html);
 
     $this->writeHTML($html, true, false, false, false, '');
 }
@@ -822,21 +782,25 @@ $pdf->SetFont('helvetica','',7);
 <br><br>
 <table border="0" cellpadding="1" cellspacing="0" nobr="true" width="100%">
 <tr>
-  <td width="15%"></td>
+  <td width="10%"></td>
   <td width="30%"></td>
   <td width="20%"></td>
-  <td width="40%" colspan="2"><div><font size="16"><b>PURCHASE VOUCHER</b></font></div></td>
+<td width="40%" colspan="2">
+  <div>
+    <font size="16" color="#2F6FA3"><b>PURCHASE VOUCHER</b></font>
+  </div>
+</td>
 </tr>
 <tr><td colspan="5"></td></tr>
 <tr>
-  <td width="65%"></td>
+  <td width="60%"></td>
   <td width="20%" align="left"><font size="10"><b>RR Number:</b></font></td>
-  <td width="15%" align="left"><font size="14"><b><u>{$header->cp_no}</u></b></font></td>
+  <td width="20%" align="left"><font size="14"><b><u>{$header->cp_no}</u></b></font></td>
 </tr>
 <tr>
-  <td width="65%"></td>
+  <td width="60%"></td>
   <td width="20%" align="left"><font size="10"><b>Receipt Date:</b></font></td>
-  <td width="15%"><font size="10"><u>{$header->purchase_date}</u></font></td>
+  <td width="20%"><font size="10"><u>{$header->purchase_date}</u></font></td>
 </tr>
 <tr>
   <td width="15%"><font size="10"><b>VENDOR:</b></font></td>

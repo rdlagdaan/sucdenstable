@@ -300,9 +300,22 @@ if ($explanation === '') {
             ? (string)(DB::table(self::TBL_CP_HDR)->where('id', $existingCpId)->value('cp_no') ?? '')
             : '';
 
-        if ($cpNo === '') {
-            $cpNo = $this->generateNextCpNo($companyId);
-        }
+if ($cpNo === '') {
+    $cpNo = trim((string)($r['receipt_no'] ?? ''));
+
+    if ($cpNo === '') {
+        throw new \RuntimeException('Cannot create Purchase Journal: missing receiving receipt number.');
+    }
+
+    $duplicateCp = DB::table(self::TBL_CP_HDR)
+        ->where('company_id', $companyId)
+        ->where('cp_no', $cpNo)
+        ->exists();
+
+    if ($duplicateCp) {
+        throw new \RuntimeException("Cannot create Purchase Journal: cp_no {$cpNo} already exists.");
+    }
+}
 
         $purchaseAmount = round($sumDebit, 2);
         $amountInWords  = $this->numberToPesoWords($purchaseAmount);

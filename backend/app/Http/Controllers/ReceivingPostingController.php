@@ -33,39 +33,6 @@ class ReceivingPostingController extends Controller
                   ->where('p.company_id', '=', $companyId);
             })
             ->leftJoin('receiving_details as d', 'd.receipt_no', '=', 'r.receipt_no')
-            
-            ->leftJoin('approvals as ap_post', function($j) use ($companyId) {
-                $j->on('ap_post.record_id', '=', 'r.id')
-                ->where('ap_post.module', '=', 'receiving_entries')
-                ->where('ap_post.company_id', '=', $companyId)
-                ->whereRaw("LOWER(ap_post.action) = 'post'")
-                ->where('ap_post.status', '=', 'pending')
-                ->whereNull('ap_post.consumed_at');
-            })
-->leftJoin('approvals as ap_unpost', function($j) use ($companyId) {
-    $j->on('ap_unpost.record_id', '=', 'r.id')
-      ->where('ap_unpost.module', '=', 'receiving_entries')
-      ->where('ap_unpost.company_id', '=', $companyId)
-      ->whereRaw("LOWER(ap_unpost.action) = 'unpost'")
-      ->where('ap_unpost.status', '=', 'pending')
-      ->whereNull('ap_unpost.consumed_at');
-})
-->leftJoin('approvals as ap_delete', function($j) use ($companyId) {
-    $j->on('ap_delete.record_id', '=', 'r.id')
-      ->where('ap_delete.module', '=', 'receiving_entries')
-      ->where('ap_delete.company_id', '=', $companyId)
-      ->whereRaw("LOWER(ap_delete.action) = 'delete'")
-      ->where('ap_delete.status', '=', 'pending')
-      ->whereNull('ap_delete.consumed_at');
-})
-->leftJoin('approvals as ap_process', function($j) use ($companyId) {
-    $j->on('ap_process.record_id', '=', 'r.id')
-      ->where('ap_process.module', '=', 'receiving_entries')
-      ->where('ap_process.company_id', '=', $companyId)
-      ->whereRaw("LOWER(ap_process.action) = 'process'")
-      ->where('ap_process.status', '=', 'pending')
-      ->whereNull('ap_process.consumed_at');
-})
 
             
 ->select(
@@ -81,11 +48,7 @@ class ReceivingPostingController extends Controller
     'p.vend_code as vendor_code',
     'p.sugar_type',
     'p.crop_year',
-    DB::raw('COALESCE(SUM(d.quantity),0) as quantity'),
-    DB::raw("CASE WHEN ap_post.id IS NULL THEN 0 ELSE 1 END as pending_post"),
-    DB::raw("CASE WHEN ap_unpost.id IS NULL THEN 0 ELSE 1 END as pending_unpost"),
-    DB::raw("CASE WHEN ap_delete.id IS NULL THEN 0 ELSE 1 END as pending_delete"),
-    DB::raw("CASE WHEN ap_process.id IS NULL THEN 0 ELSE 1 END as pending_process")
+    DB::raw('COALESCE(SUM(d.quantity),0) as quantity')
 )
 
             ->where('r.company_id', $companyId)
@@ -108,8 +71,7 @@ class ReceivingPostingController extends Controller
             ->groupBy(
                 'r.id','r.receipt_no','r.pbn_number','r.receipt_date','r.mill',
                 'r.posted_flag','r.processed_flag','r.deleted_flag',
-                'p.vendor_name','p.vend_code','p.sugar_type','p.crop_year', 'ap_post.id','ap_unpost.id','ap_delete.id', 'ap_process.id'
-
+                'p.vendor_name','p.vend_code','p.sugar_type','p.crop_year'
             )
             ->orderBy('r.receipt_no', 'asc')
             ->limit(300)
@@ -159,9 +121,244 @@ public function previewJournal(Request $req, int $id, ReceivingPurchaseJournalSe
 
     try {
         $data = $svc->buildJournalPreview($companyId, $id);
+
+        $re = DB::table('receiving_entry')
+            ->where('company_id', $companyId)
+            ->where('id', $id)
+            ->first(['id', 'pbn_number', 'item_number', 'mill']);
+
+        $seed = '';
+
+        if ($re) {
+            $detail = DB::table('pbn_entry_details')
+                ->where('pbn_number', $re->pbn_number)
+                ->where('row', $re->item_number)
+                ->first(['mill_code', 'mill', 'quantity', 'price']);
+
+            $millId = trim((string) ($detail->mill_code ?? ''));
+            if ($millId === '') {
+                $millId = trim((string) ($detail->mill ?? ''));
+            }
+            if ($millId === '') {
+                $millId = trim((string) ($re->mill ?? ''));
+            }
+
+            $qty = number_format((float) ($detail->quantity ?? 0), 2);
+            $price = number_format((float) ($detail->price ?? 0), 2);
+
+            $seed = $millId !== ''
+                ? "{$millId} - {$qty} LKG@{$price}"
+                : "{$qty} LKG@{$price}";
+        }
+
+        if (is_array($data)) {
+            $data['explanation_seed'] = $seed;
+        }
+
         return response()->json($data);
     } catch (\Throwable $e) {
         \Log::warning('receiving preview journal failed', ['id' => $id, 'err' => $e->getMessage()]);
+        return response()->json(['message' => $e->getMessage()], 422);
+    }
+}
+
+public function post(Request $req, int $id)
+{
+    $companyId = (int) ($req->input('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    $userId = (int) ($req->input('user_id') ?: optional($req->user())->id ?: 0);
+
+    $hdrQ = DB::table('receiving_entry')
+        ->where('company_id', $companyId)
+        ->where('id', $id);
+
+    $re = (clone $hdrQ)->first();
+
+    if (!$re) {
+        return response()->json(['message' => 'Receiving entry not found'], 404);
+    }
+
+    if ((bool) ($re->deleted_flag ?? false)) {
+        return response()->json(['message' => 'Cannot POST a deleted Receiving Entry.'], 422);
+    }
+
+    if ((bool) ($re->processed_flag ?? false)) {
+        return response()->json(['message' => 'Cannot POST a processed Receiving Entry.'], 422);
+    }
+
+    if ((bool) ($re->posted_flag ?? false)) {
+        return response()->json(['message' => 'Receiving Entry is already posted.'], 422);
+    }
+
+    $now = now();
+
+    $hdrQ->update([
+        'posted_flag' => true,
+        'posted_by'   => $userId > 0 ? $userId : null,
+        'posted_at'   => $now,
+        'updated_at'  => $now,
+    ]);
+
+    return response()->json(['ok' => true]);
+}
+
+public function unpost(Request $req, int $id)
+{
+    $companyId = (int) ($req->input('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    $userId = (int) ($req->input('user_id') ?: optional($req->user())->id ?: 0);
+
+    $hdrQ = DB::table('receiving_entry')
+        ->where('company_id', $companyId)
+        ->where('id', $id);
+
+    $re = (clone $hdrQ)->first();
+
+    if (!$re) {
+        return response()->json(['message' => 'Receiving entry not found'], 404);
+    }
+
+    if ((bool) ($re->deleted_flag ?? false)) {
+        return response()->json(['message' => 'Cannot UNPOST a deleted Receiving Entry.'], 422);
+    }
+
+    if ((bool) ($re->processed_flag ?? false)) {
+        return response()->json(['message' => 'Cannot UNPOST a processed Receiving Entry.'], 422);
+    }
+
+    if (!(bool) ($re->posted_flag ?? false)) {
+        return response()->json(['message' => 'Receiving Entry is not posted.'], 422);
+    }
+
+    $now = now();
+
+    $hdrQ->update([
+        'posted_flag' => false,
+        'unposted_by' => $userId > 0 ? $userId : null,
+        'unposted_at' => $now,
+        'updated_at'  => $now,
+    ]);
+
+    return response()->json(['ok' => true]);
+}
+
+public function softDelete(Request $req, int $id)
+{
+    $companyId = (int) ($req->input('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    $userId = (int) ($req->input('user_id') ?: optional($req->user())->id ?: 0);
+
+    $hdrQ = DB::table('receiving_entry')
+        ->where('company_id', $companyId)
+        ->where('id', $id);
+
+    $re = (clone $hdrQ)->first();
+
+    if (!$re) {
+        return response()->json(['message' => 'Receiving entry not found'], 404);
+    }
+
+    if ((bool) ($re->deleted_flag ?? false)) {
+        return response()->json(['message' => 'Receiving Entry is already deleted.'], 422);
+    }
+
+    if ((bool) ($re->processed_flag ?? false)) {
+        return response()->json(['message' => 'Cannot DELETE a processed Receiving Entry.'], 422);
+    }
+
+    $now = now();
+
+    $hdrQ->update([
+        'deleted_flag' => true,
+        'deleted_by'   => $userId > 0 ? $userId : null,
+        'updated_at'   => $now,
+    ]);
+
+    return response()->json(['ok' => true]);
+}
+
+public function process(Request $req, int $id, ReceivingPurchaseJournalService $svc)
+{
+    $companyId = (int) ($req->input('company_id') ?: $req->header('X-Company-ID') ?: 0);
+    if ($companyId <= 0) {
+        return response()->json(['message' => 'Missing company_id'], 422);
+    }
+
+    $inputs = $req->validate([
+        'explanation' => ['required', 'string', 'max:1000'],
+        'booking_no'  => ['nullable', 'string', 'max:25'],
+    ]);
+
+    $userId = (int) ($req->input('user_id') ?: optional($req->user())->id ?: 0);
+    $ip     = (string) ($req->ip() ?: '0.0.0.0');
+
+    $hdrQ = DB::table('receiving_entry')
+        ->where('company_id', $companyId)
+        ->where('id', $id);
+
+    $re = (clone $hdrQ)->first();
+
+    if (!$re) {
+        return response()->json(['message' => 'Receiving entry not found'], 404);
+    }
+
+    if ((bool) ($re->deleted_flag ?? false)) {
+        return response()->json(['message' => 'Cannot PROCESS a deleted Receiving Entry.'], 422);
+    }
+
+    if (!(bool) ($re->posted_flag ?? false)) {
+        return response()->json(['message' => 'Cannot PROCESS: Receiving Entry is not posted yet.'], 422);
+    }
+
+    if ((bool) ($re->processed_flag ?? false)) {
+        return response()->json(['message' => 'Receiving Entry is already processed.'], 422);
+    }
+
+    try {
+        $preview = $svc->buildJournalPreview($companyId, $id);
+
+        if (empty($preview['totals']['balanced'])) {
+            return response()->json(['message' => 'Cannot PROCESS: Purchase Journal is not balanced.'], 422);
+        }
+
+        $cpId = $svc->upsertPurchaseJournalFromReceiving(
+            $companyId,
+            $id,
+            $userId,
+            $ip,
+            $inputs
+        );
+
+        $now = now();
+
+        $hdrQ->update([
+            'processed_flag'   => true,
+            'processed_by'     => $userId > 0 ? $userId : null,
+            'processed_at'     => $now,
+            'cash_purchase_id' => $cpId,
+            'updated_at'       => $now,
+        ]);
+
+        return response()->json([
+            'ok'               => true,
+            'cash_purchase_id' => $cpId,
+        ]);
+    } catch (\Throwable $e) {
+        \Log::error('receiving posting process failed', [
+            'id'         => $id,
+            'company_id' => $companyId,
+            'err'        => $e->getMessage(),
+        ]);
+
         return response()->json(['message' => $e->getMessage()], 422);
     }
 }

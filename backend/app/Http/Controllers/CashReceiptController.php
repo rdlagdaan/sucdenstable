@@ -104,38 +104,53 @@ class MyReceiptVoucherPDF extends \TCPDF {
         $currentDate = date('M d, Y');
         $currentTime = date('h:i:sa');
 
-        // ✅ Company label in footer (company_id 1 vs 2)
         $companyId = (int)($this->companyId ?? 0);
         $receivedFrom = ($companyId === 2)
             ? 'AMEROP PHILIPPINES, INC.'
             : 'SUCDEN PHILIPPINES, INC.';
 
-        // Build the HTML normally (no risky inline concatenation for company name)
         $html = '
         <table border="0"><tr>
           <td width="70%">
-            <table border="1" cellpadding="5"><tr>
-
-              <td width="25%">
-                <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
-                  <tr>
-                    <td valign="top" align="left"><font size="8">Prepared:</font></td>
-                  </tr>
-                  <tr>
-                    <td height="42"></td>
-                  </tr>
-                  <tr>
-                    <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
-                      <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-
-              <td><font size="8">Checked:<br><br><br><br><br></font></td>
-              <td><font size="8">Noted by:<br><br><br><br><br></font></td>
-              <td><font size="8">Posted by:<br><br><br><br><br></font></td>
-            </tr></table>
+            <table border="1" cellpadding="5" cellspacing="0" width="100%">
+              <tr>
+                <td width="33.33%">
+                  <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                    <tr>
+                      <td valign="top" align="left"><font size="8">Prepared:</font></td>
+                    </tr>
+                    <tr>
+                      <td height="42"></td>
+                    </tr>
+                    <tr>
+                      <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
+                        <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+                <td width="33.33%">
+                  <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                    <tr>
+                      <td valign="top" align="left"><font size="8">Checked:</font></td>
+                    </tr>
+                    <tr>
+                      <td height="54"></td>
+                    </tr>
+                  </table>
+                </td>
+                <td width="33.34%">
+                  <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                    <tr>
+                      <td valign="top" align="left"><font size="8">Approved:</font></td>
+                    </tr>
+                    <tr>
+                      <td height="54"></td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
           </td>
           <td width="5%"></td>
           <td width="25%">
@@ -161,7 +176,6 @@ class MyReceiptVoucherPDF extends \TCPDF {
           </tr>
         </table>';
 
-        // ✅ Inject company name safely (no quote issues)
         $html = str_replace('__RECEIVED_FROM__', htmlspecialchars($receivedFrom), $html);
 
         $this->writeHTML($html, true, false, false, false, '');
@@ -828,12 +842,9 @@ public function formPdf(Request $req, $id)
     // ✅ pass company_id so Header() can choose logo
     $pdf->setCompanyId($companyId ? (int)$companyId : null);
 
-    // ✅ Prepared by initials (URL user_id, else header user_id)
-    $preparedUserId = (int) ($req->query('user_id') ?: 0);
-    if ($preparedUserId <= 0) {
-        $preparedUserId = (int) ($header->user_id ?? 0);
-    }
-    $pdf->setPreparedByInitials($this->userInitials($preparedUserId));
+    // TEMP DEBUG: show ONLY the prepared_by coming from frontend
+    $preparedBy = strtoupper(trim((string) $req->query('prepared_by', '')));
+    $pdf->setPreparedByInitials($preparedBy);
 
     $pdf->setPrintHeader(true);
     $pdf->setPrintFooter(true);
@@ -860,55 +871,150 @@ public function formPdf(Request $req, $id)
     $custName        = (string)($header->cust_name ?? $header->cust_id);
     $explanation     = (string)($header->details ?? '');
 
-    // =================== TOP (header + details box) ===================
-    $tblTop = <<<EOD
-<br><br>
-<table border="0" cellpadding="1" cellspacing="0" width="100%">
-<tr>
-  <td width="10%"></td>
-  <td width="20%"></td>
-  <td width="20%"></td>
-  <td width="50%" colspan="2" align="left"><div><font size="16"><b>RECEIPT VOUCHER</b></font></div></td>
-</tr>
-<tr><td colspan="5"></td></tr>
-<tr>
-  <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left" valign="middle" height="30"><font size="14"><b>RV Number:</b></font></td>
-  <td width="14%" align="left"><font size="18"><b><u>{$rvNumber}</u></b></font></td>
-</tr>
-<tr>
-  <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left"><font size="10"><b>Date:</b></font></td>
-  <td width="14%" align="left"><font size="10"><u>{$receiptDateText}</u></font></td>
-</tr>
-<tr>
-  <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left"><font size="12"><b>Receipt Number:</b></font></td>
-  <td width="14%" align="left"><font size="12"><u>{$collectionNo}</u></font></td>
-</tr>
-<tr>
-  <td width="15%"><font size="10"><b>PAYOR</b></font></td>
-  <td width="80%" colspan="4"><font size="14"><u>{$custName}</u></font></td>
-</tr>
-<tr>
-  <td width="15%"><font size="10"><b>AMOUNT:</b></font></td>
-  <td width="80%" colspan="4"><font size="10"><u>{$amountInWords}</u></font></td>
-</tr>
-</table>
+    // =================== TOP (match Check Voucher layout) ===================
 
-<table><tr><td><br><br></td></tr></table>
+    $voucherTitleX = 120;
+    $voucherTitleY = 24;
+
+    $labelX   = 112;
+    $valueX   = 150;
+    $lineEndX = 192;
+
+    $row1Y = 36; // RV Number
+    $row2Y = 44; // Date
+    $row3Y = 52; // Receipt Number
+
+    // Title
+    $pdf->SetFont('helvetica', 'B', 16);
+
+    // Match Check Voucher blue title style
+    $pdf->SetTextColor(0, 102, 153);
+
+    $pdf->SetXY($voucherTitleX, $voucherTitleY);
+    $pdf->Cell(60, 6, 'RECEIPT VOUCHER', 0, 0, 'L', false);
+
+    // Restore black text
+    $pdf->SetTextColor(0, 0, 0);
+
+    // Labels
+    $pdf->SetFont('helvetica', 'B', 11);
+
+    $pdf->SetXY($labelX, $row1Y);
+    $pdf->Cell(28, 5, 'RV Number:', 0, 0, 'L', false);
+
+    $pdf->SetXY($labelX, $row2Y);
+    $pdf->Cell(28, 5, 'Date:', 0, 0, 'L', false);
+
+    $pdf->SetXY($labelX, $row3Y);
+    $pdf->Cell(36, 5, 'Receipt Number:', 0, 0, 'L', false);
+
+    // Values
+    $pdf->SetFont('helvetica', 'B', 18);
+    $pdf->SetXY($valueX, $row1Y - 3.0);
+    $pdf->Cell(32, 6, $rvNumber, 0, 0, 'L', false);
+    $pdf->Line($valueX, $row1Y + 5.0, $lineEndX, $row1Y + 5.0);
+
+    $pdf->SetFont('helvetica', 'B', 11);
+    $pdf->SetXY($valueX, $row2Y - 0.8);
+    $pdf->Cell(32, 5, $receiptDateText, 0, 0, 'L', false);
+    $pdf->Line($valueX, $row2Y + 4.2, $lineEndX, $row2Y + 4.2);
+
+    $receiptNoText  = (string) ($collectionNo ?? '');
+    $receiptNoX     = $valueX + 2;
+    $receiptNoY     = $row3Y - 0.8;
+    $receiptNoW     = 42;
+    $receiptNoLineH = 4.0;
+
+    $pdf->SetFont('helvetica', 'B', 10);
+    $receiptNoLines = max(1, $pdf->getNumLines($receiptNoText, $receiptNoW));
+    $receiptNoH     = $receiptNoLines * $receiptNoLineH;
+
+    $pdf->SetXY($receiptNoX, $receiptNoY);
+    $pdf->MultiCell(
+        $receiptNoW,
+        $receiptNoLineH,
+        $receiptNoText,
+        0,
+        'L',
+        false,
+        1,
+        $receiptNoX,
+        $receiptNoY,
+        true,
+        0,
+        false,
+        true,
+        0,
+        'T',
+        false
+    );
+    $pdf->Line($receiptNoX, $receiptNoY + $receiptNoH + 0.6, $lineEndX, $receiptNoY + $receiptNoH + 0.6);
+
+    // PAYOR / AMOUNT block aligned like Check Voucher
+    $payLabelX = 15;
+    $payValueX = 42;
+    $payorY    = 68;
+    $amountY   = 76;
+
+    $pdf->SetFont('helvetica', 'B', 10);
+    $pdf->SetXY($payLabelX, $payorY);
+    $pdf->Cell(24, 5, 'PAYOR', 0, 0, 'L', false);
+
+    $pdf->SetXY($payLabelX, $amountY);
+    $pdf->Cell(24, 5, 'AMOUNT:', 0, 0, 'L', false);
+
+    $pdf->SetFont('helvetica', '', 14);
+    $pdf->SetXY($payValueX, $payorY - 0.5);
+    $pdf->Cell(95, 6, $custName, 0, 0, 'L', false);
+    $pdf->Line($payValueX, $payorY + 5.2, 140, $payorY + 5.2);
+
+    $amountText  = (string) ($amountInWords ?? '');
+    $amountX     = $payValueX;
+    $amountTopY  = $amountY - 0.5;
+    $amountW     = 118;
+    $amountLineH = 4.2;
+
+    $pdf->SetFont('helvetica', '', 10);
+    $amountLines = max(1, $pdf->getNumLines($amountText, $amountW));
+    $amountH     = $amountLines * $amountLineH;
+
+    $pdf->SetXY($amountX, $amountTopY);
+    $pdf->MultiCell(
+        $amountW,
+        $amountLineH,
+        $amountText,
+        0,
+        'L',
+        false,
+        1,
+        $amountX,
+        $amountTopY,
+        true,
+        0,
+        false,
+        true,
+        0,
+        'T',
+        false
+    );
+    $pdf->Line($amountX, $amountTopY + $amountH + 0.4, 147, $amountTopY + $amountH + 0.4);
+
+    // Details / Amount table starts below the manually drawn top block
+    $pdf->SetY(90);
+
+    $tblTop = <<<EOD
 <table border="1" cellspacing="0" cellpadding="5">
   <tr>
     <td width="70%" align="center"><font size="10"><b>DETAILS</b></font></td>
     <td width="30%" align="center"><font size="10"><b>AMOUNT</b></font></td>
   </tr>
   <tr>
-    <td height="80"><font size="10">{$explanation}</font></td>
+    <td height="60"><font size="10">{$explanation}</font></td>
     <td align="right"><font size="10">{$receiptAmtFmt}</font></td>
   </tr>
 </table>
 
-<table><tr><td><br><br></td></tr></table>
+<table><tr><td height="2"></td></tr></table>
 EOD;
 
     $pdf->writeHTML($tblTop, true, false, false, false, '');

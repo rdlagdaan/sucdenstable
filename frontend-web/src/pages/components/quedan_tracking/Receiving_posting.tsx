@@ -18,11 +18,6 @@ type Row = {
   posted_flag?: boolean | number;
   processed_flag?: boolean | number;
   deleted_flag?: boolean | number;
-  pending_post?: boolean | number;
-  pending_unpost?: boolean | number;
-  pending_delete?: boolean | number;
-pending_process?: boolean | number;
-
 };
 
 const asBool = (v: any) => v === true || v === 1 || v === '1';
@@ -79,19 +74,6 @@ const statusLabel = (r: Row) => {
   const posted = asBool(r.posted_flag);
   const proc = asBool(r.processed_flag);
 
-  // ✅ add these
-  const pendingPost = asBool(r.pending_post);
-  const pendingUnpost = asBool(r.pending_unpost);
-  const pendingDelete = asBool(r.pending_delete);
-
-  if (pendingDelete) return { text: 'DELETE REQUESTED', cls: 'bg-orange-100 text-orange-800' };
-  if (pendingPost)   return { text: 'POST REQUESTED', cls: 'bg-orange-100 text-orange-800' };
-  if (pendingUnpost) return { text: 'UNPOST REQUESTED', cls: 'bg-orange-100 text-orange-800' };
-const pendingProcess = asBool(r.pending_process);
-
-if (pendingProcess) return { text: 'PROCESS REQUESTED', cls: 'bg-orange-100 text-orange-800' };
-
-  // existing logic
   if (del) return { text: 'DELETED', cls: 'bg-red-100 text-red-700' };
   if (posted && proc) return { text: 'POSTED + PROCESSED (LOCKED)', cls: 'bg-gray-200 text-gray-800' };
   if (posted) return { text: 'POSTED', cls: 'bg-green-100 text-green-800' };
@@ -99,69 +81,273 @@ if (pendingProcess) return { text: 'PROCESS REQUESTED', cls: 'bg-orange-100 text
 };
 
 
-const requestAction = async (action: 'POST'|'UNPOST'|'DELETE'|'PROCESS') => {
-    if (!selected) return;
+const performAction = async (action: 'POST'|'UNPOST'|'DELETE'|'PROCESS') => {
+  if (!selected) return;
 
-    const del = asBool(selected.deleted_flag);
-    const posted = asBool(selected.posted_flag);
-    const proc = asBool(selected.processed_flag);
+  const del = asBool(selected.deleted_flag);
+  const posted = asBool(selected.posted_flag);
+  const proc = asBool(selected.processed_flag);
 
-    // basic client guards (server will enforce later in Bite B/C too)
-    if (proc) {
-      toast.error('This RR is already processed. No further actions allowed.');
-      return;
-    }
-    if (action === 'UNPOST' && !posted) {
-      toast.error('Cannot request UNPOST because this RR is not posted.');
-      return;
-    }
-    if (action === 'POST' && posted) {
-      toast.error('Already posted.');
-      return;
-    }
-    if (action === 'DELETE' && del) {
-      toast.error('Already deleted.');
-      return;
-    }
+  if (proc && action !== 'PROCESS') {
+    toast.error('This RR is already processed. No further actions allowed.');
+    return;
+  }
 
-    const { value: reason } = await Swal.fire({
-      title: `Request ${action}`,
-      input: 'textarea',
-      inputLabel: 'Reason (required)',
-      inputPlaceholder: 'Type your reason...',
-      inputAttributes: { 'aria-label': 'Reason' },
+  if (action === 'POST' && posted) {
+    toast.error('Already posted.');
+    return;
+  }
+
+  if (action === 'UNPOST' && !posted) {
+    toast.error('Cannot unpost because this RR is not posted.');
+    return;
+  }
+
+  if (action === 'DELETE' && del) {
+    toast.error('Already deleted.');
+    return;
+  }
+
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+  const companyId = Number(user?.company_id || localStorage.getItem('company_id') || 0);
+  const userId = Number(user?.id || user?.user_id || 0);
+
+  if (!companyId) {
+    toast.error('Missing company id.');
+    return;
+  }
+
+  if (action === 'POST') {
+    const { isConfirmed } = await Swal.fire({
+      title: 'Post this Receiving Entry?',
+      icon: 'question',
       showCancelButton: true,
-      confirmButtonText: 'Submit Request',
-      preConfirm: (v) => {
-        const t = (v || '').trim();
-        if (!t) {
-          Swal.showValidationMessage('Reason is required');
-        }
-        return t;
-      },
+      confirmButtonText: 'Post',
     });
 
-    if (!reason) return;
+    if (!isConfirmed) return;
 
     try {
-const companyId = Number(localStorage.getItem('company_id') || 0);
-
-await napi.post('/approvals/request-edit', {
-  module: 'receiving_entries',
-  record_id: selected.id,
-  company_id: companyId,   // ✅ REQUIRED so Inbox Company filter can find it
-  action,
-  reason,
-});
-
-
-      toast.success(`Request submitted: ${action}`);
+      await napi.post(`/receiving-posting/post/${selected.id}`, {
+        company_id: companyId,
+        user_id: userId,
+      });
+      toast.success('Receiving Entry posted.');
       await load();
     } catch (e: any) {
       console.error(e);
-      toast.error(e?.response?.data?.message || `Failed to submit ${action} request`);
+      toast.error(e?.response?.data?.message || 'Failed to post Receiving Entry.');
     }
-  };
+    return;
+  }
+
+  if (action === 'UNPOST') {
+    const { isConfirmed } = await Swal.fire({
+      title: 'Unpost this Receiving Entry?',
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonText: 'Unpost',
+    });
+
+    if (!isConfirmed) return;
+
+    try {
+      await napi.post(`/receiving-posting/unpost/${selected.id}`, {
+        company_id: companyId,
+        user_id: userId,
+      });
+      toast.success('Receiving Entry unposted.');
+      await load();
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.response?.data?.message || 'Failed to unpost Receiving Entry.');
+    }
+    return;
+  }
+
+  if (action === 'DELETE') {
+    const { isConfirmed } = await Swal.fire({
+      title: 'Delete this Receiving Entry?',
+      text: 'This is a soft delete.',
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonText: 'Delete',
+      confirmButtonColor: '#dc2626',
+    });
+
+    if (!isConfirmed) return;
+
+    try {
+      await napi.post(`/receiving-posting/delete/${selected.id}`, {
+        company_id: companyId,
+        user_id: userId,
+      });
+      toast.success('Receiving Entry deleted.');
+      await load();
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.response?.data?.message || 'Failed to delete Receiving Entry.');
+    }
+    return;
+  }
+
+  if (action === 'PROCESS') {
+    try {
+      const previewRes = await napi.get(`/receiving-posting/preview-journal/${selected.id}`, {
+        params: { company_id: companyId },
+      });
+
+      const preview = previewRes.data || {};
+      const lines = Array.isArray(preview?.lines)
+        ? preview.lines
+        : Array.isArray(preview?.entries)
+        ? preview.entries
+        : Array.isArray(preview?.details)
+        ? preview.details
+        : [];
+
+      const totals = preview?.totals || {};
+      const balanced = !!totals.balanced;
+
+      const explanationSeed = String(preview?.explanation_seed || '').trim();
+
+      const html = `
+        <div style="text-align:left; font-size:13px;">
+          <div style="
+            display:flex; align-items:center; justify-content:space-between;
+            padding:10px 12px; border:1px solid #e5e7eb; border-radius:8px;
+            background:#f9fafb; margin-bottom:12px;
+          ">
+            <div>
+              <div style="font-weight:600; margin-bottom:2px;">Totals</div>
+              <div style="color:#374151;">
+                Debit: <b>${totals.debit ?? ''}</b> &nbsp; | &nbsp;
+                Credit: <b>${totals.credit ?? ''}</b>
+              </div>
+            </div>
+
+            <div style="
+              padding:6px 10px; border-radius:999px; font-weight:700;
+              border:1px solid ${balanced ? '#86efac' : '#fca5a5'};
+              background:${balanced ? '#dcfce7' : '#fee2e2'};
+              color:${balanced ? '#166534' : '#991b1b'};
+            ">
+              ${balanced ? 'BALANCED' : 'NOT BALANCED'}
+            </div>
+          </div>
+
+          <div style="
+            border:1px solid #e5e7eb; border-radius:8px; padding:12px;
+            margin-bottom:12px; background:#fff;
+          ">
+            <div style="font-weight:700; margin-bottom:10px;">Processing Details</div>
+
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+              <div>
+                <label style="font-size:12px; color:#374151;">Booking No <span style="color:#6b7280">(optional)</span></label>
+                <input id="bk" class="swal2-input" value=""
+                  placeholder="Booking no"
+                  style="margin:6px 0 0 0; width:100%;" />
+              </div>
+              <div></div>
+            </div>
+
+            <div style="margin-top:10px;">
+              <label style="font-size:12px; color:#374151;">
+                Explanation <span style="color:#ef4444">*</span>
+              </label>
+              <textarea id="exp" class="swal2-textarea"
+                placeholder="Write a short explanation for this process..."
+                style="margin:6px 0 0 0; height:95px; width:100%;">${explanationSeed}</textarea>
+            </div>
+          </div>
+
+          <div style="border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;">
+            <div style="padding:10px 12px; background:#f9fafb; border-bottom:1px solid #e5e7eb; font-weight:700;">
+              Journal Entries (Review)
+            </div>
+
+            <div style="max-height:260px; overflow:auto;">
+              <table style="width:100%; border-collapse:collapse; font-size:12px">
+                <thead>
+                  <tr style="background:#ffffff; position:sticky; top:0;">
+                    <th style="border-bottom:1px solid #eee; padding:8px; text-align:left;">Acct</th>
+                    <th style="border-bottom:1px solid #eee; padding:8px; text-align:left;">Description</th>
+                    <th style="border-bottom:1px solid #eee; padding:8px; text-align:right;">Debit</th>
+                    <th style="border-bottom:1px solid #eee; padding:8px; text-align:right;">Credit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${
+                    lines.map((l:any, idx:number) => `
+                      <tr style="background:${idx % 2 === 0 ? '#ffffff' : '#fafafa'};">
+                        <td style="border-bottom:1px solid #f2f2f2; padding:8px;">${l.acct_code ?? ''}</td>
+                        <td style="border-bottom:1px solid #f2f2f2; padding:8px;">${l.acct_desc ?? ''}</td>
+                        <td style="border-bottom:1px solid #f2f2f2; padding:8px; text-align:right;">${l.debit ?? ''}</td>
+                        <td style="border-bottom:1px solid #f2f2f2; padding:8px; text-align:right;">${l.credit ?? ''}</td>
+                      </tr>
+                    `).join('')
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      `;
+
+      const { isConfirmed, value } = await Swal.fire({
+        title: 'Process this Receiving Entry?',
+        html,
+        width: 980,
+        showCancelButton: true,
+        confirmButtonText: balanced ? 'Process' : 'Cannot Process (Not Balanced)',
+        confirmButtonColor: balanced ? undefined : '#9ca3af',
+
+        preConfirm: () => {
+          const bk = (document.getElementById('bk') as HTMLInputElement)?.value?.trim() || '';
+          const exp = (document.getElementById('exp') as HTMLTextAreaElement)?.value?.trim() || '';
+
+          if (!balanced) return false;
+
+          if (!exp) {
+            Swal.showValidationMessage('Explanation is required.');
+            return false;
+          }
+
+          return {
+            booking_no: bk || null,
+            explanation: exp,
+          };
+        },
+
+        didOpen: () => {
+          const btn = Swal.getConfirmButton();
+          if (btn && !balanced) btn.setAttribute('disabled', 'true');
+
+          setTimeout(() => {
+            const exp = document.getElementById('exp') as HTMLTextAreaElement | null;
+            exp?.focus();
+          }, 0);
+        },
+      });
+
+      if (!isConfirmed) return;
+
+      await napi.post(`/receiving-posting/process/${selected.id}`, {
+        company_id: companyId,
+        user_id: userId,
+        ...(value || {}),
+      });
+
+      toast.success('Receiving Entry processed.');
+      await load();
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.response?.data?.message || 'Failed to process Receiving Entry.');
+    }
+  }
+};
 
   return (
     <div className="p-4">
@@ -249,62 +435,48 @@ await napi.post('/approvals/request-edit', {
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   className="rounded bg-green-600 px-3 py-2 text-white disabled:bg-gray-300"
-                  onClick={() => requestAction('POST')}
-disabled={
-  asBool(selected.posted_flag) ||
-  asBool(selected.processed_flag) ||
-  asBool(selected.deleted_flag) ||
-  asBool(selected.pending_post) ||
-  asBool(selected.pending_process)
-}
-
+                  onClick={() => performAction('POST')}
+                  disabled={
+                    asBool(selected.posted_flag) ||
+                    asBool(selected.processed_flag) ||
+                    asBool(selected.deleted_flag)
+                  }
                 >
-                  Request POST
+                  Post
                 </button>
 
                 <button
                   className="rounded bg-yellow-600 px-3 py-2 text-white disabled:bg-gray-300"
-                  onClick={() => requestAction('UNPOST')}
-disabled={
-  !asBool(selected.posted_flag) ||
-  asBool(selected.processed_flag) ||
-  asBool(selected.deleted_flag) ||
-  asBool(selected.pending_unpost) ||
-  asBool(selected.pending_process)
-}
-
+                  onClick={() => performAction('UNPOST')}
+                  disabled={
+                    !asBool(selected.posted_flag) ||
+                    asBool(selected.processed_flag) ||
+                    asBool(selected.deleted_flag)
+                  }
                 >
-                  Request UNPOST
+                  Unpost
                 </button>
 
                 <button
                   className="rounded bg-red-600 px-3 py-2 text-white disabled:bg-gray-300"
-                  onClick={() => requestAction('DELETE')}
-disabled={
-  asBool(selected.deleted_flag) ||
-  asBool(selected.processed_flag) ||
-  asBool(selected.pending_delete) ||
-  asBool(selected.pending_process)
-}
-
+                  onClick={() => performAction('DELETE')}
+                  disabled={
+                    asBool(selected.deleted_flag) ||
+                    asBool(selected.processed_flag)
+                  }
                 >
-                  Request SOFT DELETE
+                  Delete
                 </button>
 <button
   className="rounded bg-blue-600 px-3 py-2 text-white disabled:bg-gray-300"
-  onClick={() => requestAction('PROCESS')}
-disabled={
-  !asBool(selected.posted_flag) ||
-  asBool(selected.processed_flag) ||
-  asBool(selected.deleted_flag) ||
-  asBool(selected.pending_process) ||
-  asBool(selected.pending_post) ||
-  asBool(selected.pending_unpost) ||
-  asBool(selected.pending_delete)
-}
-
+  onClick={() => performAction('PROCESS')}
+  disabled={
+    !asBool(selected.posted_flag) ||
+    asBool(selected.processed_flag) ||
+    asBool(selected.deleted_flag)
+  }
 >
-  Request PROCESS
+  Process
 </button>
 
               </div>
@@ -312,7 +484,7 @@ disabled={
               <div className="mt-3 text-xs text-gray-500">
                 Notes:
                 <ul className="list-disc pl-5">
-                  <li>Requests appear in Approvals Inbox for supervisor action.</li>
+                  <li>Post, Unpost, Delete, and Process now execute directly in this module.</li>
                   <li>Processed entries cannot be unposted or deleted.</li>
                 </ul>
               </div>

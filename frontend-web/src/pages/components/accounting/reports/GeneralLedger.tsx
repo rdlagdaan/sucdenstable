@@ -13,7 +13,7 @@ type JobState = {
   status: "queued" | "running" | "done" | "failed" | "missing";
   progress: number;
   message?: string;
-  format?: "pdf" | "xls";
+  format?: "pdf" | "xls" | "xlsx";
   orientation?: "landscape" | "portrait";
 
   file_rel?: string | null;        // optional, but nice to have
@@ -184,7 +184,7 @@ export default function GeneralLedger() {
   const pollRef = useRef<number | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-
+  const [reportKind, setReportKind] = useState<"general-ledger" | "monthly-expense" | "tax-list">("general-ledger");
   const accountOptions = useMemo(
     () =>
       accounts.map((r) => ({
@@ -249,14 +249,25 @@ export default function GeneralLedger() {
     };
   }, [companyId]);
 
-  const startJob = async (payload: StartPayload) => {
+  const startJob = async (
+    payload: StartPayload,
+    kind: "general-ledger" | "monthly-expense" | "tax-list" = "general-ledger"
+  ) => {
     setActionError(null);
     setModalOpen(true);
+    setReportKind(kind);
     setJob({ status: "queued", progress: 0, message: "Queued" });
     setTicket(null);
 
     try {
-      const { data } = await napi.post("general-ledger/report", payload);
+      const startUrl =
+        kind === "monthly-expense"
+          ? "general-ledger/expenses/report"
+          : kind === "tax-list"
+          ? "general-ledger/tax-report"
+          : "general-ledger/report";
+
+      const { data } = await napi.post(startUrl, payload);
       if (!data?.ticket) throw new Error("No ticket returned from server.");
       const t = data.ticket as string;
       setTicket(t);
@@ -264,7 +275,14 @@ export default function GeneralLedger() {
       // start polling
       pollRef.current = window.setInterval(async () => {
         try {
-          const { data: s } = await napi.get<JobState>(`general-ledger/report/${t}/status`);
+          const statusUrl =
+            kind === "monthly-expense"
+              ? `general-ledger/expenses/report/${t}/status`
+              : kind === "tax-list"
+              ? `general-ledger/tax-report/${t}/status`
+              : `general-ledger/report/${t}/status`;
+
+          const { data: s } = await napi.get<JobState>(statusUrl);
           setJob(s);
           if (s.status === "done" || s.status === "failed" || s.status === "missing") {
             if (pollRef.current) {
@@ -314,16 +332,108 @@ export default function GeneralLedger() {
     });
   };
 
+
+
+  const handleExpensePdf = () => {
+    if (!startAccount || !endAccount || !startDate || !endDate) {
+      setActionError("Please select account range and dates.");
+      return;
+    }
+
+    startJob(
+      {
+        startAccount,
+        endAccount,
+        startDate,
+        endDate,
+        format: "pdf",
+        orientation: "landscape",
+        company_id: companyId,
+      },
+      "monthly-expense"
+    );
+  };
+
+  const handleExpenseExcel = () => {
+    if (!startAccount || !endAccount || !startDate || !endDate) {
+      setActionError("Please select account range and dates.");
+      return;
+    }
+
+    startJob(
+      {
+        startAccount,
+        endAccount,
+        startDate,
+        endDate,
+        format: "xls",
+        orientation: "landscape",
+        company_id: companyId,
+      },
+      "monthly-expense"
+    );
+  };  
+
+
+
+  const handleTaxPdf = () => {
+    if (!startAccount || !endAccount || !startDate || !endDate) {
+      setActionError("Please select account range and dates.");
+      return;
+    }
+
+    startJob(
+      {
+        startAccount,
+        endAccount,
+        startDate,
+        endDate,
+        format: "pdf",
+        orientation: "landscape",
+        company_id: companyId,
+      },
+      "tax-list"
+    );
+  };
+
+  const handleTaxExcel = () => {
+    if (!startAccount || !endAccount || !startDate || !endDate) {
+      setActionError("Please select account range and dates.");
+      return;
+    }
+
+    startJob(
+      {
+        startAccount,
+        endAccount,
+        startDate,
+        endDate,
+        format: "xls",
+        orientation: "landscape",
+        company_id: companyId,
+      },
+      "tax-list"
+    );
+  };
+
+
   const viewFile = async () => {
     if (!ticket || !job) return;
     try {
+      const base =
+        reportKind === "monthly-expense"
+          ? `general-ledger/expenses/report/${ticket}`
+          : reportKind === "tax-list"
+          ? `general-ledger/tax-report/${ticket}`
+          : `general-ledger/report/${ticket}`;
+
       if (job.format === "pdf") {
-        const res = await napi.get(`general-ledger/report/${ticket}/view`, {
+        const res = await napi.get(`${base}/view`, {
           responseType: "blob",
         });
         openBlob(res.data);
       } else {
-        const res = await napi.get(`general-ledger/report/${ticket}/download`, {
+        const res = await napi.get(`${base}/download`, {
           responseType: "blob",
         });
         saveBlob(res.data, getDownloadName(job));
@@ -336,7 +446,14 @@ export default function GeneralLedger() {
   const downloadFile = async () => {
     if (!ticket || !job) return;
     try {
-      const res = await napi.get(`general-ledger/report/${ticket}/download`, {
+      const base =
+        reportKind === "monthly-expense"
+          ? `general-ledger/expenses/report/${ticket}`
+          : reportKind === "tax-list"
+          ? `general-ledger/tax-report/${ticket}`
+          : `general-ledger/report/${ticket}`;
+
+      const res = await napi.get(`${base}/download`, {
         responseType: "blob",
       });
       /*const name =
@@ -423,6 +540,43 @@ export default function GeneralLedger() {
         >
           EXCEL
         </button>
+
+        <button
+          className="px-3 py-2 rounded bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-60"
+          disabled={loadingAccounts || !accounts.length}
+          onClick={handleExpensePdf}
+          title="Monthly Expense Report PDF"
+        >
+          Expense PDF
+        </button>
+
+        <button
+          className="px-3 py-2 rounded bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-60"
+          disabled={loadingAccounts || !accounts.length}
+          onClick={handleExpenseExcel}
+          title="Monthly Expense Report Excel"
+        >
+          Expense Excel
+        </button>
+
+        <button
+          className="px-3 py-2 rounded bg-fuchsia-600 text-white hover:bg-fuchsia-700 disabled:opacity-60"
+          disabled={loadingAccounts || !accounts.length}
+          onClick={handleTaxPdf}
+          title="Tax List Report PDF"
+        >
+          Tax PDF
+        </button>
+
+        <button
+          className="px-3 py-2 rounded bg-cyan-600 text-white hover:bg-cyan-700 disabled:opacity-60"
+          disabled={loadingAccounts || !accounts.length}
+          onClick={handleTaxExcel}
+          title="Tax List Report Excel"
+        >
+          Tax Excel
+        </button>
+
       </div>
 
       {modalOpen && (

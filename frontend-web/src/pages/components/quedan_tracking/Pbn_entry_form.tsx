@@ -91,6 +91,10 @@ export default function PurchaseBookNote() {
   const [pbnDate, setPbnDate] = useState('');
 const [note, setNote] = useState('');
 
+const [selectedTerms, setSelectedTerms] = useState('');
+const [termsSearch, setTermsSearch] = useState('');
+const [termsOptions, setTermsOptions] = useState<{ code: string; description: string }[]>([]);
+
   //Establishing data state for the Handsontable
   const [handsontableEnabled, setHandsontableEnabled] = useState(false);
   const [mainEntryId, setMainEntryId] = useState<number | null>(null);
@@ -473,6 +477,38 @@ useEffect(() => {
 }, []);
 
 
+useEffect(() => {
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+
+  let cancelled = false;
+
+  async function loadTerms() {
+    try {
+      const { data } = await napi.get('/pbn/terms', {
+        params: { company_id: user?.company_id || '' },
+      });
+
+      const items = Array.isArray(data)
+        ? data
+            .map((x: any) => ({
+              code: String(x?.term_code || '').trim(),
+              description: String(x?.term_name || '').trim(),
+            }))
+            .filter((x: any) => !!x.code)
+        : [];
+
+      if (!cancelled) setTermsOptions(items);
+    } catch (e) {
+      console.error('Failed to load terms', e);
+      if (!cancelled) setTermsOptions([]);
+    }
+  }
+
+  loadTerms();
+  return () => { cancelled = true; };
+}, []);
+
   /*useEffect(() => {
     napi.get('/api/mills').then(res => setMills(res.data));
   }, []);*/
@@ -541,7 +577,7 @@ useEffect(() => {
     setVendorName('');
     setPbnDate('');
     setNote('');
-
+    setSelectedTerms('');
     setPosted(false);
     setHandsontableEnabled(false);
     setMainEntryId(null);
@@ -551,6 +587,52 @@ useEffect(() => {
     setIsExistingRecord(false);
     toast.success('✅ PBN Entry form is now ready for new entry');
   };
+
+
+const handleSaveMain = async () => {
+  if (!mainEntryId) {
+    toast.info('Please select or save a PO first.');
+    return;
+  }
+  if (posted) {
+    toast.info('This PO is posted and cannot be updated.');
+    return;
+  }
+
+  const confirm = await Swal.fire({
+    title: 'Save Main Changes?',
+    text: 'This will update Sugar Type, Crop Year, PO Date, Vendor, Note and Terms.',
+    icon: 'question',
+    showCancelButton: true,
+    confirmButtonText: 'Yes, Save Main',
+  });
+
+  if (!confirm.isConfirmed) return;
+
+  try {
+    const storedUser = localStorage.getItem('user');
+    const user = storedUser ? JSON.parse(storedUser) : null;
+
+    await napi.post('/pbn/update-main', {
+  id: mainEntryId,
+  sugar_type: selectedSugarType,
+  crop_year: selectedCropYear,
+  pbn_date: pbnDate,
+  vend_code: selectedVendor,
+  vendor_name: vendorName,
+  note,
+  terms: selectedTerms || null,
+  company_id: user?.company_id || '',
+});
+
+    await fetchPbnEntries(); // refresh dropdown list display
+    toast.success('✅ Main updated successfully');
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || 'Failed to update main.');
+    console.error(e);
+  }
+};
+
 
   const handleSave = async () => {
     const confirm = await Swal.fire({
@@ -582,6 +664,7 @@ const res = await napi.post('/pbn/save-main', {
   vend_code: selectedVendor,
   vendor_name: vendorName,
   note,
+  terms: selectedTerms || null,
   posted_flag: posted,
   company_id: companyId,
 });
@@ -688,11 +771,11 @@ updatedData.push(emptyRow());
       setSelectedSugarType(data.main.sugar_type);
       setSelectedCropYear(data.main.crop_year);
       setSelectedVendor(data.main.vend_code);
-      setVendorName(data.main.vendor_name);
-
+setVendorName(data.main.vendor_name);
 setNote(data.main.note || '');
+setSelectedTerms(data.main.terms || '');
 
-      setPosted(data.main.posted_flag === 1);
+setPosted(data.main.posted_flag === 1);
       setPbnDate(formatDateToYYYYMMDD(data.main.pbn_date));
       setIsExistingRecord(true);
 
@@ -1006,14 +1089,58 @@ if (posted && (col >= 0 && col <= 5)) {
         </div>
 
 <div className="mt-2">
-  <label className="block">Note</label>
-  <textarea
-    value={note}
-    onChange={(e) => setNote(e.target.value)}
-    className="w-full border p-2 bg-white text-gray-900 min-h-[90px]"
-    placeholder="Enter note..."
-    disabled={posted}
-  />
+  <div className="grid grid-cols-4 gap-4 items-start">
+    <div className="col-span-3">
+      <label className="block">Note</label>
+      <textarea
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        className="w-full border p-2 bg-white text-gray-900 min-h-[90px]"
+        placeholder="Enter note..."
+        disabled={posted}
+      />
+    </div>
+
+    <div className="col-span-1">
+<DropdownWithHeaders
+  label="Terms"
+  value={selectedTerms}
+  onChange={(v) => {
+    if (posted) return;
+    setSelectedTerms(v);
+  }}
+  items={termsOptions}
+  search={termsSearch}
+  onSearchChange={(v) => {
+    if (posted) return;
+    setTermsSearch(v);
+  }}
+  headers={['Terms Code', 'Description']}
+  customKey="pbnTerms"
+/>
+    </div>
+  </div>
+
+  <div className="mt-3 flex justify-end">
+    <button
+      type="button"
+      onClick={handleSaveMain}
+      disabled={!isExistingRecord || !mainEntryId || posted}
+      className={`inline-flex items-center gap-2 px-4 py-2 rounded ${
+        (!isExistingRecord || !mainEntryId || posted)
+          ? 'bg-gray-300 cursor-not-allowed text-white'
+          : 'bg-emerald-600 text-white hover:bg-emerald-700'
+      }`}
+      title={
+        posted
+          ? 'Posted PO cannot be updated'
+          : (!mainEntryId ? 'Save or select a PO first' : 'Save Main')
+      }
+    >
+      <CheckCircleIcon className="h-5 w-5" />
+      <span>Save Main</span>
+    </button>
+  </div>
 </div>
 
 
@@ -1035,9 +1162,9 @@ if (posted && (col >= 0 && col <= 5)) {
   'Quantity',
   'Price',
   'Handling Fee',
-  'Commission',
+  'Facilitation',
   'Cost',
-  'Total Commission',
+  'Total Facilitation',
   'Handling',
   'Total Cost',
 ]}

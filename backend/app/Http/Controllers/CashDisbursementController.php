@@ -133,37 +133,51 @@ public function Footer() {
     $html = '
     <table border="0"><tr>
       <td width="70%">
-        <table border="1" cellpadding="5"><tr>
-<td width="16%">
-<table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
-<tr>
-  <td valign="top" align="left"><font size="8">Prepared:</font></td>
-</tr>
-
-<tr>
-  <td height="42"></td>
-</tr>
-
-<tr>
-  <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
-    <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
-  </td>
-</tr>
-</table>
-</td>
-
-          <td><font size="8">Acted by:<br><br><br><br><br></font></td>
-          <td><font size="8">Checked:<br><br><br><br><br></font></td>
-          <td><font size="8">Approved:<br><br><br><br><br></font></td>
-          <td><font size="8">Noted by:<br><br><br><br><br></font></td>
-          <td><font size="8">Posted by:<br><br><br><br><br></font></td>
-        </tr></table>
+        <table border="1" cellpadding="5" cellspacing="0" width="100%">
+          <tr>
+            <td width="33.33%">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                <tr>
+                  <td valign="top" align="left"><font size="8">Prepared:</font></td>
+                </tr>
+                <tr>
+                  <td height="42"></td>
+                </tr>
+                <tr>
+                  <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
+                    <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
+                  </td>
+                </tr>
+              </table>
+            </td>
+            <td width="33.33%">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                <tr>
+                  <td valign="top" align="left"><font size="8">Checked:</font></td>
+                </tr>
+                <tr>
+                  <td height="54"></td>
+                </tr>
+              </table>
+            </td>
+            <td width="33.34%">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                <tr>
+                  <td valign="top" align="left"><font size="8">Approved:</font></td>
+                </tr>
+                <tr>
+                  <td height="54"></td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
       </td>
       <td width="5%"></td>
       <td width="25%">
         <table border="1" cellpadding="5">
-          <tr><td align="center"><font size="8">Paid by __PAID_BY__</font><br><br></td></tr>
-          <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
+          <tr><td align="center"><font size="8">Received from __PAID_BY__</font><br><br></td></tr>
+          <tr><td align="center"><font size="8">Signature Over Printed Name/Date</font></td></tr>
         </table>
       </td>
     </tr></table>
@@ -935,12 +949,8 @@ public function formPdf(Request $req, $id)
     // ✅ pass company_id into PDF so Header() can pick the correct logo
     $pdf->setCompanyId($companyId ? (int)$companyId : null);
 
-    // Prepared by (priority): URL user_id, else header user_id
-    $preparedUserId = (int) ($req->query('user_id') ?: 0);
-    if ($preparedUserId <= 0) {
-        $preparedUserId = (int) ($header->user_id ?? 0);
-    }
-    $pdf->setPreparedByInitials($this->userInitials($preparedUserId));
+    // TEMP TEST 2: show exactly what PHP receives from query string
+    $pdf->setPreparedByInitials('[' . strtoupper(trim((string) $req->query('prepared_by', ''))) . ']');
 
     $pdf->setPrintHeader(true);
     $pdf->setPrintFooter(true);
@@ -967,66 +977,163 @@ public function formPdf(Request $req, $id)
     $explanation  = (string) ($header->explanation ?? '');
 
     // =================== TOP (header + explanation) ===================
-    $tblTop = <<<EOD
-<br><br>
-<table border="0" cellpadding="1" cellspacing="0" width="100%">
-<tr>
-  <td width="10%"></td>
-  <td width="20%"></td>
-  <td width="20%"></td>
-  <td width="50%" colspan="2" align="left"><div><font size="16"><b>CHECK VOUCHER</b></font></div></td>
-</tr>
-<tr><td colspan="5"></td></tr>
-<tr>
-  <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left" valign="middle" height="30"><font size="14"><b>CV Number:</b></font></td>
-  <td width="14%" align="left"><font size="18"><b><u>{$dvNumber}</u></b></font></td>
-</tr>
-<tr>
-  <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left"><font size="10"><b>Check Date:</b></font></td>
-  <td width="14%" align="left"><font size="10"><u>{$dvDateText}</u></font></td>
-</tr>
-<tr>
-  <td width="10%"></td><td width="20%"></td><td width="25%"></td>
-  <td width="31%" align="left"><font size="12"><b>Check Number:</b></font></td>
-  <td width="14%" align="left"><font size="12"><u>{$checkNo}</u></font></td>
-</tr>
-<tr>
-  <td width="15%"><font size="10"><b>PAY TO</b></font></td>
-  <td width="80%" colspan="4"><font size="14"><u>{$payee}</u></font></td>
-</tr>
-<tr>
-  <td width="15%"><font size="10"><b>PESOS:</b></font></td>
-  <td width="80%" colspan="4"><font size="10"><u>{$amountInWords}</u></font></td>
-</tr>
-</table>
+    // =================== TOP (fixed-position voucher block + HTML explanation table) ===================
 
-<table><tr><td><br><br></td></tr></table>
+    // CHECK VOUCHER block (drawn manually so X/Y can be controlled exactly)
+    $voucherTitleX = 120;
+    $voucherTitleY = 24;
+
+    $labelX   = 120;
+    $valueX   = 150;
+    $lineEndX = 192;
+
+    $row1Y = 36; // CV Number
+    $row2Y = 44; // Check Date
+    $row3Y = 52; // Check Number
+
+    // Title
+    $pdf->SetFont('helvetica', 'B', 16);
+
+    /* Sucden logo blue color */
+    $pdf->SetTextColor(0, 102, 153);
+
+    $pdf->SetXY($voucherTitleX, $voucherTitleY);
+    $pdf->Cell(60, 6, 'CHECK VOUCHER', 0, 0, 'L', false);
+
+    /* restore normal black text after the header */
+    $pdf->SetTextColor(0, 0, 0);
+
+    // Labels
+    $pdf->SetFont('helvetica', 'B', 11);
+
+    $pdf->SetXY($labelX, $row1Y);
+    $pdf->Cell(28, 5, 'CV Number:', 0, 0, 'L', false);
+
+    $pdf->SetXY($labelX, $row2Y);
+    $pdf->Cell(28, 5, 'Check Date:', 0, 0, 'L', false);
+
+    $pdf->SetXY($labelX, $row3Y);
+    $pdf->Cell(28, 5, 'Check Number:', 0, 0, 'L', false);
+
+    // Values
+    $pdf->SetFont('helvetica', 'B', 18);
+    $pdf->SetXY($valueX, $row1Y - 3.0); // move 430967 upward
+    $pdf->Cell(32, 6, $dvNumber, 0, 0, 'L', false);
+    $pdf->Line($valueX, $row1Y + 5.0, $lineEndX, $row1Y + 5.0);
+
+    $pdf->SetFont('helvetica', 'B', 11);
+    $pdf->SetXY($valueX, $row2Y - 0.8);
+    $pdf->Cell(32, 5, $dvDateText, 0, 0, 'L', false);
+    $pdf->Line($valueX, $row2Y + 4.2, $lineEndX, $row2Y + 4.2);
+
+    $checkNoText  = (string) ($checkNo ?? '');
+    $checkNoX     = $valueX;
+    $checkNoY     = $row3Y - 0.8;
+    $checkNoW     = 42;
+    $checkNoLineH = 4.0;
+
+    $pdf->SetFont('helvetica', 'B', 10);
+    $checkNoLines = max(1, $pdf->getNumLines($checkNoText, $checkNoW));
+    $checkNoH     = $checkNoLines * $checkNoLineH;
+
+    $pdf->SetXY($checkNoX, $checkNoY);
+    $pdf->MultiCell(
+        $checkNoW,
+        $checkNoLineH,
+        $checkNoText,
+        0,
+        'L',
+        false,
+        1,
+        $checkNoX,
+        $checkNoY,
+        true,
+        0,
+        false,
+        true,
+        0,
+        'T',
+        false
+    );
+    $pdf->Line($checkNoX, $checkNoY + $checkNoH + 0.6, $lineEndX, $checkNoY + $checkNoH + 0.6);
+
+    // PAY TO / PESOS block (drawn manually so vertical position is exact)
+    $payLabelX = 15;
+    $payValueX = 42;
+    $payToY    = 68;
+    $pesosY    = 76;
+
+    $pdf->SetFont('helvetica', 'B', 10);
+    $pdf->SetXY($payLabelX, $payToY);
+    $pdf->Cell(24, 5, 'PAY TO', 0, 0, 'L', false);
+
+    $pdf->SetXY($payLabelX, $pesosY);
+    $pdf->Cell(24, 5, 'PESOS:', 0, 0, 'L', false);
+
+    $pdf->SetFont('helvetica', '', 14);
+    $pdf->SetXY($payValueX, $payToY - 0.5);
+    $pdf->Cell(95, 6, $payee, 0, 0, 'L', false);
+    $pdf->Line($payValueX, $payToY + 5.2, 140, $payToY + 5.2);
+
+    $pesosText  = (string) ($amountInWords ?? '');
+    $pesosX     = $payValueX;
+    $pesosTopY  = $pesosY - 0.5;
+    $pesosW     = 118;
+    $pesosLineH = 4.2;
+
+    $pdf->SetFont('helvetica', '', 10);
+    $pesosLines = max(1, $pdf->getNumLines($pesosText, $pesosW));
+    $pesosH     = $pesosLines * $pesosLineH;
+
+    $pdf->SetXY($pesosX, $pesosTopY);
+    $pdf->MultiCell(
+        $pesosW,
+        $pesosLineH,
+        $pesosText,
+        0,
+        'L',
+        false,
+        1,
+        $pesosX,
+        $pesosTopY,
+        true,
+        0,
+        false,
+        true,
+        0,
+        'T',
+        false
+    );
+    $pdf->Line($pesosX, $pesosTopY + $pesosH + 0.4, 147, $pesosTopY + $pesosH + 0.4);
+
+    // Explanation / Amount table starts below the manually drawn top block
+    $pdf->SetY(90);
+
+    $tblTop = <<<EOD
 <table border="1" cellspacing="0" cellpadding="5">
   <tr>
     <td width="70%" align="center"><font size="10"><b>EXPLANATION</b></font></td>
     <td width="30%" align="center"><font size="10"><b>AMOUNT</b></font></td>
   </tr>
   <tr>
-    <td height="80"><font size="10">{$explanation}</font></td>
+    <td height="60"><font size="10">{$explanation}</font></td>
     <td align="right"><font size="10">{$dvAmountFmt}</font></td>
   </tr>
 </table>
 
-<table><tr><td><br><br></td></tr></table>
+<table><tr><td height="2"></td></tr></table>
 EOD;
 
     $pdf->writeHTML($tblTop, true, false, false, false, '');
 
     // =================== GL TABLE (chunked per page to avoid broken borders) ===================
     $glHeader = <<<EOD
-<table border="1" cellpadding="3" cellspacing="0" width="100%">
+<table border="1" cellpadding="1" cellspacing="0" width="100%">
   <tr>
-    <td width="20%" align="center"><font size="10"><b>ACCOUNT</b></font></td>
-    <td width="40%" align="center"><font size="10"><b>GL ACCOUNT</b></font></td>
-    <td width="20%" align="center"><font size="10"><b>DEBIT</b></font></td>
-    <td width="20%" align="center"><font size="10"><b>CREDIT</b></font></td>
+    <td width="20%" align="center" height="16"><font size="10"><b>ACCOUNT</b></font></td>
+    <td width="40%" align="center" height="16"><font size="10"><b>GL ACCOUNT</b></font></td>
+    <td width="20%" align="center" height="16"><font size="10"><b>DEBIT</b></font></td>
+    <td width="20%" align="center" height="16"><font size="10"><b>CREDIT</b></font></td>
   </tr>
 EOD;
 
@@ -1058,10 +1165,10 @@ EOD;
 
             $tblGl .= <<<EOD
   <tr>
-    <td align="left"><font size="10">{$acct}</font></td>
-    <td align="left"><font size="10">{$desc}</font></td>
-    <td align="right"><font size="10">{$debit}</font></td>
-    <td align="right"><font size="10">{$credit}</font></td>
+    <td align="left" height="14"><font size="10">{$acct}</font></td>
+    <td align="left" height="14"><font size="10">{$desc}</font></td>
+    <td align="right" height="14"><font size="10">{$debit}</font></td>
+    <td align="right" height="14"><font size="10">{$credit}</font></td>
   </tr>
 EOD;
         }
@@ -1072,10 +1179,10 @@ EOD;
             $fmtC = number_format($totalCredit, 2);
             $tblGl .= <<<EOD
   <tr>
-    <td></td>
-    <td align="left"><font size="10">TOTAL</font></td>
-    <td align="right"><font size="10">{$fmtD}</font></td>
-    <td align="right"><font size="10">{$fmtC}</font></td>
+    <td height="14"></td>
+    <td align="left" height="14"><font size="10">TOTAL</font></td>
+    <td align="right" height="14"><font size="10">{$fmtD}</font></td>
+    <td align="right" height="14"><font size="10">{$fmtC}</font></td>
   </tr>
 EOD;
         }
@@ -1110,7 +1217,10 @@ EOD;
     $pdfContent = $pdf->Output('disbursementVoucher.pdf', 'S');
     return response($pdfContent, 200)
         ->header('Content-Type', 'application/pdf')
-        ->header('Content-Disposition', 'inline; filename="disbursementVoucher.pdf"');
+        ->header('Content-Disposition', 'inline; filename="disbursementVoucher.pdf"')
+        ->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        ->header('Pragma', 'no-cache')
+        ->header('Expires', '0');
 }
 
 

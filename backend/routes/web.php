@@ -67,6 +67,8 @@ use App\Http\Controllers\ReceivingPostingController;
 
 use App\Http\Controllers\VendorSummaryReportController;
 
+use App\Http\Controllers\BillOfLadingController;
+
 // VENDOR SUMMARY REPORT (stateful)
 Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
     Route::post('/vendor-summary/report',                   [VendorSummaryReportController::class, 'start']);
@@ -80,10 +82,15 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 
 
 Route::middleware(['web','auth:sanctum'])->prefix('api')->group(function () {
-    // Receiving Posting module (Bite A)
+    // Receiving Posting module
     Route::get('/receiving-posting/list', [ReceivingPostingController::class, 'list']);
     Route::get('/receiving-posting/show/{id}', [ReceivingPostingController::class, 'show']);
     Route::get('/receiving-posting/preview-journal/{id}', [ReceivingPostingController::class, 'previewJournal']);
+
+    Route::post('/receiving-posting/post/{id}', [ReceivingPostingController::class, 'post']);
+    Route::post('/receiving-posting/unpost/{id}', [ReceivingPostingController::class, 'unpost']);
+    Route::post('/receiving-posting/delete/{id}', [ReceivingPostingController::class, 'softDelete']);
+    Route::post('/receiving-posting/process/{id}', [ReceivingPostingController::class, 'process']);
 });
 
 
@@ -149,6 +156,7 @@ Route::prefix('api')->group(function () {
 /* ─── PBN stateful CRUD (session + auth) ─── */
 Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
     Route::post('/pbn/save-main',     [PbnEntryController::class, 'storeMain']);
+    Route::post('/pbn/update-main',   [PbnEntryController::class, 'updateMain']);    
     Route::post('/pbn/save-detail',   [PbnEntryController::class, 'saveDetail']);
     Route::post('/pbn/update-detail', [PbnEntryController::class, 'updateDetail']);
     Route::post('/pbn/delete-detail', [PbnEntryController::class, 'deleteDetailAndLog']);
@@ -157,17 +165,16 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 
 // --- Particulars dropdown (company-scoped) ---
 Route::get('/pbn/particulars', [PbnEntryController::class, 'particulars']);
-
+    Route::get('/pbn/terms', [PbnEntryController::class, 'terms']);
     // Show a specific PBN (used by handlePbnSelect)
     Route::get('/pbn/{id}', [PbnEntryController::class, 'show'])->whereNumber('id');
 
-    /* ─── PBN Posting (Preview-first + Approval-aligned actions) ─── */
+    /* ─── PBN Posting (Preview-first + Direct actions) ─── */
     Route::get('/pbn/posting/list', [\App\Http\Controllers\PbnPostingController::class, 'list']);
     Route::get('/pbn/posting/{id}', [\App\Http\Controllers\PbnPostingController::class, 'show'])->whereNumber('id');
-// ===== START ADD: PBN posting approval-request routes =====
-Route::post('/pbn/posting/{id}/request-post', [\App\Http\Controllers\PbnPostingController::class, 'requestPost'])->whereNumber('id');
-Route::post('/pbn/posting/{id}/request-unpost-unused', [\App\Http\Controllers\PbnPostingController::class, 'requestUnpostUnused'])->whereNumber('id');
-Route::post('/pbn/posting/{id}/request-close', [\App\Http\Controllers\PbnPostingController::class, 'requestClose'])->whereNumber('id');
+    Route::post('/pbn/posting/{id}/post', [\App\Http\Controllers\PbnPostingController::class, 'post'])->whereNumber('id');
+    Route::post('/pbn/posting/{id}/unpost', [\App\Http\Controllers\PbnPostingController::class, 'unpost'])->whereNumber('id');
+    Route::post('/pbn/posting/{id}/close', [\App\Http\Controllers\PbnPostingController::class, 'close'])->whereNumber('id');
 // ===== END ADD: PBN posting approval-request routes =====
 
 
@@ -346,6 +353,21 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
     Route::get ('/general-ledger/report/{ticket}/status',   [GeneralLedgerController::class, 'status']);
     Route::get ('/general-ledger/report/{ticket}/view',     [GeneralLedgerController::class, 'view']);
     Route::get ('/general-ledger/report/{ticket}/download', [GeneralLedgerController::class, 'download']);
+
+    // Monthly Expense Report – ticketed lifecycle
+    Route::post('/general-ledger/expenses/report',                   [GeneralLedgerController::class, 'startExpenseReport']);
+    Route::get ('/general-ledger/expenses/report/{ticket}/status',   [GeneralLedgerController::class, 'expenseStatus']);
+    Route::get ('/general-ledger/expenses/report/{ticket}/view',     [GeneralLedgerController::class, 'expenseView']);
+    Route::get ('/general-ledger/expenses/report/{ticket}/download', [GeneralLedgerController::class, 'expenseDownload']);
+
+    // Tax List Report – ticketed lifecycle
+    Route::post('/general-ledger/tax-report',                   [GeneralLedgerController::class, 'startTaxReport']);
+    Route::get ('/general-ledger/tax-report/{ticket}/status',   [GeneralLedgerController::class, 'taxStatus']);
+    Route::get ('/general-ledger/tax-report/{ticket}/view',     [GeneralLedgerController::class, 'taxView']);
+    Route::get ('/general-ledger/tax-report/{ticket}/download', [GeneralLedgerController::class, 'taxDownload']);
+
+
+
 });
 
 
@@ -622,6 +644,21 @@ Route::get('/api/receiving/quedan-listing-pdf/{receiptNo}', [ReceivingController
 Route::get('/api/receiving/quedan-listing-inssto-pdf/{receiptNo}', [ReceivingController::class, 'quedanListingInsStoPdf']);
 Route::get('/api/receiving/quedan-listing-excel/{receiptNo}', [ReceivingController::class, 'quedanListingExcel']);
 Route::get('/api/receiving/quedan-listing-insurance-storage-excel/{receiptNo?}', [ReceivingController::class, 'quedanListingInsuranceStorageExcel']);
+// Bill of Lading
+Route::get('/api/bill-of-lading/po-list', [BillOfLadingController::class, 'poList']);
+Route::get('/api/bill-of-lading/po-items', [BillOfLadingController::class, 'poItems']);
+Route::get('/api/bill-of-lading/list', [BillOfLadingController::class, 'list']);
+Route::get('/api/bill-of-lading/entry', [BillOfLadingController::class, 'getEntry']);
+Route::get('/api/bill-of-lading/details', [BillOfLadingController::class, 'getDetails']);
+Route::post('/api/bill-of-lading/create-entry', [BillOfLadingController::class, 'createEntry']);
+Route::post('/api/bill-of-lading/update-main', [BillOfLadingController::class, 'updateMain']);
+Route::post('/api/bill-of-lading/batch-insert', [BillOfLadingController::class, 'batchInsert']);
+Route::get('/api/bill-of-lading/payment-methods', [BillOfLadingController::class, 'paymentMethods']);
+Route::get('/api/bill-of-lading/banks', [BillOfLadingController::class, 'banks']);
+Route::post('/api/bill-of-lading/post-entry', [BillOfLadingController::class, 'postEntry']);
+Route::get('/api/bill-of-lading/process-preview', [BillOfLadingController::class, 'processPreview']);
+Route::post('/api/bill-of-lading/process-entry', [BillOfLadingController::class, 'processEntry']);
+
 
 // Sales Journal
     Route::get('/api/sales/generate-cs-number', [SalesJournalController::class, 'generateCsNumber']);

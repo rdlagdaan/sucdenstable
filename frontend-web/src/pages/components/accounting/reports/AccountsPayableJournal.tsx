@@ -144,7 +144,7 @@ useEffect(() => {
 
   return (
     <div className="p-4 space-y-3">
-      <div className="text-lg font-semibold">ACCOUNTS PAYABLE JOURNAL</div>
+      <div className="text-lg font-semibold">PURCHASE JOURNAL</div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div>

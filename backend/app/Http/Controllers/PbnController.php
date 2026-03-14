@@ -119,12 +119,21 @@ public function items(Request $req)
             return response()->json(['message' => 'Server Error'], 500);
         }
 
-        // ✅ only posted/selected detail rows (if columns exist)
+        // ✅ Item # dropdown rules:
+        // 1) selected_flag must be available (NULL or 0)
+        // 2) item must still have remaining qty to consume
         if (\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'selected_flag')) {
-            $q->where(function ($w) { $w->whereNull('d.selected_flag')->orWhere('d.selected_flag', 1); });
+            $q->where(function ($w) {
+                $w->whereNull('d.selected_flag')
+                  ->orWhere('d.selected_flag', 0);
+            });
         }
+
         if (\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'delete_flag')) {
-            $q->where(function ($w) { $w->whereNull('d.delete_flag')->orWhere('d.delete_flag', 0); });
+            $q->where(function ($w) {
+                $w->whereNull('d.delete_flag')
+                  ->orWhere('d.delete_flag', 0);
+            });
         }
 
         $rows = $q->orderBy('d.' . $itemCol, 'asc')->get([
@@ -132,10 +141,30 @@ public function items(Request $req)
             DB::raw('d.' . $itemCol . ' as item_no'),
             DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'mill') ? 'd.mill' : "NULL as mill"),
             DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'quantity') ? 'd.quantity' : "0 as quantity"),
-            DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'unit_cost') ? 'd.unit_cost' : "0 as unit_cost"),
+            DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'price') ? 'd.price as unit_cost' : (\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'unit_cost') ? 'd.unit_cost' : "0 as unit_cost")),
             DB::raw(\Illuminate\Support\Facades\Schema::hasColumn($detailTable, 'commission') ? 'd.commission' : "0 as commission"),
             DB::raw('NULL as mill_code'),
-        ]);
+        ])->filter(function ($r) use ($companyId, $pbnNumber) {
+            $detailQty = (float) ($r->quantity ?? 0);
+            $itemNo    = (string) ($r->item_no ?? $r->row ?? '');
+
+            if ($itemNo === '') {
+                return false;
+            }
+
+            $consumedQty = (float) DB::table('receiving_details as rd')
+                ->join('receiving_entry as re', 're.receipt_no', '=', 'rd.receipt_no')
+                ->where('re.company_id', $companyId)
+                ->where('re.pbn_number', $pbnNumber)
+                ->whereRaw('CAST(rd.item_no AS VARCHAR) = ?', [$itemNo])
+                ->where(function ($w) {
+                    $w->whereNull('re.deleted_flag')
+                      ->orWhere('re.deleted_flag', false);
+                })
+                ->sum('rd.quantity');
+
+            return ($detailQty - $consumedQty) > 0;
+        })->values();
 
         return response()->json($rows);
 
@@ -187,7 +216,7 @@ public function items(Request $req)
             ->where('e.company_id', $companyId)
             ->where('e.posted_flag', 1)
             ->where(function ($w) { $w->whereNull('e.close_flag')->orWhere('e.close_flag', 0); })
-            ->where(function ($w) { $w->whereNull('d.selected_flag')->orWhere('d.selected_flag', 1); })
+            ->where(function ($w) { $w->whereNull('d.selected_flag')->orWhere('d.selected_flag', 0); })
             ->where(function ($w) { $w->whereNull('d.delete_flag')->orWhere('d.delete_flag', 0); })
             ->first([
                 'd.id',
