@@ -90,8 +90,8 @@ export default function Purchase_journal_form() {
   });
 
 
-  const [_locked, setLocked] = useState(false);
-  const [gridLocked, setGridLocked] = useState(true);
+const [locked, setLocked] = useState(false);
+const [gridLocked, setGridLocked] = useState(true);
 // ✅ UI locking rule:
 // - if exported_at exists => LOCK unless there is an active edit approval window
 // - if NOT exported => UNLOCK (unless cancelled)
@@ -137,6 +137,10 @@ const computeUiLock = (opts: {
   // state for PBN dropdown
   const [pbns, setPbns] = useState<DropdownItem[]>([]);
   const [pbnSearch, setPbnSearch] = useState('');
+
+const editStatus = String(editApproval?.status || '').toLowerCase();
+const isEditPending = !!mainId && !!editApproval?.exists && editStatus === 'pending';
+const isEditApprovedActive = !!mainId && !!editApproval?.approved_active;
 
   // layout helpers
   const detailsWrapRef = useRef<HTMLDivElement>(null);
@@ -413,16 +417,14 @@ const handleUpdateMain = async () => {
   if (isCancelled) return toast.error('Cancelled transaction cannot be modified.');
 
   try {
-    // 1) Require ACTIVE edit approval window (same as Cash Receipt)
     const st = await getApprovalStatus('edit', mainId);
     if (!st?.approved_active) {
-      toast.error('No active edit approval window. Please request edit again.');
+      toast.error('No active edit approval. Please request edit again.');
       setLocked(true);
       setGridLocked(true);
       return;
     }
 
-    // 2) Save header changes
     await napi.post('/purchase/update-main', {
       id: mainId,
       cp_no: cpNo,
@@ -434,59 +436,27 @@ const handleUpdateMain = async () => {
       mill_id: millCode,
       booking_no: bookingNo,
       company_id: companyIdParam,
-
       user_id: user?.id,
     });
 
-    // 3) Consume/release the approval window (important)
     await releaseEditApproval(mainId);
 
-    // 4) Reload from server so you immediately see updated values
-    await loadPurchase(String(mainId));
-
-    // 5) Force back to view mode
     setLocked(true);
     setGridLocked(true);
 
-    toast.success('Changes saved.');
+    await loadPurchase(String(mainId));
+    await refreshEditApproval(mainId);
+
+    toast.success('Purchase Journal changes saved.');
   } catch (e: any) {
     toast.error(e?.response?.data?.message || 'Failed to save changes.');
   }
 };
 
 
-const handleSaveMainNoApproval = async () => {
-  if (!mainId) return;
-  if (isCancelled) return toast.error('Cancelled transaction cannot be modified.');
-
-  try {
-await napi.post('/purchase/update-main-no-approval', {
-  id: mainId,
-  company_id: companyIdParam,
-  purchase_date: purchaseDate,
-  explanation,
-
-  // optional (only if you allowed them backend-side):
-  vend_id: vendorId,
-  crop_year: cropYear,
-  sugar_type: sugarType,
-  mill_id: millCode,
-  booking_no: bookingNo,
-});
-
-
-    // reload so values are consistent
-    await loadPurchase(String(mainId));
-
-    // keep in view mode
-    setLocked(true);
-    setGridLocked(true);
-
-    toast.success('Main saved.');
-  } catch (e: any) {
-    toast.error(e?.response?.data?.message || 'Failed to save main.');
-  }
-};
+//const handleSaveMainNoApproval = async () => {
+//  toast.error('Direct header editing without approval is disabled for Purchase Journal.');
+//};
 
 
 
@@ -562,7 +532,6 @@ const refreshEditApproval = async (recordId?: number, exportedAtOverride?: strin
       reason: data?.reason ?? null,
     });
 
-    // ✅ apply the rule immediately
     const shouldLock = computeUiLock({
       cancelled: isCancelled,
       exportedAt: exp,
@@ -574,7 +543,6 @@ const refreshEditApproval = async (recordId?: number, exportedAtOverride?: strin
   } catch {
     setEditApproval({ exists: false });
 
-    // if exported => lock; if not exported => unlock (unless cancelled)
     const shouldLock = computeUiLock({
       cancelled: isCancelled,
       exportedAt: exp,
@@ -616,12 +584,14 @@ const refreshActionApproval = async (action: 'cancel' | 'delete' | 'uncancel', r
 
 
 
-  const approvalLabel = useMemo(() => {
-    if (!mainId) return '';
-    if (!editApproval?.exists) return 'Approval: none';
-    const s = String(editApproval.status || '').toLowerCase();
-    return `Approval: ${s || 'unknown'}`;
-  }, [mainId, editApproval]);
+const approvalLabel = useMemo(() => {
+  if (!mainId) return '';
+  if (isEditApprovedActive) return 'Approval: approved';
+  if (isEditPending) return 'Approval: pending';
+  if (!editApproval?.exists) return 'Approval: none';
+  const s = String(editApproval.status || '').toLowerCase();
+  return `Approval: ${s || 'unknown'}`;
+}, [mainId, editApproval, isEditApprovedActive, isEditPending]);
 
 
 
@@ -863,9 +833,7 @@ const handleSelectTransaction = async (selectedId: string) => {
 const canExport = !!mainId && !isCancelled && !!isBalanced;
 
 // ✅ single source of truth
-const editStatus = String(editApproval?.status || '').toLowerCase();
-const isEditPending = !!mainId && !!editApproval?.exists && editStatus === 'pending';
-const isEditApprovedActive = !!mainId && !!editApproval?.approved_active; // edit window open
+ // edit window open
 //const isExportLocked = !!mainId && !!exportedAt; // ✅ lock after first print/download
 
 const uncancelStatus = statusLower(actionApproval.uncancel?.status);
@@ -1075,7 +1043,21 @@ setGridLocked(true);
       <ToastContainer position="top-right" autoClose={3000} />
 
       <div className="bg-blue-50 shadow-md rounded-lg p-6 space-y-4 border border-blue-300">
-        <h2 className="text-xl font-bold text-blue-800 mb-2">PURCHASE JOURNAL</h2>
+        <div className="flex items-center gap-3 mb-2">
+        <h2 className="text-xl font-bold text-blue-800">PURCHASE JOURNAL</h2>
+
+        {mainId && !isCancelled && isEditPending && (
+          <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+            EDIT REQUEST PENDING
+          </span>
+        )}
+
+        {mainId && !isCancelled && isEditApprovedActive && (
+          <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+            EDIT APPROVED
+          </span>
+        )}
+      </div>
 
         {/* Header form (thin, 2-column layout) */}
         <div className="grid grid-cols-2 gap-4">
@@ -1097,7 +1079,7 @@ setGridLocked(true);
           </div>
 
           {/* Row 2 — Vendor | Date */}
-          <div>
+          <div className={locked || isCancelled ? 'pointer-events-none opacity-90' : ''}>
             <DropdownWithHeaders
               label="Vendor"
               value={vendorId}
@@ -1124,7 +1106,7 @@ setGridLocked(true);
 <input
   type="date"
   value={purchaseDate}
-  disabled={isCancelled || _locked}
+  disabled={isCancelled || locked}
   onChange={(e) => setPurchaseDate(e.target.value)}
   className={`w-full border p-2 ${isCancelled ? 'bg-gray-100 text-gray-400' : 'bg-blue-100 text-blue-900'}`}
 />
@@ -1132,7 +1114,7 @@ setGridLocked(true);
           </div>
 
           {/* Row 3 — Crop Year | Sugar Type */}
-          <div>
+          <div className={locked || isCancelled ? 'pointer-events-none opacity-90' : ''}>
             <DropdownWithHeaders
               label="Crop Year"
               value={cropYear}
@@ -1147,7 +1129,7 @@ setGridLocked(true);
             />
           </div>
 
-          <div>
+          <div className={locked || isCancelled ? 'pointer-events-none opacity-90' : ''}>
             <DropdownWithHeaders
               label="Sugar Type"
               value={sugarType}
@@ -1163,7 +1145,7 @@ setGridLocked(true);
           </div>
 
           {/* Row 4 — Mill Code | Explanation */}
-          <div>
+          <div className={locked || isCancelled ? 'pointer-events-none opacity-90' : ''}>
             <DropdownWithHeaders
               label="Mill Code"
               value={millCode}
@@ -1182,7 +1164,7 @@ setGridLocked(true);
             <label className="block mb-1">Explanation</label>
 <input
   value={explanation}
-  disabled={isCancelled || _locked}
+  disabled={isCancelled || locked}
   onChange={(e) => setExplanation(e.target.value)}
   className={`w-full border p-2 ${isCancelled ? 'bg-gray-100 text-gray-400' : 'bg-blue-100 text-blue-900'}`}
 />
@@ -1190,7 +1172,7 @@ setGridLocked(true);
           </div>
 
           {/* Row 5 — Booking # */}
-          <div>
+          <div className={locked || isCancelled ? 'pointer-events-none opacity-90' : ''}>
             <DropdownWithHeaders
               label="Booking #"
               value={bookingNo}
@@ -1238,6 +1220,18 @@ setGridLocked(true);
 {isEditPending && (
   <div className="text-sm text-amber-700 mt-1">
     Edit approval is pending — Reason: {editApproval?.reason || '—'}
+  </div>
+)}
+
+{!isCancelled && !!mainId && !!exportedAt && !isEditApprovedActive && (
+  <div className="text-sm text-red-700 mt-1 font-semibold">
+    This purchase journal has been printed/downloaded and is locked. Request edit approval to modify it.
+  </div>
+)}
+
+{!isCancelled && !!mainId && isEditApprovedActive && (
+  <div className="text-sm text-emerald-700 mt-1 font-semibold">
+    Edit approved — you may now update this purchase journal.
   </div>
 )}
 
@@ -1319,14 +1313,7 @@ setGridLocked(true);
       >
         Delete
       </button>
-{/* ✅ Save Main (same handler as Save Changes) — only shown when NOT cancelled */}
-<button
-  type="button"
-  onClick={handleSaveMainNoApproval}
-  className="inline-flex items-center gap-2 px-4 py-2 rounded text-white bg-slate-600 hover:bg-slate-700"
->
-  Save Main
-</button>
+      {null}
 
 
 

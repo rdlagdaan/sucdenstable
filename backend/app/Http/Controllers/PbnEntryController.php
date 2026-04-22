@@ -43,65 +43,109 @@ class PbnEntryController extends Controller
 public function storeMain(Request $request)
 {
     $validated = $request->validate([
-        'sugar_type'   => 'required',
-        'crop_year'    => 'required',
-        'pbn_date'     => 'required|date',
-        'vend_code'    => 'required',
-        'vendor_name'  => 'required',
-        'terms'        => 'nullable|string|max:20',
-        'note'         => 'nullable|string',
-        'posted_flag'  => 'required|boolean',
-        'company_id'   => 'required|integer',
+        'sugar_type'             => 'required',
+        'crop_year'              => 'required',
+        'pbn_date'               => 'required|date',
+        'vend_code'              => 'required',
+        'vendor_name'            => 'required',
+        'terms'                  => 'nullable|string|max:20',
+        'note'                   => 'nullable|string',
+        'vatable_sales_flag'     => 'required|integer|in:0,1',
+        'zero_rated_sales_flag'  => 'required|integer|in:0,1',
+        'vat_exempt_sales_flag'  => 'required|integer|in:0,1',
+        'posted_flag'            => 'required|boolean',
+        'company_id'             => 'required|integer',
     ]);
 
-    return DB::transaction(function () use ($validated) {
-        $companyId = (int) $validated['company_id'];
+    if (
+        ((int) $validated['vatable_sales_flag']) +
+        ((int) $validated['zero_rated_sales_flag']) +
+        ((int) $validated['vat_exempt_sales_flag']) !== 1
+    ) {
+        return response()->json(['message' => 'Exactly one VAT type must be selected.'], 422);
+    }
 
-        $setting = DB::table('application_settings')
-            ->where('apset_code', 'PONoImpExp')
-            ->lockForUpdate()
-            ->first();
+    try {
+        return DB::transaction(function () use ($validated) {
+            $companyId = (int) $validated['company_id'];
 
-        if (!$setting) {
-            abort(500, 'PONoImpExp setting not found.');
-        }
+            $setting = DB::table('application_settings')
+                ->where('apset_code', 'PONoImpExp')
+                ->lockForUpdate()
+                ->first();
 
-        $current  = (int) $setting->value;
-        $next     = $current + 1;
-        $poNumber = str_pad((string) $next, strlen((string) $setting->value), '0', STR_PAD_LEFT);
+            if (!$setting) {
+                return response()->json([
+                    'message' => 'PONoImpExp setting not found in application_settings.',
+                ], 500);
+            }
 
-        DB::table('application_settings')
-            ->where('apset_code', 'PONoImpExp')
-            ->update([
-                'value'      => $poNumber,
-                'updated_at' => now(),
+            $current  = (int) ($setting->value ?? 0);
+            $next     = $current + 1;
+            $width    = max(strlen((string) ($setting->value ?? '0')), 5);
+            $poNumber = str_pad((string) $next, $width, '0', STR_PAD_LEFT);
+
+            DB::table('application_settings')
+                ->where('apset_code', 'PONoImpExp')
+                ->update([
+                    'value'      => $poNumber,
+                    'updated_at' => now(),
+                ]);
+
+            $payload = [
+                'pbn_number'             => $poNumber,
+                'pbn_date'               => $validated['pbn_date'],
+                'sugar_type'             => $validated['sugar_type'],
+                'crop_year'              => $validated['crop_year'],
+                'vend_code'              => $validated['vend_code'],
+                'vendor_name'            => $validated['vendor_name'],
+                'note'                   => $validated['note'] ?? null,
+                'vatable_sales_flag'     => (int) $validated['vatable_sales_flag'],
+                'zero_rated_sales_flag'  => (int) $validated['zero_rated_sales_flag'],
+                'vat_exempt_sales_flag'  => (int) $validated['vat_exempt_sales_flag'],
+                'posted_flag'            => !empty($validated['posted_flag']) ? 1 : 0,
+                'company_id'             => $companyId,
+                'created_at'             => now(),
+                'updated_at'             => now(),
+            ];
+
+            // ✅ Only include columns that actually exist in this build
+            if (Schema::hasColumn('pbn_entry', 'po_number')) {
+                $payload['po_number'] = $poNumber;
+            }
+
+            if (Schema::hasColumn('pbn_entry', 'terms')) {
+                $payload['terms'] = $validated['terms'] ?? null;
+            }
+
+            if (Schema::hasColumn('pbn_entry', 'visible_flag')) {
+                $payload['visible_flag'] = 1;
+            }
+
+            if (Schema::hasColumn('pbn_entry', 'user_id')) {
+                $payload['user_id'] = auth()->id() ?? null;
+            }
+
+            $id = DB::table('pbn_entry')->insertGetId($payload);
+
+            return response()->json([
+                'id'        => $id,
+                'po_number' => $poNumber,
             ]);
-
-        $payload = [
-            'po_number'    => $poNumber,
-            'pbn_number'   => $poNumber,
-            'pbn_date'     => $validated['pbn_date'],
-            'sugar_type'   => $validated['sugar_type'],
-            'crop_year'    => $validated['crop_year'],
-            'vend_code'    => $validated['vend_code'],
-            'vendor_name'  => $validated['vendor_name'],
-            'terms'        => $validated['terms'] ?? null,
-            'note'         => $validated['note'] ?? null,
-            'posted_flag'  => !empty($validated['posted_flag']) ? 1 : 0,
-            'company_id'   => $companyId,
-            'visible_flag' => 1,
-            'user_id'      => auth()->id(),
-            'created_at'   => now(),
-            'updated_at'   => now(),
-        ];
-
-        $entry = PbnEntry::create($payload);
+        });
+    } catch (\Throwable $e) {
+        \Log::error('PbnEntryController.storeMain failed', [
+            'message' => $e->getMessage(),
+            'file'    => $e->getFile(),
+            'line'    => $e->getLine(),
+            'trace'   => $e->getTraceAsString(),
+            'payload' => $validated,
+        ]);
 
         return response()->json([
-            'id'        => $entry->id,
-            'po_number' => $poNumber,
-        ]);
-    });
+            'message' => $e->getMessage(),
+        ], 500);
+    }
 }
     
     
@@ -110,16 +154,27 @@ public function storeMain(Request $request)
 public function updateMain(Request $request)
 {
     $validated = $request->validate([
-    'id'          => 'required|integer',
-    'sugar_type'  => 'required',
-    'crop_year'   => 'required',
-    'pbn_date'    => 'required|date',
-    'vend_code'   => 'required',
-    'vendor_name' => 'required',
-    'note'        => 'nullable|string',
-    'terms'       => 'nullable|string|max:20',
-    'company_id'  => 'required|integer',
-]);
+        'id'                    => 'required|integer',
+        'sugar_type'            => 'required',
+        'crop_year'             => 'required',
+        'pbn_date'              => 'required|date',
+        'vend_code'             => 'required',
+        'vendor_name'           => 'required',
+        'note'                  => 'nullable|string',
+        'terms'                 => 'nullable|string|max:20',
+        'vatable_sales_flag'    => 'required|integer|in:0,1',
+        'zero_rated_sales_flag' => 'required|integer|in:0,1',
+        'vat_exempt_sales_flag' => 'required|integer|in:0,1',
+        'company_id'            => 'required|integer',
+    ]);
+
+    if (
+        ((int) $validated['vatable_sales_flag']) +
+        ((int) $validated['zero_rated_sales_flag']) +
+        ((int) $validated['vat_exempt_sales_flag']) !== 1
+    ) {
+        return response()->json(['message' => 'Exactly one VAT type must be selected.'], 422);
+    }
 
     $companyId = (int) $validated['company_id'];
     $id        = (int) $validated['id'];
@@ -140,14 +195,17 @@ public function updateMain(Request $request)
     }
 
     $payload = [
-    'sugar_type'  => $validated['sugar_type'],
-    'crop_year'   => $validated['crop_year'],
-    'pbn_date'    => $validated['pbn_date'],
-    'vend_code'   => $validated['vend_code'],
-    'vendor_name' => $validated['vendor_name'],
-    'note'        => $validated['note'] ?? null,
-    'updated_at'  => now(),
-];
+        'sugar_type'             => $validated['sugar_type'],
+        'crop_year'              => $validated['crop_year'],
+        'pbn_date'               => $validated['pbn_date'],
+        'vend_code'              => $validated['vend_code'],
+        'vendor_name'            => $validated['vendor_name'],
+        'note'                   => $validated['note'] ?? null,
+        'vatable_sales_flag'     => (int) $validated['vatable_sales_flag'],
+        'zero_rated_sales_flag'  => (int) $validated['zero_rated_sales_flag'],
+        'vat_exempt_sales_flag'  => (int) $validated['vat_exempt_sales_flag'],
+        'updated_at'             => now(),
+    ];
 
 if (\Illuminate\Support\Facades\Schema::hasColumn('pbn_entry', 'terms')) {
     $payload['terms'] = $validated['terms'] ?? null;
@@ -409,23 +467,155 @@ public function terms(Request $request)
 }
 
 
+public function termsAdmin(Request $request)
+{
+    $request->validate([
+        'company_id' => ['nullable', 'integer'],
+    ]);
+
+    $rows = DB::table('purchase_order_terms')
+        ->orderBy('sort_order')
+        ->orderBy('id')
+        ->get([
+            'id',
+            'term_code',
+            'term_name',
+            'active_flag',
+            'sort_order',
+        ]);
+
+    return response()->json($rows);
+}
+
+public function storeTerm(Request $request)
+{
+    $validated = $request->validate([
+        'term_code'   => ['required', 'string', 'max:20'],
+        'term_name'   => ['required', 'string', 'max:100'],
+        'active_flag' => ['required', 'integer', 'in:0,1'],
+        'sort_order'  => ['nullable', 'integer'],
+    ]);
+
+    $exists = DB::table('purchase_order_terms')
+        ->whereRaw('LOWER(term_code) = ?', [mb_strtolower(trim($validated['term_code']))])
+        ->exists();
+
+    if ($exists) {
+        return response()->json(['message' => 'Term code already exists.'], 422);
+    }
+
+    $id = DB::table('purchase_order_terms')->insertGetId([
+        'term_code'   => trim($validated['term_code']),
+        'term_name'   => trim($validated['term_name']),
+        'active_flag' => (int) $validated['active_flag'],
+        'sort_order'  => (int) ($validated['sort_order'] ?? 0),
+        'created_at'  => now(),
+        'updated_at'  => now(),
+    ]);
+
+    return response()->json([
+        'message' => 'Term created successfully.',
+        'id'      => $id,
+    ]);
+}
+
+public function updateTerm(Request $request, int $id)
+{
+    $validated = $request->validate([
+        'term_code'   => ['required', 'string', 'max:20'],
+        'term_name'   => ['required', 'string', 'max:100'],
+        'active_flag' => ['required', 'integer', 'in:0,1'],
+        'sort_order'  => ['nullable', 'integer'],
+    ]);
+
+    $exists = DB::table('purchase_order_terms')
+        ->where('id', '!=', $id)
+        ->whereRaw('LOWER(term_code) = ?', [mb_strtolower(trim($validated['term_code']))])
+        ->exists();
+
+    if ($exists) {
+        return response()->json(['message' => 'Term code already exists.'], 422);
+    }
+
+    $updated = DB::table('purchase_order_terms')
+        ->where('id', $id)
+        ->update([
+            'term_code'   => trim($validated['term_code']),
+            'term_name'   => trim($validated['term_name']),
+            'active_flag' => (int) $validated['active_flag'],
+            'sort_order'  => (int) ($validated['sort_order'] ?? 0),
+            'updated_at'  => now(),
+        ]);
+
+    if (!$updated) {
+        return response()->json(['message' => 'Term not found.'], 404);
+    }
+
+    return response()->json(['message' => 'Term updated successfully.']);
+}
+
+
+
+public function toggleTermActive(Request $request, int $id)
+{
+    $validated = $request->validate([
+        'active_flag' => ['required', 'integer', 'in:0,1'],
+    ]);
+
+    $updated = DB::table('purchase_order_terms')
+        ->where('id', $id)
+        ->update([
+            'active_flag' => (int) $validated['active_flag'],
+            'updated_at'  => now(),
+        ]);
+
+    if (!$updated) {
+        return response()->json(['message' => 'Term not found.'], 404);
+    }
+
+    return response()->json(['message' => 'Term status updated successfully.']);
+}
 
 public function getPbnDropdownList(Request $request)
 {
     $data = $request->validate([
-        'company_id'     => ['required','integer'],
-        'include_posted' => ['nullable','in:true,false,1,0'],
+        'company_id'     => ['required', 'integer'],
+        'include_posted' => ['nullable', 'in:true,false,1,0'],
     ]);
 
-    $companyId    = (int) $data['company_id'];
-    $includePosted = $request->query('include_posted') === 'true' || $request->query('include_posted') === '1';
-    $postedFlag    = $includePosted ? 1 : 0;
+    $companyId     = (int) $data['company_id'];
+    $includePosted = in_array((string) $request->query('include_posted', 'false'), ['true', '1'], true);
 
-    $entries = DB::table('pbn_entry')
+    $query = DB::table('pbn_entry')
         ->where('company_id', $companyId)
-        ->where('posted_flag', $postedFlag)
-        ->select(['id','pbn_number','sugar_type','vendor_name','crop_year','pbn_date','posted_flag'])
-        ->orderByDesc('pbn_number')
+        ->where(function ($q) {
+            $q->whereNull('visible_flag')
+              ->orWhere('visible_flag', '!=', 0);
+        });
+
+    if ($includePosted) {
+        $query->where('posted_flag', 1);
+    } else {
+        $query->where(function ($q) {
+            $q->whereNull('posted_flag')
+              ->orWhere('posted_flag', 0)
+              ->orWhere('posted_flag', '!=', 1);
+        });
+    }
+
+    $entries = $query
+        ->select([
+            'id',
+            DB::raw('COALESCE(po_number, pbn_number) as pbn_number'),
+            'sugar_type',
+            'vend_code',
+            'vendor_name',
+            'crop_year',
+            'pbn_date',
+            DB::raw('COALESCE(posted_flag, 0) as posted_flag'),
+        ])
+        ->orderByDesc('pbn_date')
+        ->orderByDesc('id')
         ->get();
 
     return response()->json($entries);
@@ -477,8 +667,10 @@ public function formPdf(\Illuminate\Http\Request $request, $id = null)
 
     $errorPdf = function (string $title, string $msg) {
         $pdf = new \TCPDF('P', PDF_UNIT, 'LETTER', true, 'UTF-8', false);
-        $pdf->SetMargins(3, 5, 3);
-        $pdf->SetAutoPageBreak(true, 5);
+        $pdf->SetPrintHeader(false);
+        $pdf->SetPrintFooter(false);
+        $pdf->SetMargins(8, 8, 8);
+        $pdf->SetAutoPageBreak(false, 8);
         $pdf->AddPage('P', 'LETTER');
         $pdf->SetFont('helvetica', 'B', 14);
         $pdf->MultiCell(0, 0, $title, 0, 'L', false, 1);
@@ -508,17 +700,15 @@ public function formPdf(\Illuminate\Http\Request $request, $id = null)
         if (!$companyId) return $errorPdf('PURCHASE ORDER - ERROR', 'Missing company_id.');
         $companyId = (int) $companyId;
 
-        // DB timeout (Postgres)
         try { \DB::statement("SET LOCAL statement_timeout = '8000ms'"); } catch (\Throwable $e) {}
 
-        // Main (id OR po_number OR pbn_number)
         $main = \DB::table('pbn_entry')
             ->where('company_id', $companyId)
             ->where('visible_flag', 1)
             ->where(function ($q) use ($id) {
-                $q->where('id', (int)$id)
-                  ->orWhere('po_number', (string)$id)
-                  ->orWhere('pbn_number', (string)$id);
+                $q->where('id', (int) $id)
+                  ->orWhere('po_number', (string) $id)
+                  ->orWhere('pbn_number', (string) $id);
             })
             ->first();
 
@@ -527,8 +717,8 @@ public function formPdf(\Illuminate\Http\Request $request, $id = null)
         }
 
         $details = \DB::table('pbn_entry_details')
-            ->where('pbn_entry_id', (int)$main->id)
-            ->where('company_id', (string)$companyId)
+            ->where('pbn_entry_id', (int) $main->id)
+            ->where('company_id', (string) $companyId)
             ->where(function ($q) {
                 $q->whereNull('delete_flag')->orWhere('delete_flag', '!=', 1);
             })
@@ -536,21 +726,39 @@ public function formPdf(\Illuminate\Http\Request $request, $id = null)
             ->get();
 
         $decode = function ($s) {
-            $s = (string)$s;
-            $s = html_entity_decode($s, ENT_QUOTES, 'UTF-8');
-            $s = trim(preg_replace('/\s+/', ' ', $s));
+            $s = (string) $s;
+            $s = html_entity_decode($s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            $s = trim(preg_replace('/\s+/u', ' ', $s));
             return $s;
         };
 
-        // Header fields
+        $decodeMultiline = function ($s) {
+            $s = (string) $s;
+            $s = html_entity_decode($s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            $s = str_replace(["\r\n", "\r"], "\n", $s);
+            $s = preg_replace("/[ \t]+/u", ' ', $s);
+            $s = preg_replace("/\n{3,}/u", "\n\n", $s);
+            return trim($s);
+        };
+
+        // -----------------------------
+        // Data preparation
+        // -----------------------------
         $poNo       = $decode($main->po_number ?? $main->pbn_number ?? '');
         $vendorName = $decode($main->vendor_name ?? '');
-        $poDate     = !empty($main->pbn_date) ? \Carbon\Carbon::parse($main->pbn_date)->format('Y-m-d') : '';
-        $note       = $decode($main->note ?? '');
+        $note       = $decodeMultiline($main->note ?? '');
 
-        // Crop Year display: BEGIN-END (fallback to raw crop_year)
+        $poDate = '';
+        if (!empty($main->pbn_date)) {
+            try {
+                $poDate = \Carbon\Carbon::parse($main->pbn_date)->format('F d, Y');
+            } catch (\Throwable $e) {
+                $poDate = $decode($main->pbn_date);
+            }
+        }
+
         $cropYearDisplay = $decode($main->crop_year ?? '');
-        $cropYearKey = $decode($main->crop_year ?? '');
+        $cropYearKey     = $decode($main->crop_year ?? '');
         if ($cropYearKey !== '') {
             $cy = \DB::table('crop_year')
                 ->where('company_id', $companyId)
@@ -561,22 +769,19 @@ public function formPdf(\Illuminate\Http\Request $request, $id = null)
             }
         }
 
-        // Terms: use saved pbn_entry.terms first
-$terms = '';
-if (\Illuminate\Support\Facades\Schema::hasColumn('pbn_entry', 'terms')) {
-    $terms = $decode($main->terms ?? '');
-}
-
-if (trim((string)$terms) === '') {
-    foreach (['term','payment_terms','payment_term','currency','curr'] as $k) {
-        if (isset($main->{$k})) {
-            $tmp = $decode($main->{$k});
-            if ($tmp !== '') { $terms = $tmp; break; }
+        $terms = '';
+        if (\Illuminate\Support\Facades\Schema::hasColumn('pbn_entry', 'terms')) {
+            $terms = $decode($main->terms ?? '');
         }
-    }
-}
+        if (trim((string) $terms) === '') {
+            foreach (['term', 'payment_terms', 'payment_term', 'currency', 'curr'] as $k) {
+                if (isset($main->{$k})) {
+                    $tmp = $decode($main->{$k});
+                    if ($tmp !== '') { $terms = $tmp; break; }
+                }
+            }
+        }
 
-        // Vendor Address (vendor_list has vendor_address)
         $vendorAddress = '';
         $vendorCode = $decode($main->vend_code ?? '');
         $vendorNameLookup = $decode($main->vendor_name ?? '');
@@ -594,12 +799,11 @@ if (trim((string)$terms) === '') {
 
         if ($vendor) {
             $vendorAddress = $decode($vendor->vendor_address ?? '');
-            if (trim((string)$terms) === '') {
+            if (trim((string) $terms) === '') {
                 $terms = $decode($vendor->terms ?? ($vendor->term ?? ($vendor->currency ?? '')));
             }
         }
 
-        // Company-specific logo
         $logoPath = ($companyId === 2)
             ? public_path('ameropLogo.jpg')
             : public_path('sucdenLogo.jpg');
@@ -610,723 +814,853 @@ if (trim((string)$terms) === '') {
                 : public_path('sucdenLogo.png');
         }
 
-        $confirmedCompany = ($companyId === 2) ? 'Amerop Philippines' : 'Sucden Philippines';
+        $companyLine1 = ($companyId === 2) ? 'Amerop Philippines, Inc.' : 'Sucden Philippines, Inc.';
+        $companyLine2 = 'Unit 2202, The Podium West Tower, 12 ADB Ave., Wack-Wack, Ortigas';
+        $companyLine3 = 'Center, Mandaluyong City, Philippines 1550';
+        $confirmedCompany = ($companyId === 2) ? 'Amerop Philippines, Inc.' : 'Sucden Philippines, Inc.';
 
-        // Note: keep line breaks
-        $notePlain = htmlspecialchars($note, ENT_QUOTES, 'UTF-8');
-        $notePlain = str_replace(["\r\n","\r"], "\n", $notePlain);
-        $noteH = nl2br($notePlain, false);
-
-        // Build rows + totals (HTML)
-
-
-        
-// TD style helpers for dotted vertical borders (Screen 2 look)
-// TD style helpers (Screen 2): solid horizontal, dotted vertical, solid outer border
-$tdPartStyle = 'style="border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px solid #000; border-right:1px dotted #000;"';
-$tdMidStyle  = 'style="border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;"';
-$tdLastStyle = 'style="border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px solid #000;"';
-$tdSpanStyle = 'style="border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px solid #000; border-right:1px solid #000;"';
-        $rowsHtml = '';
+        // -----------------------------
+        // Normalize detail rows
+        // -----------------------------
+        $detailRows = [];
         $grandTotal = 0.0;
+        $totalQty   = 0.0;
+        $singlePriceCandidate = null;
 
         foreach ($details as $d) {
-            $partRaw = $decode($d->particulars ?? '');
-            $part = htmlspecialchars($partRaw, ENT_QUOTES, 'UTF-8');
-            // Millmark must be mill_id (mill_code). Fallback to mill (name) only if mill_code is blank.
-$millIdRaw = $decode($d->mill_code ?? '');
-if ($millIdRaw === '') {
-    $millIdRaw = $decode($d->mill ?? '');
-}
-$mill = htmlspecialchars($millIdRaw, ENT_QUOTES, 'UTF-8');
+            $particulars = $decode($d->particulars ?? '');
+            $millCode = $decode($d->mill_code ?? '');
+            if ($millCode === '') $millCode = $decode($d->mill ?? '');
 
-            $qty   = (float)($d->quantity ?? 0);
-            $price = (float)($d->price ?? 0);
-            $hf    = (float)($d->handling_fee ?? 0);
+            $qty   = (float) ($d->quantity ?? 0);
+            $price = (float) ($d->price ?? 0);
+            $amount = (float) (isset($d->cost) ? $d->cost : ($qty * $price));
+            $handlingFee = (float) ($d->handling_fee ?? 0);
 
-            $amount = (float)(isset($d->cost) ? $d->cost : ($qty * $price));
+            $isTextOnly = ($particulars !== '') && ($qty == 0.0) && ($price == 0.0) && ($amount == 0.0);
 
-            $isTextOnly = (trim($partRaw) !== '') && ($qty == 0.0) && ($price == 0.0) && ($amount == 0.0);
-
-if ($isTextOnly) {
-    $rowsHtml .= '
-      <tr>
-<td height="10" style="padding:0 1px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px solid #000; border-right:1px dotted #000;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%">
-    <tr>
-      <td height="10" valign="middle" style="line-height:10px;"><font size="8"> '.$part.' </font></td>
-    </tr>
-  </table>
-</td>
-        <td height="10" style="padding:0 1px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-          <table border="0" cellpadding="0" cellspacing="0" width="100%">
-            <tr>
-              <td height="10" align="center" valign="middle" style="line-height:10px;"><font size="8"> '.$mill.' </font></td>
-            </tr>
-          </table>
-        </td>
-        <td height="10" style="padding:0 1px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-          <table border="0" cellpadding="0" cellspacing="0" width="100%">
-            <tr>
-              <td height="10" align="right" valign="middle" style="line-height:10px;"><font size="8">&nbsp;</font></td>
-            </tr>
-          </table>
-        </td>
-        <td height="10" style="padding:0 1px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-          <table border="0" cellpadding="0" cellspacing="0" width="100%">
-            <tr>
-              <td height="10" align="right" valign="middle" style="line-height:10px;"><font size="8">&nbsp;</font></td>
-            </tr>
-          </table>
-        </td>
-        <td height="10" style="padding:0 1px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px solid #000;">
-          <table border="0" cellpadding="0" cellspacing="0" width="100%">
-            <tr>
-              <td height="10" align="right" valign="middle" style="line-height:10px;"><font size="8">-</font></td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    ';
-    continue;
-}
-
-            $grandTotal += $amount;
-
-$rowsHtml .= '
-  <tr>
-    <td height="22" style="padding:0 2px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px solid #000; border-right:1px dotted #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="22" valign="middle" style="line-height:22px;"><font size="10"> '.$part.' </font></td>
-        </tr>
-      </table>
-    </td>
-    <td height="22" style="padding:0 2px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="22" align="center" valign="middle" style="line-height:22px;"><font size="10"> '.$mill.' </font></td>
-        </tr>
-      </table>
-    </td>
-    <td height="22" style="padding:0 2px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="22" align="right" valign="middle" style="line-height:22px;"><font size="10"> '.number_format($qty, 2).' </font></td>
-        </tr>
-      </table>
-    </td>
-    <td height="22" style="padding:0 2px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="22" align="right" valign="middle" style="line-height:22px;"><font size="10"> '.number_format($price, 2).' </font></td>
-        </tr>
-      </table>
-    </td>
-    <td height="22" style="padding:0 2px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px solid #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="22" align="right" valign="middle" style="line-height:22px;"><font size="10"> '.number_format($amount, 2).' </font></td>
-        </tr>
-      </table>
-    </td>
-  </tr>
-';
-
-if ($hf > 0) {
-                $hfText = htmlspecialchars('Handling Fee P' . number_format($hf, 2) . ' per bag', ENT_QUOTES, 'UTF-8');
-$rowsHtml .= '
-  <tr>
-<td height="10" style="padding:0 1px; border-bottom:1px solid #000; border-left:1px solid #000; border-right:1px dotted #000;" valign="middle">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%">
-    <tr>
-      <td height="10" valign="middle" style="line-height:10px;"><font size="8"> '.$hfText.' </font></td>
-    </tr>
-  </table>
-</td>
-    <td height="10" style="padding:0 1px; border-top:0px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="10" align="center" valign="middle" style="line-height:10px;"><font size="8">&nbsp;</font></td>
-        </tr>
-      </table>
-    </td>
-    <td height="10" style="padding:0 1px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="10" align="right" valign="middle" style="line-height:10px;"><font size="8">&nbsp;</font></td>
-        </tr>
-      </table>
-    </td>
-    <td height="10" style="padding:0 1px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="10" align="right" valign="middle" style="line-height:10px;"><font size="8">&nbsp;</font></td>
-        </tr>
-      </table>
-    </td>
-    <td height="10" style="padding:0 1px; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px solid #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td height="10" align="right" valign="middle" style="line-height:10px;"><font size="8">-</font></td>
-        </tr>
-      </table>
-    </td>
-  </tr>
-';
+            if (!$isTextOnly) {
+                $grandTotal += $amount;
+                $totalQty   += $qty;
+                if ($price > 0) {
+                    if ($singlePriceCandidate === null) {
+                        $singlePriceCandidate = $price;
+                    } elseif (abs($singlePriceCandidate - $price) > 0.00001) {
+                        $singlePriceCandidate = '';
+                    }
+                }
             }
+
+            $detailRows[] = [
+                'type'         => $isTextOnly ? 'text' : 'normal',
+                'particulars'  => $particulars,
+                'millmark'     => $millCode,
+                'qty'          => $qty,
+                'price'        => $price,
+                'amount'       => $amount,
+                'handling_fee' => $handlingFee,
+            ];
         }
 
-        // Pad rows
-        $maxRows = 14;
-        $rowCount = count($details);
-for ($i = $rowCount; $i < $maxRows; $i++) {
-$rowsHtml .= '
-  <tr>
-    <td '.$tdPartStyle.' height="10">&nbsp;</td>
-    <td '.$tdMidStyle.' height="10">&nbsp;</td>
-    <td '.$tdMidStyle.' height="10">&nbsp;</td>
-    <td '.$tdMidStyle.' height="10">&nbsp;</td>
-    <td '.$tdLastStyle.' height="10">&nbsp;</td>
-  </tr>
-';
+        // Total-row Price/Lkg should always show a value.
+        // Use weighted average price = grand total / total quantity.
+        $displayUnitPrice = '';
+        if ($totalQty > 0) {
+            $displayUnitPrice = number_format($grandTotal / $totalQty, 2);
         }
 
-        $grandTotalF = number_format($grandTotal, 2);
+        // Summary box values based on saved mutually-exclusive VAT flags
+        $vatableFlag   = (int) ($main->vatable_sales_flag ?? 0);
+        $zeroRatedFlag = (int) ($main->zero_rated_sales_flag ?? 0);
+        $vatExemptFlag = (int) ($main->vat_exempt_sales_flag ?? 0);
 
-// ===== Table border styles to match Screen 2 =====
+        $summaryValues = [
+            'total_purchase'   => number_format($grandTotal, 2),
+            'vatable_sales'    => $vatableFlag === 1 ? number_format($grandTotal, 2) : '',
+            'vat'              => '',
+            'zero_rated_sales' => $zeroRatedFlag === 1 ? number_format($grandTotal, 2) : '',
+            'vat_exempt_sales' => $vatExemptFlag === 1 ? number_format($grandTotal, 2) : '',
+        ];
 
-// For rows that span all columns (note/footer): keep solid outer border
-$tdSpanStyle  = 'style="border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px solid #000; border-right:1px solid #000;"';
+        // Notes content
+        $notesText = $note;
+        if ($notesText === '') {
+            $notesText = '';
+        }
 
-        // ============================
+        // -----------------------------
         // PDF setup
-        // ============================
+        // -----------------------------
         $pdf = new \TCPDF('P', PDF_UNIT, 'LETTER', true, 'UTF-8', false);
         $pdf->SetPrintHeader(false);
         $pdf->SetPrintFooter(false);
 
-// Margins (TARGET): narrower left/right so border/table is closer to page edge
-// Margins (TARGET): match Screen 2 top/bottom tighter
-$mL = 8;   // keep your working left
-$mT = 5;   // TOP tighter (was 12)
-$mR = 8;   // keep your working right
-$mB = 5;   // BOTTOM tighter (was 12)
-
-$pdf->SetMargins($mL, $mT, $mR);
-$pdf->SetAutoPageBreak(false, $mB);
-        $pdf->AddPage('P', 'LETTER');
-
-        $pageW = $pdf->getPageWidth();
-        $contentW = $pageW - $mL - $mR;
-
-        // ===== Screen-1 target styling =====
-        // Blue in Screen 1 is closer to “Office/Excel blue”
-        $ruleBlue = [0, 112, 192];            // #0070C0
-        $labelBlueGray = [31, 78, 121];       // #1F4E79 (PO label tone)
-        $black = [0, 0, 0];
-
-        // Stroke weights (Screen 1 is thinner than your current)
-        $ruleW = 0.55;   // thicker like Screen 4 (tweak 0.75–1.00 if needed)
-        $ulineW = 0.18;       // underline thickness (mm)
-
-        // ============================
-        // HEADER (TCPDF primitives)
-        // ============================
-        $x0 = $mL;
-        $y0 = $mT;
-
-        // Logo + company block
-        $logoW = 50;          // slightly smaller/cleaner like Screen 1
-        $gap   = 5;
-
-        if ($logoPath && is_file($logoPath)) {
-            $pdf->Image($logoPath, $x0, $y0 + 0.2, $logoW, 0, '', '', '', false, 300, '', false, false, 0, false, false, false);
-        }
-
-        $companyLine1 = ($companyId === 2) ? 'Amerop Philippines, Inc.' : 'Sucden Philippines, Inc.';
-        $companyLine2 = 'Unit 2202, The PODIUM West Tower, 12 ADB Ave., Wack-Wack, Ortigas';
-        $companyLine3 = 'Center, Mandaluyong City, Philippines 1550';
-
-// Screen 1 behavior: wider whitespace after logo, but company header text remains LEFT-aligned.
-// So: X is pushed right by a fixed gap; alignment is 'L'.
-
-$headerBlockW = 125;          // width available for company lines
-$gapAfterLogo = 28;           // <-- increase/decrease until it matches Screen 1 gap
-
-$logoEndX = $x0 + $logoW;
-$xText = $logoEndX + $gapAfterLogo;
-
-$yText = $y0 + 0.5;
-
-$pdf->SetTextColor(0, 0, 0);
-
-$pdf->SetFont('helvetica', 'B', 10);
-$pdf->SetXY($xText, $yText);
-$pdf->Cell($headerBlockW, 0, $companyLine1, 0, 1, 'L', false, '', 0, false, 'T', 'T');
-
-$pdf->SetFont('helvetica', '', 8);
-$pdf->SetXY($xText, $yText + 3.8);
-$pdf->Cell($headerBlockW, 0, $companyLine2, 0, 1, 'L', false, '', 0, false, 'T', 'T');
-
-$pdf->SetXY($xText, $yText + 7.2);
-$pdf->Cell($headerBlockW, 0, $companyLine3, 0, 1, 'L', false, '', 0, false, 'T', 'T');
-        // Blue rule: thinner + brighter + correct y
-        $ruleY = $y0 + 18.6; // moved down (was 15.6)
-        $pdf->SetDrawColor($ruleBlue[0], $ruleBlue[1], $ruleBlue[2]);
-        $pdf->SetLineWidth($ruleW);
-        $pdf->Line($x0, $ruleY, $x0 + $contentW, $ruleY);
-
-        // Title closer to the rule (Screen 1)
-        $titleY = $ruleY + 3.8;
-        $pdf->SetTextColor(0, 0, 0);
-        $pdf->SetFont('helvetica', 'B', 20);
-        $pdf->SetXY($x0, $titleY);
-        $pdf->Cell(120, 0, 'PURCHASE ORDER', 0, 0, 'L');
-
-// PO# block (match Screen 2: value LEFT-aligned, underline lower with extra spacing)
-$poBlockW = 66;
-$poFieldW = 44;
-$poLabelW = $poBlockW - $poFieldW;
-
-$poBlockX = $x0 + $contentW - $poBlockW;
-
-// Place PO# block on the same baseline as the title area (like Screen 2)
-$poBaseY  = $titleY + 1.2;
-
-// Typography (keep as you already set)
-$poLabelSize = 11;
-$poValueSize = 18;
-
-// Label (PO#:)
-$pdf->SetFont('helvetica', 'B', $poLabelSize);
-$pdf->SetTextColor($labelBlueGray[0], $labelBlueGray[1], $labelBlueGray[2]);
-$pdf->SetXY($poBlockX, $poBaseY);
-$pdf->Cell($poLabelW, 6, 'PO#:', 0, 0, 'R', false);
-
-// Underline: LOWER than Screen 1 (creates the extra "line space" like Screen 2)
-$pdf->SetDrawColor(0, 0, 0);
-$pdf->SetLineWidth($ulineW);
-$poLineY = $poBaseY + 6.2;   // <-- move line DOWN (was 5.0)
-$pdf->Line(
-    $poBlockX + $poLabelW,
-    $poLineY,
-    $poBlockX + $poLabelW + $poFieldW,
-    $poLineY
-);
-
-// PO number: LEFT-aligned inside the underline field (like Screen 2)
-$pdf->SetFont('helvetica', 'B', $poValueSize);
-$pdf->SetTextColor($labelBlueGray[0], $labelBlueGray[1], $labelBlueGray[2]);
-
-// Put text a little above the underline, and start near the LEFT edge of the field
-$pdf->SetXY($poBlockX + $poLabelW + 1.0, $poBaseY - 2.6); // move PO value up (was +0.1)
-$pdf->Cell($poFieldW - 1.0, 6, $poNo, 0, 0, 'L', false);
-
-// Reset
-$pdf->SetTextColor(0, 0, 0);
-
-// Vendor / Address / Date + Terms / Crop Year (TARGET = your Screen 1)
-
-// Position
-$blockY = $titleY + 12.0;
-
-// Fonts
-$labelFont = 9;
-$valueFont = 12;
-
-// Heights (tight but readable)
-$rowH  = 5.0;
-$addrH = 8.2;
-
-// Underline spacing
-$textPadY  = 0.10;
-$ulineDrop = 1.35;
-
-// Column geometry (shorten left underlines so they stop well before right column)
-$rightColW    = 66;
-$leftStopPad  = 20;  // bigger = shorter left underlines (more white space before right column)
-
-$rightColX    = $x0 + $contentW - $rightColW;
-$leftLineEndX = $rightColX - $leftStopPad;
-
-$xL = $x0;
-$xR = $rightColX;
-$rightW = $rightColW;
-
-// label widths (fixed like your original look)
-$labelWLeft  = 18;
-$labelWRight = 18;
-
-// ---------------- helpers ----------------
-
-// LEFT: underline includes label+value, ends at fixed endpoint
-$drawLeft = function($y, $label, $value) use (
-    $pdf, $xL, $labelFont, $valueFont, $labelWLeft,
-    $rowH, $textPadY, $ulineW, $ulineDrop, $leftLineEndX
-) {
-    $pdf->SetTextColor(0,0,0);
-
-    $pdf->SetFont('helvetica', '', $labelFont);
-    $pdf->SetXY($xL, $y + $textPadY);
-    $pdf->Cell($labelWLeft, $rowH, $label, 0, 0, 'L');
-
-    $pdf->SetFont('helvetica', 'B', $valueFont);
-    $pdf->SetXY($xL + $labelWLeft, $y + $textPadY);
-    $pdf->Cell(($leftLineEndX - $xL) - $labelWLeft, $rowH, $value, 0, 0, 'L');
-
-    $pdf->SetDrawColor(0,0,0);
-    $pdf->SetLineWidth($ulineW);
-    $yLine = $y + $rowH + $ulineDrop;
-    $pdf->Line($xL, $yLine, $leftLineEndX, $yLine);
-
-    return $yLine; // underline Y
-};
-
-// RIGHT (FULL underline): underline includes label+value (for Crop Year)
-$drawRightFullUnderline = function($y, $label, $value) use (
-    $pdf, $xR, $rightW, $labelFont, $valueFont, $labelWRight,
-    $rowH, $textPadY, $ulineW, $ulineDrop
-) {
-    $pdf->SetTextColor(0,0,0);
-
-    $pdf->SetFont('helvetica', '', $labelFont);
-    $pdf->SetXY($xR, $y + $textPadY);
-    $pdf->Cell($labelWRight, $rowH, $label, 0, 0, 'L');
-
-    $pdf->SetFont('helvetica', 'B', $valueFont);
-    $pdf->SetXY($xR + $labelWRight, $y + $textPadY);
-    $pdf->Cell($rightW - $labelWRight, $rowH, $value, 0, 0, 'L');
-
-    // FULL underline across the entire right field (label + value)
-    $pdf->SetDrawColor(0,0,0);
-    $pdf->SetLineWidth($ulineW);
-    $yLine = $y + $rowH + $ulineDrop;
-    $pdf->Line($xR, $yLine, $xR + $rightW, $yLine);
-
-    return $yLine;
-};
-
-// RIGHT (VALUE ONLY): underline starts after label (for Terms)
-$drawRightValueOnlyUnderline = function($y, $label, $value) use (
-    $pdf, $xR, $rightW, $labelFont, $valueFont, $labelWRight,
-    $rowH, $textPadY, $ulineW, $ulineDrop
-) {
-    $pdf->SetTextColor(0,0,0);
-
-    $pdf->SetFont('helvetica', '', $labelFont);
-    $pdf->SetXY($xR, $y + $textPadY);
-    $pdf->Cell($labelWRight, $rowH, $label, 0, 0, 'L');
-
-    $pdf->SetFont('helvetica', 'B', $valueFont);
-    $pdf->SetXY($xR + $labelWRight, $y + $textPadY);
-    $pdf->Cell($rightW - $labelWRight, $rowH, $value, 0, 0, 'L');
-
-    // underline ONLY under the value area (NOT under label)
-    $pdf->SetDrawColor(0,0,0);
-    $pdf->SetLineWidth($ulineW);
-    $yLine = $y + $rowH + $ulineDrop;
-    $pdf->Line($xR + $labelWRight, $yLine, $xR + $rightW, $yLine);
-
-    return $yLine;
-};
-
-// ---------------- layout rows ----------------
-
-// Row 1: Vendor + Terms
-$y1 = $blockY;
-$drawLeft($y1, 'Vendor:', $vendorName);
-// Terms: label NOT underlined, value only
-$drawRightValueOnlyUnderline($y1, 'Terms:', $terms);
-
-// Row 2: Address + Crop Year (Crop Year aligned with Address row)
-$y2 = $y1 + ($rowH + 4.0); // move Address/CropYear row down (was 2.2)
-// Crop Year vertical tweak (must be defined BEFORE any use)
-$cropTextDown = 3.0;
-// Address label (use rowH, not addrH, so it aligns with the first line of MultiCell)
-$pdf->SetTextColor(0,0,0);
-$pdf->SetFont('helvetica', '', $labelFont);
-$pdf->SetXY($xL, $y2 + $textPadY + $cropTextDown);
-$pdf->Cell($labelWLeft, $rowH, 'Address:', 0, 0, 'L');
-
-// Address value (starts at the exact same Y as label)
-$pdf->SetFont('helvetica', '', 9);
-$pdf->SetXY($xL + $labelWLeft, $y2 + $textPadY + $cropTextDown);
-$pdf->MultiCell(
-    ($leftLineEndX - $xL) - $labelWLeft,
-    $addrH,
-    $vendorAddress,
-    0,
-    'L',
-    false,
-    0
-);
-
-// Address underline (keep based on addrH so it sits below the full address area)
-$pdf->SetDrawColor(0,0,0);
-$pdf->SetLineWidth($ulineW);
-$yLineAddr = $y2 + $addrH + $ulineDrop;
-$pdf->Line($xL, $yLineAddr, $leftLineEndX, $yLineAddr);
-
-// Crop Year: draw TEXT ONLY once, then ONE underline aligned with Address underline
-
-// IMPORTANT: make sure Crop Year is NOT drawn anywhere else (no $drawRightFullUnderline($y2, ...) call)
-
-// Move Crop Year text slightly down so it sits just above the underline
-$cropTextDown = 3.0;
-
-$pdf->SetTextColor(0,0,0);
-
-// label
-$pdf->SetFont('helvetica', '', $labelFont);
-$pdf->SetXY($xR, $y2 + $textPadY + $cropTextDown);
-$pdf->Cell($labelWRight, $rowH, 'Crop Year:', 0, 0, 'L');
-
-// value
-$pdf->SetFont('helvetica', 'B', $valueFont);
-$pdf->SetXY($xR + $labelWRight, $y2 + $textPadY + $cropTextDown);
-$pdf->Cell($rightW - $labelWRight, $rowH, $cropYearDisplay, 0, 0, 'L');
-
-// single underline aligned to Address underline
-$pdf->SetDrawColor(0,0,0);
-$pdf->SetLineWidth($ulineW);
-$pdf->Line($xR, $yLineAddr, $xR + $rightW, $yLineAddr);
-// Row 3: Date (left only)
-$y3 = $y2 + $addrH + 2.0;
-$yLineDate = $drawLeft($y3, 'Date:', $poDate);
-
-// keep leftW for downstream code
-$leftW = $leftLineEndX - $x0;
-
-// Push table BELOW Date underline so it never overlaps
-// Push the table far enough below Date underline so it never overlaps
-// Stronger safety gap so the table header border never overlaps Date row
-// Start table safely below Date underline (prevents overlap)
-$afterHeaderY = $yLineDate + 4.0;
-$pdf->SetY($afterHeaderY);
-$pdf->SetY($afterHeaderY);$pdf->SetY($afterHeaderY);
-// Body table must start BELOW the Date underline (prevents overlap 100%)
-$afterHeaderY = $yLineDate + 3.0;
-$pdf->SetY($afterHeaderY);
-
-        // ============================
-        // BODY TABLE + NOTE + SIGNATURE (HTML)
-        // ============================
-// Column widths (TARGET like Screen 2)
-$wPart  = 38;
-$wMill  = 13;
-$wQty   = 13;
-$wPrice = 12;
-$wAmt   = 24;
-
-// Total row alignment: "Total" spans first 3 columns; "PHP" under Price; amount under Amount
-$wTotalLabel = $wPart + $wMill + $wQty; // 64
-
-// FIX: remove ONLY the top border of the FIRST NON-EMPTY BODY row cells
-// so the line directly under the header won't get double-drawn (thick).
-$rowsHtmlFixed = $rowsHtml;
-
-/*$rowsHtmlFixed = preg_replace_callback(
-    // first <tr> that contains a <td> with real content (not just &nbsp; / spaces)
-    '/<tr\b[^>]*>(?:(?!<\/tr>).)*?<td\b[^>]*>\s*(?!&nbsp;)(?:(?!<\/td>).)+<\/td>(?:(?!<\/tr>).)*?<\/tr>/si',
-    function ($m) {
-        $tr = $m[0];
-
-        // Only within THIS first non-empty row: force border-top:0 on every <td>
-        $tr = preg_replace_callback('/<td\b([^>]*)>/i', function ($tdm) {
-            $attrs = $tdm[1];
-
-            if (preg_match('/\sstyle\s*=\s*"([^"]*)"/i', $attrs, $sm)) {
-                $style = $sm[1];
-
-                // remove any border-top declarations, then force border-top:0
-                $style = preg_replace('/\bborder-top\s*:\s*[^;"]+;?/i', '', $style);
-                $style = trim($style);
-                if ($style !== '' && substr($style, -1) !== ';') $style .= ';';
-                $style .= ' border-top:0;';
-
-                $attrs = preg_replace('/\sstyle\s*=\s*"[^"]*"/i', ' style="' . $style . '"', $attrs, 1);
-                return '<td' . $attrs . '>';
+        // ===========================================
+        // LAYOUT / STYLE CONFIG (VARIABLE-DRIVEN)
+        // ===========================================
+        $layout = [
+            'page' => [
+                'orientation'   => 'P',
+                'size'          => 'LETTER',
+                'margin_left'   => 8,
+                'margin_top'    => 7,
+                'margin_right'  => 8,
+                'margin_bottom' => 7,
+            ],
+            'colors' => [
+                'brand_blue'        => [0, 112, 192],
+                'po_blue'           => [31, 78, 121],
+                'black'             => [0, 0, 0],
+                'gray'              => [80, 80, 80],
+                'line_gray'         => [120, 120, 120],
+                'table_line_dark'   => [92, 92, 92],
+                'table_outer_dark'  => [70, 70, 70],
+                'table_header_fill' => [220, 230, 241],
+                'white'             => [255, 255, 255],
+            ],
+            'lines' => [
+                'blue_rule_width'     => 0.55,
+                'field_underline'     => 0.10,
+                'box_outer'           => 0.18,
+                'box_inner'           => 0.10,
+                'table_outer'         => 0.40,
+                'table_inner'         => 0.28,
+                'footer_divider'      => 0.12,
+            ],
+            'fonts' => [
+                'base' => ['family' => 'helvetica', 'style' => '',  'size' => 9],
+                'company_name'   => ['family' => 'helvetica', 'style' => 'B', 'size' => 11],
+                'company_addr'   => ['family' => 'helvetica', 'style' => '',  'size' => 8],
+                'title'          => ['family' => 'helvetica', 'style' => 'B', 'size' => 18],
+                'po_label'       => ['family' => 'helvetica', 'style' => 'B', 'size' => 11],
+                'po_value'       => ['family' => 'helvetica', 'style' => 'B', 'size' => 17],
+                'field_label'    => ['family' => 'helvetica', 'style' => '',  'size' => 9],
+                'field_value'    => ['family' => 'helvetica', 'style' => 'B', 'size' => 11],
+                'table_header'   => ['family' => 'helvetica', 'style' => 'B', 'size' => 8],
+                'table_row'      => ['family' => 'helvetica', 'style' => '',  'size' => 8],
+                'table_total'    => ['family' => 'helvetica', 'style' => 'B', 'size' => 9],
+                'notes_label'    => ['family' => 'helvetica', 'style' => 'B', 'size' => 8],
+                'notes_body'     => ['family' => 'helvetica', 'style' => '',  'size' => 8],
+                'legal'          => ['family' => 'helvetica', 'style' => '',  'size' => 7],
+                'summary_label'  => ['family' => 'helvetica', 'style' => '',  'size' => 8],
+                'summary_value'  => ['family' => 'helvetica', 'style' => 'B', 'size' => 8],
+                'footer_label'   => ['family' => 'helvetica', 'style' => 'B', 'size' => 9],
+                'footer_value'   => ['family' => 'helvetica', 'style' => '',  'size' => 9],
+                'disclaimer'     => ['family' => 'helvetica', 'style' => 'I', 'size' => 8],
+            ],
+            'header' => [
+                'logo' => [
+                    'x' => 8,
+                    'y' => 7.5,
+                    'w' => 32,
+                    'h' => 0,
+                ],
+                'company_name' => [
+                    'x' => 48,
+                    'y' => 8.0,
+                    'w' => 125,
+                    'align' => 'C',
+                ],
+                'company_addr1' => [
+                    'x' => 48,
+                    'y' => 12.5,
+                    'w' => 125,
+                    'align' => 'C',
+                ],
+                'company_addr2' => [
+                    'x' => 48,
+                    'y' => 16.0,
+                    'w' => 125,
+                    'align' => 'C',
+                ],
+                'rule' => [
+                    'x1' => 8,
+                    'y'  => 22.6,
+                    'x2' => 208,
+                ],
+                'title' => [
+                    'x' => 8,
+                    'y' => 25.8,
+                    'w' => 95,
+                    'align' => 'L',
+                ],
+                'po_label' => [
+                    'x' => 146,
+                    'y' => 27.0,
+                    'w' => 16,
+                    'align' => 'R',
+                    'text' => 'PO#:',
+                ],
+                'po_value' => [
+                    'x' => 164.0,
+                    'y' => 23.9,
+                    'w' => 36.0,
+                    'align' => 'L',
+                ],
+                'po_line' => [
+                    'x1' => 164.0,
+                    'y'  => 33.0,
+                    'x2' => 200.0,
+                ],
+            ],
+            'fields' => [
+                'vendor' => [
+                    'label' => ['x' => 8,   'y' => 39.0, 'w' => 18],
+                    'value' => ['x' => 26,  'y' => 39.0, 'w' => 103],
+                    'line'  => ['x1' => 8,  'y' => 45.2, 'x2' => 129],
+                ],
+                'terms' => [
+                    'label' => ['x' => 136, 'y' => 39.0, 'w' => 16],
+                    'value' => ['x' => 152, 'y' => 39.0, 'w' => 48],
+                    'line'  => ['x1' => 152,'y' => 45.2, 'x2' => 200],
+                ],
+                'address' => [
+                    'label' => ['x' => 8,   'y' => 47.3, 'w' => 18],
+                    'value' => ['x' => 26,  'y' => 47.0, 'w' => 103, 'h' => 8.2],
+                    'line'  => ['x1' => 8,  'y' => 56.2, 'x2' => 129],
+                ],
+                'crop_year' => [
+                    'label' => ['x' => 136, 'y' => 50.3, 'w' => 20],
+                    'value' => ['x' => 156, 'y' => 50.3, 'w' => 44],
+                    'line'  => ['x1' => 136,'y' => 56.2, 'x2' => 200],
+                ],
+                'date' => [
+                    'label' => ['x' => 8,   'y' => 58.0, 'w' => 18],
+                    'value' => ['x' => 26,  'y' => 58.0, 'w' => 103],
+                    'line'  => ['x1' => 8,  'y' => 64.2, 'x2' => 129],
+                ],
+            ],
+            'table' => [
+                'x' => 8,
+                'y' => 67.0,
+                'w' => 192.0,
+                'header_h'    => 7.0,
+                'row_h'       => 7.0,
+                'small_row_h' => 5.0,
+                'blank_row_h' => 7.0,
+                'total_h'     => 7.0,
+                'max_rows'    => 5,
+                'padding_l'   => 1.2,
+                'padding_r'   => 1.2,
+                'cols' => [
+                    'item'        => 10.0,
+                    'particulars' => 66.0,
+                    'millmark'    => 26.0,
+                    'qty'         => 26.0,
+                    'price'       => 30.0,
+                    'amount'      => 34.0,
+                ],
+                'labels' => [
+                    'item'        => 'Item',
+                    'particulars' => 'Particulars',
+                    'millmark'    => 'Millmark',
+                    'qty'         => 'Qty in Lkg',
+                    'price'       => 'Price/Lkg',
+                    'amount'      => 'Amount',
+                ],
+            ],
+            'notes' => [
+                'label' => [
+                    'x' => 8,
+                    'y' => 140.0,
+                    'w' => 16,
+                    'text' => 'NOTES:',
+                ],
+                'box' => [
+                    'x' => 8,
+                    'y' => 145.0,
+                    'w' => 112.0,
+                    'h' => 16.0,
+                ],
+                'content' => [
+                    'x' => 10.0,
+                    'y' => 147.5,
+                    'w' => 108.0,
+                    'h' => 11.0,
+                ],
+            ],
+            'legal' => [
+                'x' => 8,
+                'y' => 170.4,
+                'w' => 108.0,
+                'line_h' => 3.8,
+                'text_lines' => [
+                    'This document serves as the basis for booking purchased goods.',
+                    'This is an important basis for the agreement between both parties regarding the delivery and payment of goods.',
+                    'Any/All charges shall be arranged according to the specific set up of this order, if applicable.',
+                    'For comprehensive terms and conditions governing this transaction, please refer to the executed contract.',
+                ],
+            ],
+            'summary' => [
+                'box' => [
+                    'x' => 126.0,
+                    'y' => 145.0,
+                    'w' => 74.0,
+                    'h' => 28.5,
+                ],
+                'row_h'    => 5.7,
+                'label_w'  => 42.0,
+                'value_w'  => 32.0,
+                'rows' => [
+                    ['label' => 'Total Purchase',   'key' => 'total_purchase'],
+                    ['label' => 'Vatable Sales',    'key' => 'vatable_sales'],
+                    ['label' => 'VAT',              'key' => 'vat'],
+                    ['label' => 'Zero-Rated Sales', 'key' => 'zero_rated_sales'],
+                    ['label' => 'VAT Exempt Sales', 'key' => 'vat_exempt_sales'],
+                ],
+            ],
+            'footer' => [
+                'box' => [
+                    'x' => 8,
+                    'y' => 188.5,
+                    'w' => 192.0,
+                    'h' => 26.0,
+                ],
+                'divider' => [
+                    'x'  => 104.0,
+                    'y1' => 188.5,
+                    'y2' => 214.5,
+                ],
+                'left' => [
+                    'label' => ['x' => 14.0,  'y' => 194.5, 'w' => 34.0, 'text' => 'Confirmed By:'],
+                    'value' => ['x' => 49.0,  'y' => 194.5, 'w' => 46.0],
+                ],
+                'right' => [
+                    'label' => ['x' => 112.0, 'y' => 194.5, 'w' => 66.0, 'text' => 'Conforme by Supplier'],
+                ],
+            ],
+            'disclaimer' => [
+                'x' => 8,
+                'y' => 218.5,
+                'w' => 192.0,
+                'align' => 'C',
+                'text' => '*This document is not valid for claiming input taxes*',
+            ],
+            'format' => [
+                'qty_decimals'    => 2,
+                'price_decimals'  => 2,
+                'amount_decimals' => 2,
+                'empty_amount_dash' => '-',
+            ],
+        ];
+
+        $pdf->SetMargins(
+            $layout['page']['margin_left'],
+            $layout['page']['margin_top'],
+            $layout['page']['margin_right']
+        );
+        $pdf->SetAutoPageBreak(false, $layout['page']['margin_bottom']);
+        $pdf->AddPage($layout['page']['orientation'], $layout['page']['size']);
+
+        // -----------------------------
+        // Small render helpers
+        // -----------------------------
+        $applyFont = function ($key) use ($pdf, $layout) {
+            $f = $layout['fonts'][$key];
+            $pdf->SetFont($f['family'], $f['style'], $f['size']);
+        };
+
+        $setTextColor = function ($key) use ($pdf, $layout) {
+            $c = $layout['colors'][$key];
+            $pdf->SetTextColor($c[0], $c[1], $c[2]);
+        };
+
+        $setDrawColor = function ($key) use ($pdf, $layout) {
+            $c = $layout['colors'][$key];
+            $pdf->SetDrawColor($c[0], $c[1], $c[2]);
+        };
+
+        $drawText = function (
+            float $x,
+            float $y,
+            float $w,
+            string $text,
+            string $fontKey,
+            string $align = 'L',
+            string $colorKey = 'black',
+            float $h = 0
+        ) use ($pdf, $applyFont, $setTextColor) {
+            $applyFont($fontKey);
+            $setTextColor($colorKey);
+            $pdf->SetXY($x, $y);
+            $pdf->Cell($w, $h, $text, 0, 0, $align, false, '', 0, false, 'T', 'T');
+        };
+
+        $drawLine = function (
+            float $x1,
+            float $y,
+            float $x2,
+            float $width,
+            string $colorKey = 'line_gray'
+        ) use ($pdf, $setDrawColor) {
+            $setDrawColor($colorKey);
+            $pdf->SetLineWidth($width);
+            $pdf->Line($x1, $y, $x2, $y);
+        };
+
+        $drawField = function (
+            array $cfg,
+            string $labelText,
+            string $valueText,
+            bool $valueBold = true,
+            bool $multiline = false
+        ) use ($pdf, $layout, $applyFont, $setTextColor, $drawLine) {
+            // Label
+            $applyFont('field_label');
+            $setTextColor('black');
+            $pdf->SetXY($cfg['label']['x'], $cfg['label']['y']);
+            $pdf->Cell($cfg['label']['w'], 0, $labelText, 0, 0, 'L', false, '', 0, false, 'T', 'T');
+
+            // Value
+            $applyFont($valueBold ? 'field_value' : 'field_label');
+            $pdf->SetXY($cfg['value']['x'], $cfg['value']['y']);
+
+            if ($multiline) {
+                $pdf->MultiCell(
+                    $cfg['value']['w'],
+                    $cfg['value']['h'] ?? 6,
+                    $valueText,
+                    0,
+                    'L',
+                    false,
+                    1
+                );
+            } else {
+                $pdf->Cell($cfg['value']['w'], 0, $valueText, 0, 0, 'L', false, '', 0, false, 'T', 'T');
             }
 
-            return '<td' . $attrs . ' style="border-top:0;">';
-        }, $tr);
+            // Line
+            $drawLine(
+                $cfg['line']['x1'],
+                $cfg['line']['y'],
+                $cfg['line']['x2'],
+                $cfg['line']['width'] ?? $layout['lines']['field_underline'],
+                'black'
+            );
+        };
 
-        return $tr;
-    },
-    $rowsHtml,
-    1
-);*/
+        $fitText = function (
+            string $text,
+            float $width,
+            string $fontKey
+        ) use ($pdf, $layout) {
+            $f = $layout['fonts'][$fontKey];
+            $pdf->SetFont($f['family'], $f['style'], $f['size']);
+            $text = (string) $text;
+            while ($text !== '' && $pdf->GetStringWidth($text) > $width) {
+                $text = mb_substr($text, 0, -1);
+            }
+            return $text;
+        };
 
-// Decode HTML entities first so "Storage &amp; Insurance" becomes "Storage & Insurance"
-$noteRaw = html_entity_decode((string)$noteH, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-$noteRaw = trim($noteRaw);
-$noteRaw = preg_replace('/\s+/u', ' ', $noteRaw);
+        // -----------------------------
+        // HEADER
+        // -----------------------------
+        if ($logoPath && is_file($logoPath)) {
+            $pdf->Image(
+                $logoPath,
+                $layout['header']['logo']['x'],
+                $layout['header']['logo']['y'],
+                $layout['header']['logo']['w'],
+                $layout['header']['logo']['h'],
+                '',
+                '',
+                '',
+                false,
+                300,
+                '',
+                false,
+                false,
+                0,
+                false,
+                false,
+                false
+            );
+        }
 
-$labels = [
-  'storage'  => 'Storage\s*(?:&|&amp;|&amp;amp;)\s*Insurance\s*:',
-  'fullpay'  => 'Full\s*payment\b[^:]*:?',
-  'withdraw' => 'Withdrawal\s*:',
-];
+        $drawText(
+            $layout['header']['company_name']['x'],
+            $layout['header']['company_name']['y'],
+            $layout['header']['company_name']['w'],
+            $companyLine1,
+            'company_name',
+            $layout['header']['company_name']['align']
+        );
+        $drawText(
+            $layout['header']['company_addr1']['x'],
+            $layout['header']['company_addr1']['y'],
+            $layout['header']['company_addr1']['w'],
+            $companyLine2,
+            'company_addr',
+            $layout['header']['company_addr1']['align']
+        );
+        $drawText(
+            $layout['header']['company_addr2']['x'],
+            $layout['header']['company_addr2']['y'],
+            $layout['header']['company_addr2']['w'],
+            $companyLine3,
+            'company_addr',
+            $layout['header']['company_addr2']['align']
+        );
 
-// split into chunks starting at each label (keeps labels)
-$splitRe = '/(?=(' . $labels['storage'] . '|' . $labels['fullpay'] . '|' . $labels['withdraw'] . '))/i';
-$chunks  = preg_split($splitRe, $noteRaw, -1, PREG_SPLIT_NO_EMPTY);
+        $drawLine(
+            $layout['header']['rule']['x1'],
+            $layout['header']['rule']['y'],
+            $layout['header']['rule']['x2'],
+            $layout['lines']['blue_rule_width'],
+            'brand_blue'
+        );
 
-// keep first occurrence per section
-$found = ['storage'=>'', 'fullpay'=>'', 'withdraw'=>''];
-foreach ($chunks as $c) {
-    $c = trim($c);
-    if ($c === '') continue;
+        $drawText(
+            $layout['header']['title']['x'],
+            $layout['header']['title']['y'],
+            $layout['header']['title']['w'],
+            'PURCHASE ORDER',
+            'title',
+            $layout['header']['title']['align']
+        );
 
-    if ($found['storage'] === ''  && preg_match('/^' . $labels['storage'] . '/i', $c))  { $found['storage']  = $c; continue; }
-    if ($found['fullpay'] === ''  && preg_match('/^' . $labels['fullpay'] . '/i', $c))  { $found['fullpay']  = $c; continue; }
-    if ($found['withdraw'] === '' && preg_match('/^' . $labels['withdraw'] . '/i', $c)) { $found['withdraw'] = $c; continue; }
-}
+        $drawText(
+            $layout['header']['po_label']['x'],
+            $layout['header']['po_label']['y'],
+            $layout['header']['po_label']['w'],
+            $layout['header']['po_label']['text'],
+            'po_label',
+            $layout['header']['po_label']['align'],
+            'po_blue'
+        );
+        $drawText(
+            $layout['header']['po_value']['x'],
+            $layout['header']['po_value']['y'],
+            $layout['header']['po_value']['w'],
+            $poNo,
+            'po_value',
+            $layout['header']['po_value']['align'],
+            'po_blue'
+        );
+        $drawLine(
+            $layout['header']['po_line']['x1'],
+            $layout['header']['po_line']['y'],
+            $layout['header']['po_line']['x2'],
+            $layout['lines']['field_underline'],
+            'black'
+        );
 
-// Screen-2 order
-$lines = [];
-if ($found['storage']  !== '') $lines[] = $found['storage'];
-if ($found['fullpay']  !== '') $lines[] = $found['fullpay'];
-if ($found['withdraw'] !== '') $lines[] = $found['withdraw'];
+        // -----------------------------
+        // FIELDS
+        // -----------------------------
+        $drawField($layout['fields']['vendor'], 'Vendor:', $vendorName, true, false);
+        $drawField($layout['fields']['terms'], 'Terms:', $terms, true, false);
+        $drawField($layout['fields']['address'], 'Address:', $vendorAddress, false, true);
+        $drawField($layout['fields']['crop_year'], 'Crop Year:', $cropYearDisplay, true, false);
+        $drawField($layout['fields']['date'], 'Date:', $poDate, true, false);
 
-// Fallback: if nothing matched, just show the raw note as one line
-if (!$lines) $lines = [$noteRaw];
+        // -----------------------------
+        // TABLE GEOMETRY
+        // -----------------------------
+        $t = $layout['table'];
+        $x = $t['x'];
+        $y = $t['y'];
+        $w = $t['w'];
 
-// Render each line as its own TABLE ROW (TCPDF always respects this)
-$noteLinesHtml = '';
-foreach ($lines as $ln) {
-    // escape only basic; if you already have HTML entities, you can remove htmlspecialchars
-$lnSafe = trim(strip_tags($ln)); // keep it plain text; avoid double-encoding
-$noteLinesHtml .= '<tr><td style="padding:0 0 6px 0; line-height:12px;"><font size="9">' . $lnSafe . '</font></td></tr>';
-}
+        $col = $t['cols'];
+        $xItem = $x;
+        $xPart = $xItem + $col['item'];
+        $xMill = $xPart + $col['particulars'];
+        $xQty  = $xMill + $col['millmark'];
+        $xPrice= $xQty  + $col['qty'];
+        $xAmt  = $xPrice + $col['price'];
 
-// Force the note text to "drop down" (TCPDF ignores padding-top sometimes)
-$noteLinesHtml = '<tr><td height="10" style="font-size:0; line-height:0;">&nbsp;</td></tr>' . $noteLinesHtml;
+        $rowsToDraw = max(count($detailRows), $t['max_rows']);
+        $tableBodyHeight = ($t['header_h']) + ($rowsToDraw * $t['row_h']) + $t['total_h'];
+        $tableBottomY = $y + $tableBodyHeight;
 
-// IMPORTANT: TCPDF uses CURRENT line width for HTML borders.
-// Reset BEFORE any writeHTML to prevent thick “marker” seams.
-$pdf->SetDrawColor(0, 0, 0);
-$pdf->SetLineWidth(0.18);
+        // Table outer border base
+        $setDrawColor('table_outer_dark');
+        $pdf->SetLineWidth(0.40);
+        $pdf->Rect($x, $y, $w, $tableBodyHeight);
 
-// IMPORTANT: TCPDF uses CURRENT line width for HTML borders.
-// Reset BEFORE any writeHTML to prevent thick seams.
-$pdf->SetDrawColor(0, 0, 0);
-$pdf->SetLineWidth(0.18);
+        // Header fill
+        $fill = $layout['colors']['table_header_fill'];
+        $pdf->SetFillColor($fill[0], $fill[1], $fill[2]);
+        $pdf->Rect($x, $y, $w, $t['header_h'], 'F');
 
-// -------------------------------
-// ONE TABLE ONLY: main + note + confirmed (no split writeHTML)
-// NOTE has border-bottom:1px, CONFIRMED has border-top:0 -> SINGLE thin line only once
-// -------------------------------
-$bodyTbl = <<<EOD
+        // Thin inner vertical lines only
+        $setDrawColor('line_gray');
+        $pdf->SetLineWidth(0.12);
+        foreach ([$xPart, $xMill, $xQty, $xPrice, $xAmt] as $vx) {
+            $pdf->Line($vx, $y, $vx, $tableBottomY);
+        }
 
-<table border="0" cellpadding="2" cellspacing="0" width="100%"
-       style="border:0px solid #000; border-collapse:separate; border-spacing:0;">
+        // Thicker horizontal lines
+        $setDrawColor('table_line_dark');
+        $pdf->SetLineWidth(0.28);
+        $pdf->Line($x, $y + $t['header_h'], $x + $w, $y + $t['header_h']);
 
-  <!-- HEADER ROW -->
-<tr bgcolor="#DCE6F1" align="center" valign="middle">
-    <td width="{$wPart}%"  height="12" style="font-weight:bold; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;"><font size="8"><b>Particulars</b></font></td>
-    <td width="{$wMill}%"  height="12" style="font-weight:bold; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;"><font size="8"><b>Millmark</b></font></td>
-    <td width="{$wQty}%"   height="12" style="font-weight:bold; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;"><font size="8"><b>Qty in Lkg</b></font></td>
-    <td width="{$wPrice}%" height="12" style="font-weight:bold; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;"><font size="8"><b>Price/Lkg</b></font></td>
-    <td width="{$wAmt}%"   height="12" style="font-weight:bold; border-top:1px solid #000; border-bottom:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;"><font size="8"><b>Amount</b></font></td>
-  </tr>
+        for ($i = 1; $i <= $rowsToDraw; $i++) {
+            $yy = $y + $t['header_h'] + ($i * $t['row_h']);
+            $pdf->Line($x, $yy, $x + $w, $yy);
+        }
 
-  <!-- BODY ROWS -->
-  {$rowsHtmlFixed}
+        // Header labels
+        $drawText($xItem, $y + 1.6, $col['item'],        $t['labels']['item'],        'table_header', 'C');
+        $drawText($xPart, $y + 1.6, $col['particulars'], $t['labels']['particulars'], 'table_header', 'C');
+        $drawText($xMill, $y + 1.6, $col['millmark'],    $t['labels']['millmark'],    'table_header', 'C');
+        $drawText($xQty,  $y + 1.6, $col['qty'],         $t['labels']['qty'],         'table_header', 'C');
+        $drawText($xPrice,$y + 1.6, $col['price'],       $t['labels']['price'],       'table_header', 'C');
+        $drawText($xAmt,  $y + 1.6, $col['amount'],      $t['labels']['amount'],      'table_header', 'C');
 
-<!-- TOTAL ROW -->
-<tr bgcolor="#DCE6F1" valign="middle">
-  <td width="{$wPart}%" height="14" style="font-weight:bold; border-top:1px solid #000; border-left:1px solid #000;">
-    <font size="10"><b>Total</b></font>
-  </td>
+        // Detail rows
+        $rowY = $y + $t['header_h'];
+        $itemNo = 1;
+        $renderedBaseRows = 0;
 
-  <td width="{$wMill}%" height="14" style="border-top:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-    &nbsp;
-  </td>
+        foreach ($detailRows as $r) {
+            if ($renderedBaseRows >= $t['max_rows']) {
+                break;
+            }
 
-  <td width="{$wQty}%" height="14" style="border-top:1px solid #000; border-left:1px dotted #000; border-right:1px dotted #000;">
-    &nbsp;
-  </td>
+            $cy = $rowY + ($renderedBaseRows * $t['row_h']) + 1.5;
 
-  <td width="{$wPrice}%" height="14" align="center" style="font-weight:bold; border-top:1px solid #000; border-left:1px dotted #000;">
-    <font size="10"><b>PHP</b></font>
-  </td>
+            if ($r['type'] === 'text') {
+                $txt = $fitText($r['particulars'], $col['particulars'] - 2.5, 'table_row');
+                $drawText($xPart + 1.0, $cy, $col['particulars'] - 2.0, $txt, 'table_row', 'L');
+                if ($r['millmark'] !== '') {
+                    $drawText($xMill, $cy, $col['millmark'], $fitText($r['millmark'], $col['millmark'] - 2, 'table_row'), 'table_row', 'C');
+                }
+                $drawText($xAmt, $cy, $col['amount'] - 1.0, $layout['format']['empty_amount_dash'], 'table_row', 'R');
+            } else {
+                $drawText($xItem, $cy, $col['item'], (string) $itemNo, 'table_row', 'C');
 
-  <td width="{$wAmt}%" height="14" align="right" style="font-weight:bold; border-top:1px solid #000; border-right:1px solid #000;">
-    <font size="10"><b>{$grandTotalF}</b></font>
-  </td>
-</tr>
+                $partText = $fitText($r['particulars'], $col['particulars'] - 2.5, 'table_row');
+                $millText = $fitText($r['millmark'],    $col['millmark'] - 2.5,    'table_row');
 
-  <!-- NOTE ROW (thin divider via border-bottom:0.0mm; attached to CONFIRMED) -->
-  <tr valign="top">
-    <td colspan="5" height="90"
-        style="padding:0;
-               border-top:0;
-               border-bottom:0.0mm solid #000;
-               border-left:1px solid #000;
-               border-right:1px solid #000;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr valign="top">
-          <td width="10%" style="padding:6px 4px 2px 4px;">
-            <font size="10"><b>Note:</b></font>
-          </td>
-          <td width="90%" style="padding:6px 20px 2px 26px;">
-            <table border="0" cellpadding="0" cellspacing="0" width="96%">
-              {$noteLinesHtml}
-            </table>
-          </td>
-        </tr>
-      </table>
-    </td>
-  </tr>
+                $drawText($xPart + 1.0, $cy, $col['particulars'] - 2.0, $partText, 'table_row', 'L');
+                $drawText($xMill, $cy, $col['millmark'], $millText, 'table_row', 'C');
+                $drawText($xQty,  $cy, $col['qty'] - 1.0, number_format($r['qty'], $layout['format']['qty_decimals']), 'table_row', 'R');
+                $drawText($xPrice,$cy, $col['price'] - 1.0, number_format($r['price'], $layout['format']['price_decimals']), 'table_row', 'R');
+                $drawText($xAmt,  $cy, $col['amount'] - 1.0, number_format($r['amount'], $layout['format']['amount_decimals']), 'table_row', 'R');
 
-  <!-- CONFIRMED ROW (NO TOP BORDER = prevents double stroke, attached to NOTE) -->
-  <tr valign="top">
-    <td colspan="5" height="52"
-        style="padding:0;">
-      <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr valign="top">
+                $itemNo++;
+            }
 
-          <!-- LEFT -->
-          <td width="49.9%" height="52" style="padding:0;">
-            <table border="0" cellpadding="0" cellspacing="0" width="100%">
-              <tr><td height="12" style="font-size:0; line-height:0;">&nbsp;</td></tr>
-              <tr valign="middle">
-                <td width="30%" style="padding-left:6px;"><font size="9"><b>Confirmed By:</b></font></td>
-                <td width="70%" style="padding-left:12px;"><font size="9"><br>{$confirmedCompany}</font></td>
-              </tr>
-            </table>
-          </td>
+            $renderedBaseRows++;
 
-          <!-- CENTER DIVIDER -->
-          <td width="0.2%" height="52" bgcolor="#666666" style="padding:0; font-size:0; line-height:0;">&nbsp;</td>
+            if ($r['type'] === 'normal' && $r['handling_fee'] > 0 && $renderedBaseRows < $t['max_rows']) {
+                $cy2 = $rowY + ($renderedBaseRows * $t['row_h']) + 1.5;
+                $hfText = 'Handling Fee P' . number_format($r['handling_fee'], 2) . ' per bag';
+                $hfText = $fitText($hfText, $col['particulars'] - 2.5, 'table_row');
+                $drawText($xPart + 1.0, $cy2, $col['particulars'] - 2.0, $hfText, 'table_row', 'L');
+                $drawText($xAmt, $cy2, $col['amount'] - 1.0, $layout['format']['empty_amount_dash'], 'table_row', 'R');
+                $renderedBaseRows++;
+            }
+        }
 
-          <!-- RIGHT -->
-          <td width="49.9%" height="52" style="padding:0;">
-            <table border="0" cellpadding="0" cellspacing="0" width="100%">
-              <tr><td height="12" style="font-size:0; line-height:0;">&nbsp;</td></tr>
-              <tr valign="middle">
-                <td style="padding-left:10px;"><font size="9"><b>Conforme by Supplier</b></font></td>
-              </tr>
-            </table>
-          </td>
+        // Blank rows
+        while ($renderedBaseRows < $t['max_rows']) {
+            $cy = $rowY + ($renderedBaseRows * $t['row_h']) + 1.5;
+            $drawText($xAmt, $cy, $col['amount'] - 1.0, $layout['format']['empty_amount_dash'], 'table_row', 'R');
+            $renderedBaseRows++;
+        }
 
-        </tr>
-      </table>
-    </td>
-  </tr>
+        // Total row fill
+        $fill = $layout['colors']['table_header_fill'];
+        $pdf->SetFillColor($fill[0], $fill[1], $fill[2]);
+        $pdf->Rect($x, $tableBottomY - $t['total_h'], $w, $t['total_h'], 'F');
 
-</table>
+        // Redraw thin inner vertical separators inside the filled total row
+        $setDrawColor('line_gray');
+        $pdf->SetLineWidth(0.12);
+        foreach ([$xPart, $xMill, $xQty, $xPrice, $xAmt] as $vx) {
+            $pdf->Line($vx, $tableBottomY - $t['total_h'], $vx, $tableBottomY);
+        }
 
-EOD;
+        // Redraw the full outer frame LAST so left/right borders stay thick after fills
+        $setDrawColor('table_outer_dark');
+        $pdf->SetLineWidth(0.40);
 
-// single writeHTML only (prevents TCPDF block seam)
-$pdf->SetDrawColor(0, 0, 0);
-$pdf->SetLineWidth(0.18);
-$pdf->SetFont('helvetica', '', 9);
+        // top outer border
+        $pdf->Line($x, $y, $x + $w, $y);
 
-$pdf->writeHTML($bodyTbl, true, false, true, false, '');
+        // left outer border
+        $pdf->Line($x, $y, $x, $tableBottomY);
+
+        // right outer border
+        $pdf->Line($x + $w, $y, $x + $w, $tableBottomY);
+
+        // bottom outer border
+        $pdf->Line($x, $tableBottomY, $x + $w, $tableBottomY);
+
+        $totalY = $tableBottomY - $t['total_h'] + 1.5;
+        $drawText($xItem + 1.0, $totalY, ($col['item'] + $col['particulars'] + $col['millmark']) - 2.0, 'Total', 'table_total', 'L');
+        $drawText(
+            $xQty,
+            $totalY,
+            $col['qty'] - 1.0,
+            number_format($totalQty, $layout['format']['qty_decimals']),
+            'table_total',
+            'R'
+        );
+
+        // Price/Lkg column must show numeric value, not PHP
+        $drawText(
+            $xPrice,
+            $totalY,
+            $col['price'] - 1.0,
+            $displayUnitPrice,
+            'table_total',
+            'R'
+        );
+
+        // PHP belongs in the Amount area, before the final total amount
+        $drawText($xAmt + 1.2, $totalY, 12.0, 'PHP', 'table_total', 'L');
+        $drawText(
+            $xAmt + 10.0,
+            $totalY,
+            $col['amount'] - 11.0,
+            number_format($grandTotal, 2),
+            'table_total',
+            'R'
+        );
+
+        // -----------------------------
+        // NOTES
+        // -----------------------------
+        $drawText(
+            $layout['notes']['label']['x'],
+            $layout['notes']['label']['y'],
+            $layout['notes']['label']['w'],
+            $layout['notes']['label']['text'],
+            'notes_label',
+            'L'
+        );
+
+        $pdf->SetLineWidth($layout['lines']['box_outer']);
+        $setDrawColor('line_gray');
+        $pdf->Rect(
+            $layout['notes']['box']['x'],
+            $layout['notes']['box']['y'],
+            $layout['notes']['box']['w'],
+            $layout['notes']['box']['h']
+        );
+
+        $applyFont('notes_body');
+        $setTextColor('black');
+        $pdf->SetXY($layout['notes']['content']['x'], $layout['notes']['content']['y']);
+        $pdf->MultiCell(
+            $layout['notes']['content']['w'],
+            3.8,
+            $notesText,
+            0,
+            'L',
+            false,
+            1
+        );
+
+        // -----------------------------
+        // LEGAL TEXT
+        // -----------------------------
+        $applyFont('legal');
+        $setTextColor('black');
+
+        $legalX = $layout['legal']['x'];
+        $legalY = $layout['legal']['y'];
+        $legalW = $layout['legal']['w'];
+        $legalLineH = $layout['legal']['line_h'];
+        $legalLines = $layout['legal']['text_lines'] ?? [];
+
+        foreach ($legalLines as $i => $line) {
+            $pdf->SetXY($legalX, $legalY + ($i * $legalLineH));
+            $pdf->Cell($legalW, 0, $line, 0, 0, 'L', false, '', 0, false, 'T', 'T');
+        }
+
+        // -----------------------------
+        // SUMMARY BOX
+        // -----------------------------
+        $sx = $layout['summary']['box']['x'];
+        $sy = $layout['summary']['box']['y'];
+        $sw = $layout['summary']['box']['w'];
+        $sh = $layout['summary']['box']['h'];
+
+        $pdf->SetLineWidth($layout['lines']['box_outer']);
+        $pdf->Rect($sx, $sy, $sw, $sh);
+
+        $labelW = $layout['summary']['label_w'];
+        $rowH = $layout['summary']['row_h'];
+        $valueX = $sx + $labelW;
+
+        $pdf->SetLineWidth($layout['lines']['box_inner']);
+        $pdf->Line($valueX, $sy, $valueX, $sy + $sh);
+
+        $currentY = $sy;
+        foreach ($layout['summary']['rows'] as $index => $row) {
+            if ($index > 0) {
+                $pdf->Line($sx, $currentY, $sx + $sw, $currentY);
+            }
+
+            $drawText($sx + 1.2, $currentY + 1.7, $labelW - 2.4, $row['label'], 'summary_label', 'L');
+            $drawText($valueX + 1.2, $currentY + 1.7, $sw - $labelW - 2.4, (string) ($summaryValues[$row['key']] ?? ''), 'summary_value', 'R');
+
+            $currentY += $rowH;
+        }
+
+        // -----------------------------
+        // FOOTER
+        // -----------------------------
+        $fx = $layout['footer']['box']['x'];
+        $fy = $layout['footer']['box']['y'];
+        $fw = $layout['footer']['box']['w'];
+        $fh = $layout['footer']['box']['h'];
+
+        $pdf->SetLineWidth(0.40); // 🔴 thicker outer box
+        $pdf->Rect($fx, $fy, $fw, $fh);
+
+            $pdf->SetLineWidth(0.40); // 🔴 match outer box thickness
+            $pdf->Line(
+            $layout['footer']['divider']['x'],
+            $layout['footer']['divider']['y1'],
+            $layout['footer']['divider']['x'],
+            $layout['footer']['divider']['y2']
+        );
+
+        $drawText(
+            $layout['footer']['left']['label']['x'],
+            $layout['footer']['left']['label']['y'],
+            $layout['footer']['left']['label']['w'],
+            $layout['footer']['left']['label']['text'],
+            'footer_label',
+            'L'
+        );
+        $drawText(
+            $layout['footer']['left']['value']['x'],
+            $layout['footer']['left']['value']['y'],
+            $layout['footer']['left']['value']['w'],
+            $confirmedCompany,
+            'footer_value',
+            'L'
+        );
+
+        $drawText(
+            $layout['footer']['right']['label']['x'],
+            $layout['footer']['right']['label']['y'],
+            $layout['footer']['right']['label']['w'],
+            $layout['footer']['right']['label']['text'],
+            'footer_label',
+            'L'
+        );
+
+        // -----------------------------
+        // DISCLAIMER
+        // -----------------------------
+        $drawText(
+            $layout['disclaimer']['x'],
+            $layout['disclaimer']['y'],
+            $layout['disclaimer']['w'],
+            $layout['disclaimer']['text'],
+            'disclaimer',
+            $layout['disclaimer']['align']
+        );
+
         $content = $pdf->Output('purchaseOrder.pdf', 'S');
 
         return response($content, 200)
@@ -1341,8 +1675,7 @@ $pdf->writeHTML($bodyTbl, true, false, true, false, '');
             $e->getMessage() . "\n\n" . $e->getFile() . ':' . $e->getLine()
         );
     }
-}
-
+}    
 
 
 

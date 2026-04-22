@@ -74,7 +74,7 @@ export default function General_accounting_form() {
   const [gaNo, setGaNo] = useState('');
   const [genAcctDate, setGenAcctDate] = useState('');
   const [explanation, setExplanation] = useState('');
-  const [_locked, setLocked] = useState(false);      // header lock
+  const [locked, setLocked] = useState(false);      // header lock
   const [gridLocked, setGridLocked] = useState(true);
   const [isCancelled, setIsCancelled] = useState(false);
 const [isExported, setIsExported] = useState(false);
@@ -203,13 +203,11 @@ const canEditExported = !isExported || approval.approvedActive;
   const isApprovalRejected = approval.status === 'rejected';
 
 const approvalLabel = useMemo(() => {
-  if (!approval.approvedActive || !approval.expiresAt) return '';
-  const expires = new Date(approval.expiresAt);
-  const ms = expires.getTime() - Date.now();
-  const mins = Math.max(0, Math.round(ms / 60000));
-  if (mins <= 0) return 'Edit window expiring now';
-  return `Edit window: ${mins} min left`;
-}, [approval.approvedActive, approval.expiresAt]);
+  if (approval.approvedActive) return 'Edit approved';
+  if (approval.status === 'pending') return 'Edit request pending';
+  if (approval.status === 'rejected') return 'Edit request rejected';
+  return '';
+}, [approval.approvedActive, approval.status]);
 
 
 
@@ -304,6 +302,18 @@ const refreshApprovalStatus = async (recordId: number | null): Promise<boolean> 
     const s = localStorage.getItem('user');
     return s ? JSON.parse(s) : null;
   }, []);
+
+
+  useEffect(() => {
+    if (!mainId) return;
+    if (approval.status !== 'pending' || approval.approvedActive) return;
+
+    const t = window.setInterval(() => {
+      refreshApprovalStatus(mainId);
+    }, 10000);
+
+    return () => window.clearInterval(t);
+  }, [mainId, approval.status, approval.approvedActive]);  
 
   // fetch accounts (active)
   useEffect(() => {
@@ -731,69 +741,58 @@ const isRowValid = (r: GaDetailRow) =>
   };
 
   // load a transaction from dropdown
-  const handleSelectTransaction = async (selectedId: string) => {
-    if (!selectedId) return;
-    try {
-      setSearchId(selectedId);
-      const { data } = await napi.get(`/ga/${selectedId}`, { params: { company_id: user?.company_id }});
-      const m = data.main ?? data;
+const handleSelectTransaction = async (selectedId: string) => {
+  if (!selectedId) return;
 
-      setMainId(m.id);
-      setGaNo(m.ga_no);
-      setGenAcctDate(formatDateToYYYYMMDD(m.gen_acct_date));
-      setExplanation(m.explanation ?? '');
-      setIsCancelled(m.is_cancel === 'y' || m.is_cancel === 'c');
-setIsExported(!!m.exported_at);
-const exported = !!m.exported_at;
-setIsExported(exported);
-      const details = (data.details || []).map((d: any) => ({
-        id: d.id,
-        acct_code: `${d.acct_code};${d.acct_desc || findDesc(d.acct_code)}`,
-        acct_desc: d.acct_desc,
-        debit: Number(d.debit ?? 0),
-        credit: Number(d.credit ?? 0),
-        persisted: true,
-      }));
-      setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
-      setHotEnabled(true);
-// Editable immediately on select unless cancelled/exported
-// Lock immediately only for cancelled/deleted; export lock is decided after approval refresh
-const shouldLock = (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd');
-setLocked(shouldLock);
-setGridLocked(shouldLock);
+  try {
+    setSearchId(selectedId);
+    const { data } = await napi.get(`/ga/${selectedId}`, { params: { company_id: user?.company_id }});
+    const m = data.main ?? data;
 
+    setMainId(m.id);
+    setGaNo(m.ga_no);
+    setGenAcctDate(formatDateToYYYYMMDD(m.gen_acct_date));
+    setExplanation(m.explanation ?? '');
+    setIsCancelled(m.is_cancel === 'y' || m.is_cancel === 'c');
+    const exported = !!m.exported_at;
+    setIsExported(exported);
 
-      // 🔹 approval-aware locking (instead of always locking)
-      const approvedActive = await refreshApprovalStatus(m.id);
+    const details = (data.details || []).map((d: any) => ({
+      id: d.id,
+      acct_code: `${d.acct_code};${d.acct_desc || findDesc(d.acct_code)}`,
+      acct_desc: d.acct_desc,
+      debit: Number(d.debit ?? 0),
+      credit: Number(d.credit ?? 0),
+      persisted: true,
+    }));
 
+    setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
+    setHotEnabled(true);
 
-// Enforce lock rules after approval refresh (approval should not override export/cancel lock)
-{
-  const cancelledOrDeleted =
-    (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd');
+    // default lock
+    const cancelledOrDeleted = (m.is_cancel === 'y' || m.is_cancel === 'c' || m.is_cancel === 'd');
+    setLocked(cancelledOrDeleted || exported);
+    setGridLocked(cancelledOrDeleted || exported);
 
-  const exported = !!m.exported_at;
+    const approvedActive = await refreshApprovalStatus(m.id);
 
-  // ✅ EXPORTED is overridden by APPROVED edit window
-  const shouldLock = cancelledOrDeleted || (exported && !approvedActive);
-
-  setLocked(shouldLock);
-  setGridLocked(shouldLock);
-}
-     
-
-      await Promise.all([
-        refreshApprovalForAction(m.id, 'cancel', setCancelApproval),
-        refreshApprovalForAction(m.id, 'uncancel', setUncancelApproval),
-        refreshApprovalForAction(m.id, 'delete', setDeleteApproval),
-      ]);
-
-
-      toast.success('Journal loaded.');
-    } catch {
-      toast.error('Unable to load the selected journal.');
+    {
+      const shouldLock = cancelledOrDeleted || (exported && !approvedActive);
+      setLocked(shouldLock);
+      setGridLocked(shouldLock);
     }
-  };
+
+    await Promise.all([
+      refreshApprovalForAction(m.id, 'cancel', setCancelApproval),
+      refreshApprovalForAction(m.id, 'uncancel', setUncancelApproval),
+      refreshApprovalForAction(m.id, 'delete', setDeleteApproval),
+    ]);
+
+    toast.success('Journal loaded.');
+  } catch {
+    toast.error('Unable to load the selected journal.');
+  }
+};
 
 
 const handleRequestEdit = async () => {
@@ -830,6 +829,7 @@ const handleRequestEdit = async () => {
 
 const handleSaveHeader = async () => {
   if (!mainId) return;
+
   try {
     await napi.post('/ga/update-main', {
       id: mainId,
@@ -837,7 +837,6 @@ const handleSaveHeader = async () => {
       explanation,
     });
 
-    // consume the approval (so it can't be reused forever)
     if (approval.id && user?.company_id) {
       await napi.post('/approvals/release', {
         module: MODULE_CODE,
@@ -847,33 +846,27 @@ const handleSaveHeader = async () => {
       });
     }
 
-    toast.success('Journal header saved and edit session closed.');
+    setLocked(true);
+    setGridLocked(true);
 
-    // Re-check status → this will relock header + grid
-    await refreshApprovalStatus(mainId);
-  } catch (e: any) {
-    toast.error(e?.response?.data?.message || 'Failed to save header.');
-  }
-};
-
-const handleSaveMainNoApproval = async () => {
-  if (!mainId || isCancelled) return;
-
-  try {
-    await napi.post('/ga/update-main-no-approval', {
-      id: mainId,
-      gen_acct_date: genAcctDate,
-      explanation,
+    setApproval({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
     });
 
-    toast.success('Journal header updated.');
-
-    // DO NOT touch approval state
-    // DO NOT unlock grid
+    toast.success('Journal changes saved.');
   } catch (e: any) {
     toast.error(e?.response?.data?.message || 'Failed to save header.');
   }
 };
+
+//const handleSaveMainNoApproval = async () => {
+//  toast.error('Direct header editing without approval is disabled for General Accounting.');
+//};
 
 
 
@@ -924,11 +917,38 @@ const handleSaveMainNoApproval = async () => {
     setLocked(false);
     setGridLocked(false);
     setIsCancelled(false);
+    setIsExported(false);
     setTableData([emptyRow(), emptyRow(), emptyRow()]);
     setHotEnabled(false);
 
-    // 🔹 Clear approval state for the new JE
     setApproval({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
+    });
+
+    setCancelApproval({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
+    });
+
+    setUncancelApproval({
+      id: null,
+      status: null,
+      approvedActive: false,
+      expiresAt: null,
+      editWindowMinutes: null,
+      reason: null,
+    });
+
+    setDeleteApproval({
       id: null,
       status: null,
       approvedActive: false,
@@ -962,10 +982,9 @@ const handleOpenPdf = () => {
   const url = `/api/ga/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}&user_id=${encodeURIComponent(user?.id||'')}&_=${Date.now()}`;
   setPdfUrl(url);
   setShowPdf(true);
-// Lock immediately after print action (backend also enforces)
-setIsExported(true);
-setLocked(true);
-setGridLocked(true);
+  setIsExported(true);
+  setLocked(true);
+  setGridLocked(true);
 
 };
 
@@ -1019,10 +1038,9 @@ const handleDownloadExcel = async () => {
     a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
-// Lock immediately after download action (backend also enforces)
-setIsExported(true);
-setLocked(true);
-setGridLocked(true);
+    setIsExported(true);
+    setLocked(true);
+    setGridLocked(true);
 
 
   } catch (e: any) {
@@ -1046,7 +1064,21 @@ return (
       <ToastContainer position="top-right" autoClose={3000} />
 
       <div className="bg-yellow-50 shadow-md rounded-lg p-6 space-y-4 border border-yellow-400">
-        <h2 className="text-xl font-bold text-green-800 mb-2">GENERAL ACCOUNTING : JOURNAL ENTRY</h2>
+        <div className="flex items-center gap-3 mb-2">
+          <h2 className="text-xl font-bold text-green-800">GENERAL ACCOUNTING : JOURNAL ENTRY</h2>
+
+          {mainId && !isCancelled && approval.status === 'pending' && (
+            <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+              EDIT REQUEST PENDING
+            </span>
+          )}
+
+          {mainId && !isCancelled && approval.approvedActive && (
+            <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+              EDIT APPROVED
+            </span>
+          )}
+        </div>
 
         {/* Header form */}
         <div className="grid grid-cols-3 gap-4">
@@ -1072,7 +1104,7 @@ return (
             <input
               type="date"
               value={genAcctDate}
-              disabled={isCancelled}
+              disabled={locked || isCancelled}
               onChange={(e) => setGenAcctDate(e.target.value)}
               className="w-full border p-2 bg-green-100 text-green-900"
             />
@@ -1083,7 +1115,7 @@ return (
             <label className="block mb-1">Explanation</label>
             <input
               value={explanation}
-              disabled={isCancelled}
+              disabled={locked || isCancelled}
               onChange={(e) => setExplanation(e.target.value)}
               className="w-full border p-2 bg-green-100 text-green-900"
             />
@@ -1173,16 +1205,7 @@ return (
   Delete
 </button>
 
-{mainId && !isCancelled && (
-  <button
-    type="button"
-    onClick={handleSaveMainNoApproval}
-    className="inline-flex items-center gap-2 px-4 py-2 rounded bg-gray-600 text-white hover:bg-gray-700"
-  >
-    <CheckCircleIcon className="h-5 w-5" />
-    Save Main
-  </button>
-)}
+{null}
 
 
 
@@ -1196,7 +1219,7 @@ return (
       {/* Active edit window info */}
       {approval.approvedActive && approvalLabel && (
         <div className="text-xs text-emerald-700">
-          Edit approved — <span className="font-semibold">{approvalLabel}</span>
+          <span className="font-semibold">{approvalLabel}</span> — you may now update this journal entry.
         </div>
       )}
 
@@ -1255,8 +1278,8 @@ return (
                 },
               },
               { data: 'acct_desc', readOnly: true },
-              { data: 'debit',  type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked || isCancelled },
-              { data: 'credit', type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked || isCancelled },
+{ data: 'debit',  type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked || isCancelled || !canEditExported },
+{ data: 'credit', type:'numeric', numericFormat:{ pattern:'0,0.00' }, readOnly: gridLocked || isCancelled || !canEditExported },
             ]}
             afterBeginEditing={afterBeginEditingOpenAll}
             afterChange={(changes, source) => {
@@ -1345,15 +1368,15 @@ await napi.post('/ga/delete-detail', {
           onMouseEnter={() => setDownloadOpen(true)}
           onMouseLeave={() => setDownloadOpen(false)}
         >
-<button
-  type="button"
-  disabled={!mainId || isCancelled}
-  className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
-    mainId && !isCancelled
-      ? 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
-      : 'bg-gray-100 text-gray-400 border-gray-200'
-  }`}
->
+        <button
+          type="button"
+          disabled={!mainId || isCancelled}
+          className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
+            mainId && !isCancelled
+              ? 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
+              : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+          }`}
+        >
 
             <ArrowDownTrayIcon className={`h-5 w-5 ${mainId ? 'text-emerald-600' : 'text-gray-400'}`} />
             <span>Download</span>
@@ -1386,7 +1409,15 @@ await napi.post('/ga/delete-detail', {
           onMouseEnter={() => setPrintOpen(true)}
           onMouseLeave={() => setPrintOpen(false)}
         >
-          <button type="button" className="inline-flex items-center gap-2 rounded border px-3 py-2 bg-white text-gray-700 hover:bg-gray-50">
+          <button
+            type="button"
+            disabled={!mainId || isCancelled}
+            className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
+              mainId && !isCancelled
+                ? 'bg-white text-gray-700 hover:bg-gray-50'
+                : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+            }`}
+          >
             <PrinterIcon className="h-5 w-5" /><span>Print</span><ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
           {printOpen && (

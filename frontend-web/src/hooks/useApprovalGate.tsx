@@ -97,7 +97,7 @@ export function useApprovalGate({ subjectType, recordId, companyId, onUnlock }: 
 const requestEdit = useCallback(async (reason: string = '') => {
   if (!recordId) return toast.info('Save or select a record first.');
   try {
-    await napi.post('/api/approvals/request', {
+    await napi.post('/api/approvals/request-edit', {
       module: subjectType,
       record_id: recordId,
       company_id: companyId ?? undefined,
@@ -138,10 +138,10 @@ const releaseNow = useCallback(async () => {
         return <div className="mt-3 rounded border border-amber-300 bg-amber-50 text-amber-800 px-3 py-2">Awaiting supervisor approval to edit…</div>;
       }
       if (s.status === 'approved' && s.approved_active) {
-        return <div className="mt-3 rounded border border-emerald-300 bg-emerald-50 text-emerald-800 px-3 py-2">Approved. Edit window active until {s.expires_at ? new Date(s.expires_at).toLocaleString() : '—'}.</div>;
+        return <div className="mt-3 rounded border border-emerald-300 bg-emerald-50 text-emerald-800 px-3 py-2">Approved. You may edit this record now.</div>;
       }
       if (s.status === 'approved' && !s.approved_active) {
-        return <div className="mt-3 rounded border border-gray-300 bg-gray-50 text-gray-700 px-3 py-2">Approval expired. Please request again.</div>;
+        return <div className="mt-3 rounded border border-gray-300 bg-gray-50 text-gray-700 px-3 py-2">Approval already closed. Request again if you still need to edit.</div>;
       }
       if (s.status === 'rejected') {
         return <div className="mt-3 rounded border border-red-300 bg-red-50 text-red-700 px-3 py-2">Request rejected{s.reason ? `: ${s.reason}` : ''}.</div>;

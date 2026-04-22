@@ -1547,38 +1547,48 @@ protected function requireNotCancelled(int $transactionId): void
  */
 protected function requireApprovedEdit(int $transactionId, ?int $companyId = null): void
 {
-    $now = now();
-
     $q = DB::table('approvals')
         ->where('module', 'cash_disbursement')
         ->where('record_id', $transactionId)
-        ->whereRaw('LOWER(action) = ?', ['edit'])   // ✅ case-insensitive
+        ->whereRaw('LOWER(action) = ?', ['edit'])
         ->where('status', 'approved')
         ->whereNull('consumed_at')
-        ->whereNotNull('expires_at')
-        ->where('expires_at', '>', $now);
+        ->orderByDesc('id');
 
     if (!empty($companyId)) {
         $q->where('company_id', $companyId);
     }
 
-    $ok = $q->exists();
+    $row = $q->first();
 
-    // optional fallback (legacy rows without company_id)
-    if (!$ok && !empty($companyId)) {
-        $ok = DB::table('approvals')
+    // optional fallback for legacy rows without company_id
+    if (!$row && !empty($companyId)) {
+        $row = DB::table('approvals')
             ->where('module', 'cash_disbursement')
             ->where('record_id', $transactionId)
-            ->whereRaw('LOWER(action) = ?', ['edit']) // ✅ case-insensitive
+            ->whereRaw('LOWER(action) = ?', ['edit'])
             ->where('status', 'approved')
             ->whereNull('consumed_at')
-            ->whereNotNull('expires_at')
-            ->where('expires_at', '>', $now)
-            ->exists();
+            ->orderByDesc('id')
+            ->first();
     }
 
-    if (!$ok) {
-        abort(403, 'Edit approval is required or has expired.');
+    if (!$row) {
+        abort(403, 'Edit approval is required.');
+    }
+
+    // if expires_at is null, approval stays active until released/consumed
+    if (!empty($row->expires_at) && now()->gte(\Carbon\Carbon::parse($row->expires_at))) {
+        abort(403, 'Edit approval has expired.');
+    }
+
+    if (empty($row->first_edit_at)) {
+        DB::table('approvals')
+            ->where('id', $row->id)
+            ->update([
+                'first_edit_at' => now(),
+                'updated_at'    => now(),
+            ]);
     }
 }
 
@@ -1619,9 +1629,12 @@ public function updateMain(Request $req)
     // enforce rules
     $this->requireNotCancelled((int) $tx->id);
 
-
-
-    $this->requireApprovedEdit((int) $tx->id, $companyId ? (int) $companyId : null);
+    // ✅ Header edit rule:
+    // - before export: allow Save Main without approval
+    // - after export: require active approved edit
+    if ($this->isExported((int) $tx->id)) {
+        $this->requireApprovedEdit((int) $tx->id, $companyId ? (int) $companyId : null);
+    }
 
     $oldBankId = (string) ($tx->bank_id ?? '');
 
@@ -1686,103 +1699,7 @@ $bankAcct = AccountCode::where('bank_id', $data['bank_id'])
 
 public function updateMainNoApproval(Request $req)
 {
-    $data = $req->validate([
-        'id'             => ['required','integer','exists:cash_disbursement,id'],
-        'vend_id'        => ['required','string','max:50'],
-        'disburse_date'  => ['required','date'],
-        'pay_method'     => ['required','string','max:15'],
-        'bank_id'        => ['required','string','max:15'],
-        'check_ref_no'   => ['required','string','max:25'],
-        'explanation'    => ['nullable','string','max:1000'],
-        'amount_in_words'=> ['nullable','string','max:255'],
-        'company_id'     => ['required','integer'],
-        'user_id'        => ['nullable','integer'],
-    ]);
-
-    $tx = CashDisbursement::findOrFail($data['id']);
-    $companyId = (int) $data['company_id'];
-
-    // ✅ Block duplicate Check/Ref # per company (exclude this record)
-    $ref = trim((string) ($data['check_ref_no'] ?? ''));
-    if ($ref !== '') {
-        $dup = CashDisbursement::where('company_id', (int) $companyId)
-            ->whereRaw('LOWER(check_ref_no) = ?', [strtolower($ref)])
-            ->where('id', '<>', (int) $tx->id)
-            ->exists();
-
-        if ($dup) {
-            return response()->json([
-                'message' => 'Duplicate Check / Ref #. This Check/Ref # already exists.',
-            ], 422);
-        }
-    }
-
-
-    // ✅ use the SAME cancel guard your working updateMain uses
-    // (If you only have requireNotCancelled(), keep that.)
-    $this->requireNotCancelled((int) $tx->id);
-// ✅ Enforce new rule: once exported, edits require approval (even for header)
-if ($this->isExported((int) $tx->id)) {
-    abort(403, 'This transaction was already exported. Edit approval is required.');
-}
-
-    $oldBankId = (string) ($tx->bank_id ?? '');
-
-    // ✅ update header (same fields as updateMain, but no approval requirement)
-    $tx->update([
-        'vend_id'        => $data['vend_id'],
-        'disburse_date'  => $data['disburse_date'],
-        'pay_method'     => $data['pay_method'],
-        'bank_id'        => $data['bank_id'],
-        'check_ref_no'   => $data['check_ref_no'],
-        'explanation'    => $data['explanation'] ?? '',
-        'amount_in_words'=> $data['amount_in_words'] ?? $tx->amount_in_words,
-        'company_id'     => $companyId,
-        'user_id'        => $data['user_id'] ?? $tx->user_id,
-    ]);
-
-    // ✅ IMPORTANT: if bank changed, align the BANK row acct_code (same logic as updateMain)
-    if ($oldBankId !== (string) $data['bank_id']) {
-$bankAcct = AccountCode::where('bank_id', $data['bank_id'])
-    ->where('company_id', (int) $companyId)
-    ->where('active_flag', 1)
-    ->first(['acct_code']);
-
-
-        if ($bankAcct) {
-            $bankRow = CashDisbursementDetail::where('transaction_id', $tx->id)
-                ->where('workstation_id', 'BANK')
-                ->first();
-
-            if ($bankRow) {
-                $bankRow->update(['acct_code' => $bankAcct->acct_code]);
-            } else {
-                CashDisbursementDetail::create([
-                    'transaction_id' => $tx->id,
-                    'acct_code'      => $bankAcct->acct_code,
-                    'debit'          => 0,
-                    'credit'         => 0,
-                    'workstation_id' => 'BANK',
-                    'company_id'     => $companyId,
-                    'user_id'        => $tx->user_id ?? null,
-                ]);
-            }
-        }
-    }
-
-    // ✅ recompute BANK + totals exactly like updateMain
-    $this->adjustBankCredit((int) $tx->id);
-    $totals = $this->recalcTotals((int) $tx->id);
-
-    $tx->refresh();
-
-    return response()->json([
-        'ok'     => true,
-        'id'     => $tx->id,
-        'cd_no'  => $tx->cd_no,
-        'main'   => $tx,
-        'totals' => $totals,
-    ]);
+    abort(403, 'Direct header editing without approval is disabled for Cash Disbursement.');
 }
 
 

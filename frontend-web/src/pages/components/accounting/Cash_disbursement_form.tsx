@@ -72,7 +72,7 @@ function pesoWords(amount: number) {
 const fmtMoney = (n: number) =>
   (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const msToMin = (ms: number) => Math.max(0, Math.floor(ms / 60000));
+//const msToMin = (ms: number) => Math.max(0, Math.floor(ms / 60000));
 
 /* ---------------- types ---------------- */
 type DetailRow = {
@@ -183,8 +183,8 @@ export default function CashDisbursementForm() {
 
 
 
-  const [_locked, setLocked] = useState(false);       // legacy (we will still set it)
-  const [_gridLocked, setGridLocked] = useState(true); // grid lock (separate)
+const [_locked, setLocked] = useState(false);
+//const [gridLocked, setGridLocked] = useState(true);
   const [isCancelled, setIsCancelled] = useState(false);
 const [isExported, setIsExported] = useState(false); // ✅ locks spreadsheet only after export
 
@@ -329,21 +329,17 @@ const refreshApprovals = useCallback(
   [mainId, fetchApproval]
 );
 
-  const approvalText = (a: ApprovalStatus) => {
-    if (!a?.exists) return 'none';
-    const st = String(a.status || '').toLowerCase();
-    if (st === 'pending') return 'pending';
-    if (st === 'rejected') return 'rejected';
-    if (st === 'expired') return 'expired';
-    if (st === 'approved') {
-      if (a.approved_active && a.expires_at) {
-        const mins = msToMin(new Date(a.expires_at).getTime() - Date.now());
-        return `approved (active – ${mins} min left)`;
-      }
-      return 'approved';
-    }
-    return st || 'unknown';
-  };
+const approvalText = (a: ApprovalStatus) => {
+  if (!a?.exists) return 'none';
+  const st = String(a.status || '').toLowerCase();
+  if (st === 'pending') return 'pending';
+  if (st === 'rejected') return 'rejected';
+  if (st === 'expired') return 'expired';
+  if (st === 'approved') {
+    return a.approved_active ? 'approved (active)' : 'approved';
+  }
+  return st || 'unknown';
+};
 
   const isEditApprovedActive = !!apprEdit?.approved_active;
   const isBalanced = useMemo(() => {
@@ -355,6 +351,23 @@ const refreshApprovals = useCallback(
   const totalDebit = useMemo(() => (tableData || []).reduce((a, r) => a + Number(r.debit || 0), 0), [tableData]);
   const totalCredit = useMemo(() => (tableData || []).reduce((a, r) => a + Number(r.credit || 0), 0), [tableData]);
 
+
+
+useEffect(() => {
+  if (!mainId) return;
+
+  const st = String(apprEdit?.status || '').toLowerCase();
+  if (st !== 'pending' || apprEdit?.approved_active) return;
+
+  const t = window.setInterval(() => {
+    refreshApprovals(mainId);
+  }, 10000);
+
+  return () => window.clearInterval(t);
+}, [mainId, apprEdit?.status, apprEdit?.approved_active, refreshApprovals]);
+
+
+
 // ✅ Spreadsheet rule:
 // - Before export: editable (once saved) even without approval
 // - After export: locked unless edit approval is active
@@ -363,11 +376,19 @@ const canEditNow =
   !isCancelled &&
   (!isExported || isEditApprovedActive);
 
+// ✅ Header edit rule (separate from grid)
+// - New (not saved): editable
+// - Saved but not exported: editable
+// - Exported: only editable if edit approved
+const canEditHeader =
+  !isCancelled &&
+  (!isSaved || !isExported || isEditApprovedActive);
+
   // enforce locks whenever state changes
   useEffect(() => {
     const shouldLock = !(canEditNow);
     setLocked(shouldLock);
-    setGridLocked(shouldLock);
+    //setGridLocked(shouldLock);
     hotRef.current?.hotInstance?.updateSettings?.({ readOnly: shouldLock });
   }, [canEditNow]);
 
@@ -410,7 +431,7 @@ const canEditNow =
 
       // waiting mode: lock everything
       setLocked(true);
-      setGridLocked(true);
+      //setGridLocked(true);
       hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Failed to submit approval request.');
@@ -418,8 +439,6 @@ const canEditNow =
   };
 
 const handleSaveChanges = async () => {
-
-  // ✅ hard stop if Check/Ref duplicates (re-check right before save)
   const ref = normCheckRef(checkRefNo);
   if (companyId && ref) {
     const chk = await checkRefExists(ref);
@@ -449,7 +468,6 @@ const handleSaveChanges = async () => {
       user_id: user?.id,
     });
 
-    // ✅ if backend really saved, these MUST be the new values
     if (data?.main) {
       const m = data.main;
       setVendId(String(m.vend_id || ''));
@@ -467,75 +485,24 @@ const handleSaveChanges = async () => {
       action: 'edit',
     });
 
-    // ✅ still reload, but now you already confirmed what DB returned
-    await loadDisbursement(mainId);
-
+    setApprEdit({ exists: false });
     setLocked(true);
-    setGridLocked(true);
+    //setGridLocked(true);
     hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
 
-    toast.success('Changes saved.');
+    await loadDisbursement(mainId);
     await refreshApprovals(mainId);
+
+    toast.success('Cash Disbursement changes saved.');
   } catch (e: any) {
     toast.error(e?.response?.data?.message || 'Failed to save changes.');
   }
 };
 
 
-const handleSaveMainNoApproval = async () => {
-
-  // ✅ hard stop if Check/Ref duplicates (re-check right before save)
-  const ref = normCheckRef(checkRefNo);
-  if (companyId && ref) {
-    const chk = await checkRefExists(ref);
-    if (chk?.exists) {
-      return Swal.fire({
-        icon: 'error',
-        title: 'Duplicate Check / Ref #',
-        text: checkRefDupMsg || 'Check / Ref # already exists.',
-      });
-    }
-  }
-
-
-  if (!mainId) return toast.info('Save or select a disbursement first.');
-  if (isCancelled) return toast.error('Cancelled transaction cannot be modified.');
-
-  const ok = await Swal.fire({
-    title: 'Save main header changes?',
-    icon: 'question',
-    showCancelButton: true,
-    confirmButtonText: 'Save Main',
-  });
-  if (!ok.isConfirmed) return;
-
-  try {
-    await napi.post('/cash-disbursement/update-main-no-approval', {
-      id: mainId,
-      vend_id: vendId,
-      disburse_date: disburseDate,
-      pay_method: payMethodId,
-      bank_id: bankId,
-      check_ref_no: checkRefNo,
-      explanation,
-      amount_in_words: pesoWords(disburseAmount).replace(/^\*\*\*\s|\s\*\*\*$/g, ''),
-      company_id: companyId,
-      user_id: user?.id,
-    });
-
-    // reload to confirm server saved
-    await loadDisbursement(mainId);
-
-    // force view mode (details still approval-locked)
-    setLocked(true);
-    setGridLocked(true);
-    hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
-
-    toast.success('Main saved.');
-  } catch (e: any) {
-    toast.error(e?.response?.data?.message || 'Failed to save main.');
-  }
-};
+//const handleSaveMainNoApproval = async () => {
+//  toast.error('Direct header editing without approval is disabled for Cash Disbursement.');
+//};
 
 
 
@@ -596,76 +563,74 @@ const handleSaveMainNoApproval = async () => {
   }, []);
 
   /* --------- load one disbursement --------- */
-  const loadDisbursement = useCallback(async (rid: string | number) => {
-    try {
-      const { data } = await napi.get(`/cash-disbursement/${rid}`, {
-        params: { company_id: companyId },
-      });
-      const m = data.main ?? data;
+const loadDisbursement = useCallback(async (rid: string | number) => {
+  try {
+    const { data } = await napi.get(`/cash-disbursement/${rid}`, {
+      params: { company_id: companyId },
+    });
+    const m = data.main ?? data;
 
-      // ✅ BANK amount helper (frontend display must be BANK row only)
-      const bankAmountFromDetails = (rows: any[]) => {
-        const bank = (rows || []).find((r: any) => String(r.workstation_id || '').toUpperCase() === 'BANK');
-        if (!bank) return 0;
-        const credit = Number(bank.credit ?? 0);
-        const debit = Number(bank.debit ?? 0);
-        return credit > 0 ? credit : debit;
-      };
+    const bankAmountFromDetails = (rows: any[]) => {
+      const bank = (rows || []).find((r: any) => String(r.workstation_id || '').toUpperCase() === 'BANK');
+      if (!bank) return 0;
+      const credit = Number(bank.credit ?? 0);
+      const debit = Number(bank.debit ?? 0);
+      return credit > 0 ? credit : debit;
+    };
 
+    setMainId(m.id);
+    setCdNo(m.cd_no || '');
+    setVendId(String(m.vend_id || ''));
+    const sel = vendors.find(v => String(v.code) === String(m.vend_id));
+    setVendName(sel?.description || '');
 
-      setMainId(m.id);
-      setCdNo(m.cd_no || '');
-      setVendId(String(m.vend_id || ''));
-      const sel = vendors.find(v => String(v.code) === String(m.vend_id));
-      setVendName(sel?.description || '');
+    setDisburseDate((m.disburse_date || '').slice(0, 10));
 
-      setDisburseDate((m.disburse_date || '').slice(0, 10));
+    const bankAmt = bankAmountFromDetails(data.details || []);
+    setDisburseAmount(bankAmt);
 
-      // ✅ Amount must be BANK row amount (not header disburse_amount which is sum_debit)
-      const bankAmt = bankAmountFromDetails(data.details || []);
-      setDisburseAmount(bankAmt);
+    setBankId(String(m.bank_id || ''));
+    setPayMethodId(String(m.pay_method || ''));
+    setCheckRefNo(m.check_ref_no || '');
+    setExplanation(m.explanation || '');
+    setIsCancelled((m.is_cancel || m.is_cancelled) === 'y');
+    setIsExported(!!m.exported_at);
 
-      setBankId(String(m.bank_id || ''));
-      setPayMethodId(String(m.pay_method || ''));
-      setCheckRefNo(m.check_ref_no || '');
-      setExplanation(m.explanation || '');
-      setIsCancelled((m.is_cancel || m.is_cancelled) === 'y');
-setIsExported(!!m.exported_at);
+    const details = (data.details || []).map((d: any) => {
+      const code = String(d.acct_code ?? '');
+      const desc = findDesc(code) || String(d.acct_desc ?? '');
+      ensureAccountInSource(code, desc);
+      return {
+        id: d.id,
+        acct_code: desc ? `${code};${desc}` : `${code};`,
+        acct_desc: desc,
+        debit: Number(d.debit ?? 0),
+        credit: Number(d.credit ?? 0),
+        workstation_id: d.workstation_id || '',
+        persisted: true,
+      } as DetailRow;
+    });
 
-      const details = (data.details || []).map((d: any) => {
-        
-        const code = String(d.acct_code ?? '');
-        const desc = findDesc(code) || String(d.acct_desc ?? '');
-        ensureAccountInSource(code, desc);
-        return {
-          id: d.id,
-          acct_code: desc ? `${code};${desc}` : `${code};`,
-          acct_desc: desc,
-          debit: Number(d.debit ?? 0),
-          credit: Number(d.credit ?? 0),
-          workstation_id: d.workstation_id || '',
-          persisted: true,
-        } as DetailRow;
-      });
+    setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
 
-      setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
+    const bankAmt2 = bankAmountFromDetails(data.details || []);
+    setDisburseAmount(bankAmt2);
 
-      // ✅ Re-apply BANK amount after details are loaded/mapped (single source of truth)
-      const bankAmt2 = bankAmountFromDetails(data.details || []);
-      setDisburseAmount(bankAmt2);      
-      // lock by default until approvals say otherwise
-      setLocked(true);
-      setGridLocked(true);
-      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+    const exported = !!m.exported_at;
+    const cancelled = (m.is_cancel || m.is_cancelled) === 'y';
 
-      await refreshApprovals(m.id);
+    // ✅ Header locking rule (only lock if exported AND no approval)
+    setLocked(cancelled || (exported && !isEditApprovedActive));
+    //setGridLocked(cancelled || exported);
+    hotRef.current?.hotInstance?.updateSettings?.({ readOnly: cancelled || exported });
 
-      toast.success('Disbursement loaded.');
-    } catch {
-      toast.error('Unable to load the selected disbursement.');
-    }
-  }, [companyId, vendors, findDesc, ensureAccountInSource, refreshApprovals]);
+    await refreshApprovals(m.id);
 
+    toast.success('Disbursement loaded.');
+  } catch {
+    toast.error('Unable to load the selected disbursement.');
+  }
+}, [companyId, vendors, findDesc, ensureAccountInSource, refreshApprovals]);
   const handleSelectTransaction = async (selId: string) => {
     if (!selId) return;
     setSearchId(selId);
@@ -715,8 +680,9 @@ setIsExported(!!m.exported_at);
 
       setMainId(newId);
       setCdNo(res.data.cd_no || '');
-      setLocked(true);
-      setGridLocked(true);
+      // ✅ Do NOT lock header after save (only lock after export)
+      setLocked(false);
+      //setGridLocked(true);
 
       // reload so BANK row appears + approval state is fetched
       await loadDisbursement(newId);
@@ -807,9 +773,10 @@ setIsExported(!!m.exported_at);
     setPayMethodId('');
 
     setIsCancelled(false);
+    setIsExported(false);
 
     setLocked(false);
-    setGridLocked(true);
+    //setGridLocked(true);
 
     setApprEdit({ exists: false });
     setApprCancel({ exists: false });
@@ -938,11 +905,11 @@ setIsExported(!!m.exported_at);
       `&prepared_by=${encodeURIComponent(preparedBy)}` +
       `&_=${Date.now()}`;
 
-    setPdfUrl(url);
-    setShowPdf(true);
-
-    // ✅ Immediately apply lock rule client-side (server will set exported_at during PDF generation)
-    setIsExported(true);
+      setPdfUrl(url);
+      setShowPdf(true);
+      setIsExported(true);
+      setLocked(true);
+      //setGridLocked(true);
   };
 
   const handleOpenCheckPdf = () => {
@@ -954,11 +921,11 @@ setIsExported(!!m.exported_at);
       `?company_id=${encodeURIComponent(companyId || '')}` +
       `&user_id=${encodeURIComponent(String(user?.id || ''))}`;
 
-    setPdfUrl(url);
-    setShowPdf(true);
-    console.log('PDF URL:', url);
-    // ✅ Immediately apply lock rule client-side (server marks exported_at during check pdf)
-    setIsExported(true);
+      setPdfUrl(url);
+      setShowPdf(true);
+      setIsExported(true);
+      setLocked(true);
+      //setGridLocked(true);
   };
 
 
@@ -977,7 +944,8 @@ setIsExported(!!m.exported_at);
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
       // ✅ Apply lock rule after successful download trigger
     setIsExported(true);
-
+    setLocked(true);
+    //setGridLocked(true);
   };
 
   /* ---------------- UI ---------------- */
@@ -1003,6 +971,7 @@ setIsExported(!!m.exported_at);
     if (isCancelled) return null;
 
     const st = String(apprEdit?.status || '').toLowerCase();
+
     if (st === 'pending') {
       return (
         <button
@@ -1096,7 +1065,21 @@ setIsExported(!!m.exported_at);
 
       {/* HEADER */}
       <div className="bg-blue-50 shadow-md rounded-lg p-6 space-y-4 border border-blue-200">
-        <h2 className="text-xl font-bold text-blue-800 mb-2">CASH DISBURSEMENT</h2>
+        <div className="flex items-center gap-3 mb-2">
+          <h2 className="text-xl font-bold text-blue-800">CASH DISBURSEMENT</h2>
+
+          {mainId && !isCancelled && String(apprEdit?.status || '').toLowerCase() === 'pending' && (
+            <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+              EDIT REQUEST PENDING
+            </span>
+          )}
+
+          {mainId && !isCancelled && apprEdit?.approved_active && (
+            <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+              EDIT APPROVED
+            </span>
+          )}
+        </div>
 
         <div className="grid grid-cols-3 auto-rows-auto gap-4">
           {/* Search Transaction */}
@@ -1118,7 +1101,7 @@ setIsExported(!!m.exported_at);
           </div>
 
           {/* Vendor */}
-          <div className="col-span-2 row-span-2">
+          <div className={`col-span-2 row-span-2 ${!canEditHeader ? 'pointer-events-none opacity-90' : ''}`}>
             <DropdownWithHeaders
               label="Vendor"
               value={vendId}
@@ -1147,14 +1130,14 @@ setIsExported(!!m.exported_at);
             <input
               type="date"
               value={disburseDate}
-              disabled={isCancelled}
+              disabled={!canEditHeader}
               onChange={(e) => setDisburseDate(e.target.value)}
               className="w-full border p-2 bg-blue-100 text-blue-900"
             />
           </div>
 
           {/* Bank */}
-          <div className="col-span-2 row-span-2">
+          <div className={`col-span-2 row-span-2 ${!canEditHeader ? 'pointer-events-none opacity-90' : ''}`}>
             <DropdownWithHeaders
               label="Bank Name"
               value={bankId}
@@ -1172,7 +1155,7 @@ setIsExported(!!m.exported_at);
           </div>
 
           {/* Payment Method */}
-          <div className="col-span-1">
+          <div className={`col-span-1 ${!canEditHeader ? 'pointer-events-none opacity-90' : ''}`}>
             <DropdownWithHeaders
               label="Payment Method"
               value={payMethodId}
@@ -1194,7 +1177,7 @@ setIsExported(!!m.exported_at);
             <label className="block mb-1">Explanation</label>
             <input
               value={explanation}
-              disabled={isCancelled}
+              disabled={!canEditHeader}
               onChange={(e) => setExplanation(e.target.value)}
               className="w-full border p-2 bg-blue-100 text-blue-900"
             />
@@ -1205,7 +1188,7 @@ setIsExported(!!m.exported_at);
             <label className="block mb-1">Check / Ref #</label>
             <input
               value={checkRefNo}
-              disabled={isCancelled}
+              disabled={!canEditHeader}
               onChange={(e) => setCheckRefNo(e.target.value)}
               className={`w-full border p-2 bg-blue-100 text-blue-900 ${
                 checkRefDup ? 'border-red-500 ring-1 ring-red-300' : ''
@@ -1248,9 +1231,9 @@ setIsExported(!!m.exported_at);
         {isSaved && (
           <div className="mt-2">
             {approvalStrip}
-            {String(apprEdit?.status || '').toLowerCase() === 'pending' && apprEdit?.reason && (
+            {String(apprEdit?.status || '').toLowerCase() === 'pending' && (
               <div className="mt-1 text-sm text-amber-700 font-semibold">
-                Edit approval is pending — Reason: {apprEdit.reason}
+                Edit approval is pending{apprEdit?.reason ? ` — Reason: ${apprEdit.reason}` : ''}
               </div>
             )}
           </div>
@@ -1277,16 +1260,19 @@ setIsExported(!!m.exported_at);
               {cancelButton}
               {deleteButton}
 
-{/* ✅ Save Main — works without approvals; disappears only when cancelled */}
-{!isCancelled && (
-  <button
-    type="button"
-    onClick={handleSaveMainNoApproval}
-    className="inline-flex items-center gap-2 px-4 py-2 rounded text-white bg-slate-600 hover:bg-slate-700"
-  >
-    Save Main
-  </button>
-)}
+              {/* ✅ SAVE MAIN BUTTON */}
+              <button
+                onClick={handleSaveChanges}
+                disabled={!canEditHeader}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded ${
+                  canEditHeader
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                }`}
+              >
+                <CheckCircleIcon className="h-5 w-5" />
+                Save Main
+              </button>
 
 
 
@@ -1310,7 +1296,17 @@ setIsExported(!!m.exported_at);
         )}
 
 
+        {!isCancelled && isSaved && isExported && !isEditApprovedActive && (
+          <div className="text-red-600 font-semibold mt-2">
+            This disbursement has been printed/downloaded and is locked. Request edit approval to modify details.
+          </div>
+        )}
 
+        {!isCancelled && isSaved && isEditApprovedActive && (
+          <div className="text-emerald-700 font-semibold mt-2">
+            Edit approved — you may now update this disbursement.
+          </div>
+        )}
 
       </div>
 

@@ -28,15 +28,19 @@ class ReferencePlanterController extends Controller
 
         if ($search !== '') {
             $like = "%{$search}%";
-            $q->where(function ($x) use ($like) {
-                $x->where('tin',           'ILIKE', $like)
-                  ->orWhere('display_name', 'ILIKE', $like)
-                  ->orWhere('last_name',    'ILIKE', $like)
-                  ->orWhere('first_name',   'ILIKE', $like)
-                  ->orWhere('middle_name',  'ILIKE', $like)
-                  ->orWhere('address',      'ILIKE', $like)
-                  ->orWhere('type',         'ILIKE', $like)
-                  ->orWhere('workstation_id','ILIKE', $like);
+            $searchNoDash = str_replace('-', '', $search);
+            $likeNoDash = "%{$searchNoDash}%";
+
+            $q->where(function ($x) use ($like, $likeNoDash) {
+                $x->whereRaw("REPLACE(tin, '-', '') ILIKE ?", [$likeNoDash])
+                ->orWhere('tin',            'ILIKE', $like)
+                ->orWhere('display_name',   'ILIKE', $like)
+                ->orWhere('last_name',      'ILIKE', $like)
+                ->orWhere('first_name',     'ILIKE', $like)
+                ->orWhere('middle_name',    'ILIKE', $like)
+                ->orWhere('address',        'ILIKE', $like)
+                ->orWhere('type',           'ILIKE', $like)
+                ->orWhere('workstation_id', 'ILIKE', $like);
             });
         }
 

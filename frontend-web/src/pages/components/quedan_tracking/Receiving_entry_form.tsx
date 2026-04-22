@@ -123,6 +123,8 @@ export default function ReceivingEntry() {
 
 
   const [assocDues, setAssocDues] = useState<number | ''>('');
+  const [assocDuesIsDebit, setAssocDuesIsDebit] = useState(true);
+  const [othersIsDebit, setOthersIsDebit] = useState(false);
   const [others, setOthers] = useState<number | ''>('');
   const [noStorage, setNoStorage] = useState(false);
   const [noInsurance, setNoInsurance] = useState(false);
@@ -204,9 +206,24 @@ const pct = (n: number) =>
 
   // RR list
 useEffect(() => {
+  if (!companyId) {
+    setRrOptions([]);
+    return;
+  }
+
+  console.log('RR loader start', {
+    companyId,
+    includePosted,
+    rrSearch,
+  });
+
   (async () => {
     const resp = await napi.get('/receiving/rr-list', {
-      params: { include_posted: includePosted ? '1' : '0', q: rrSearch },
+      params: {
+        include_posted: includePosted ? '1' : '0',
+        q: rrSearch,
+        company_id: companyId,
+      },
     });
 
     const arr = Array.isArray(resp.data)
@@ -215,9 +232,15 @@ useEffect(() => {
       ? resp.data.data
       : [];
 
+    console.log('RR loader response', {
+      raw: resp.data,
+      normalizedLength: Array.isArray(arr) ? arr.length : 0,
+      firstRow: Array.isArray(arr) && arr.length > 0 ? arr[0] : null,
+    });      
+
     setRrOptions(arr);
   })().catch(console.error);
-}, [includePosted, rrSearch]);
+}, [includePosted, rrSearch, companyId]);
 
 
   // PBN list (always include posted=1, per legacy)
@@ -294,33 +317,47 @@ const [showMillPicker, setShowMillPicker] = useState(false);
 
 
 const normalizeTin = (v: any) => String(v ?? '').trim();
+const normalizeTinDigits = (v: any) => String(v ?? '').replace(/-/g, '').trim();
 
 const fetchPlanterNameByTin = useCallback(
   async (tin: string): Promise<string> => {
     const t = normalizeTin(tin);
+    const tDigits = normalizeTinDigits(tin);
     if (!t) return '';
 
-    // cache hit
+    // cache hit by exact typed value
     const cached = planterNameCacheRef.current.get(t);
     if (cached !== undefined) return cached;
 
-    // call your existing PlanterController index route
-    // GET /api/references/planters?search=<tin>&per_page=10
+    // cache hit by digits-only value
+    const cachedDigits = planterNameCacheRef.current.get(tDigits);
+    if (cachedDigits !== undefined) return cachedDigits;
+
     const resp = await napi.get('/references/planters', {
       params: { search: t, per_page: 10 },
     });
 
-    // accept paginator or plain array
     const list = Array.isArray(resp.data)
       ? resp.data
       : Array.isArray(resp.data?.data)
       ? resp.data.data
       : [];
 
-    const exact = list.find((x: any) => String(x?.tin ?? '').trim() === t);
+    const exact = list.find(
+      (x: any) => normalizeTinDigits(x?.tin) === tDigits
+    );
+
     const name = String(exact?.display_name ?? '');
+    const exactTin = String(exact?.tin ?? '').trim();
+
+    if (exactTin) {
+      planterNameCacheRef.current.set(exactTin, name);
+      planterNameCacheRef.current.set(normalizeTinDigits(exactTin), name);
+    }
 
     planterNameCacheRef.current.set(t, name);
+    planterNameCacheRef.current.set(tDigits, name);
+
     return name;
   },
   []
@@ -334,9 +371,9 @@ const planterOptionsCacheRef = useRef<Map<string, PlanterOption[]>>(new Map());
 
 const fetchPlanterOptions = useCallback(async (term: string): Promise<PlanterOption[]> => {
   const q = normalizeTin(term);
+  const qDigits = normalizeTinDigits(term);
   const key = q.toLowerCase();
 
-  // cache hit (including empty array)
   if (planterOptionsCacheRef.current.has(key)) {
     return planterOptionsCacheRef.current.get(key)!;
   }
@@ -356,10 +393,16 @@ const fetchPlanterOptions = useCallback(async (term: string): Promise<PlanterOpt
       tin: normalizeTin(x?.tin),
       display_name: String(x?.display_name ?? '').trim(),
     }))
-    .filter((x: PlanterOption) => x.tin !== '');
+    .filter((x: PlanterOption) => {
+      if (!x.tin) return false;
+      if (!qDigits) return true;
+      return normalizeTinDigits(x.tin).includes(qDigits);
+    });
 
-  // also feed name cache for instant fill
-  rows.forEach((r) => planterNameCacheRef.current.set(r.tin, r.display_name));
+  rows.forEach((r) => {
+    planterNameCacheRef.current.set(r.tin, r.display_name);
+    planterNameCacheRef.current.set(normalizeTinDigits(r.tin), r.display_name);
+  });
 
   planterOptionsCacheRef.current.set(key, rows);
   return rows;
@@ -382,9 +425,21 @@ const onSelectGL = async (acct_code: string) => {
 };
 
 
+console.log('RR render state', {
+  companyId,
+  rrOptionsLength: Array.isArray(rrOptions) ? rrOptions.length : 0,
+  rrSearch,
+});
+
 const filteredRR = useMemo(() => {
   const term = rrSearch.toLowerCase();
   const list = Array.isArray(rrOptions) ? rrOptions : [];  // ✅ guard
+
+  console.log('RR filtered state', {
+    sourceLength: list.length,
+    term,
+  });
+
   return list.filter(
     (r) =>
       (r.receipt_no || '').toLowerCase().includes(term) ||
@@ -442,6 +497,10 @@ const applyItemSelection = async (i: PBNItemRow) => {
       setGlAccountKey(entry.gl_account_key || '');
       setAssocDues(entry.assoc_dues ?? '');
       setOthers(entry.others ?? '');
+
+      setAssocDuesIsDebit(entry.assoc_dues_is_debit ?? true);
+      setOthersIsDebit(entry.others_is_debit ?? false);
+
       setNoStorage(!!entry.no_storage);
       setNoInsurance(!!entry.no_insurance);
       setInsuranceWeek(entry.insurance_week ? toISO(entry.insurance_week) : '');
@@ -452,7 +511,13 @@ const applyItemSelection = async (i: PBNItemRow) => {
         // also fetch its items for the Item # combobox and preselect current item
 const [{ data: pbnItems }, { data: pbnItemOne }, { data: ctx }] = await Promise.all([
   napi.get('/pbn/items', { params: { company_id: companyId, pbn_number: entry.pbn_number } }),
-  napi.get('/receiving/pbn-item', { params: { pbn_number: entry.pbn_number, item_no: entry.item_number } }),
+  napi.get('/receiving/pbn-item', {
+    params: {
+      company_id: companyId,
+      pbn_number: entry.pbn_number,
+      item_no: entry.item_number,
+    },
+  }),
   napi.get('/receiving/pricing-context', {
     params: {
       pbn_number: entry.pbn_number,
@@ -465,8 +530,8 @@ const [{ data: pbnItems }, { data: pbnItemOne }, { data: ctx }] = await Promise.
 ]);
 
 setItemOptions(Array.isArray(pbnItems) ? pbnItems : []);
-setUnitCost(Number(pbnItemOne?.unit_cost || 0));
-setCommission(Number(pbnItemOne?.commission || 0));
+setUnitCost(Number(ctx?.unit_cost || pbnItemOne?.unit_cost || 0));
+setCommission(Number(ctx?.commission || pbnItemOne?.commission || 0));
 
 // ✅ authoritative rates + crop year for Rate Basis message
 setInsuranceRate(Number(ctx?.insurance_rate || 0));
@@ -884,7 +949,9 @@ const isDuplicateQuedan = (rows: ReceivingDetailRow[], rowIndex: number, quedan:
 
 
   // ----------------- FORMULAS -----------------
-
+const assocEffect = assocDuesIsDebit ? -Number(assocDues || 0) : Number(assocDues || 0);
+const othersEffect = othersIsDebit ? -Number(others || 0) : Number(others || 0);
+const totalApCostDisplay = tAP + assocEffect + othersEffect;
 
 
 const recomputeTotals = (rows: ReceivingDetailRow[]) => {
@@ -1037,8 +1104,14 @@ const handleAutoSave = async (rowData: ReceivingDetailRow, rowIndex: number) => 
   if (!selectedRR) return;
 
   try {
-    const payload = { receipt_no: selectedRR, row_index: rowIndex, row: rowData };
-    const { data } = await napi.post('/receiving/batch-insert', payload);
+const payload = {
+  receipt_no: selectedRR,
+  row_index: rowIndex,
+  row: {
+    ...rowData,
+    id: rowData.id ?? null,
+  },
+};    const { data } = await napi.post('/receiving/batch-insert', payload);
 
 const server = data || {};
 const id = server?.id;
@@ -1144,7 +1217,11 @@ const onSaveNewReceiving = async () => {
     // 6) (Optional) refresh the RR list from the server so it’s 100% accurate
     try {
       const { data: rr } = await napi.get('/receiving/rr-list', {
-        params: { include_posted: includePosted ? '1' : '0', q: '' },
+        params: {
+          include_posted: includePosted ? '1' : '0',
+          q: '',
+          company_id: companyId,
+        },
       });
       setRrOptions(rr || []);
     } catch {
@@ -1169,6 +1246,8 @@ const saveAssocOthers = async () => {
       receipt_no: selectedRR,
       assoc_dues: Number(assocDues || 0),
       others: Number(others || 0),
+      assoc_dues_is_debit: assocDuesIsDebit,
+      others_is_debit: othersIsDebit,
     });
     toast.success('Assoc/Others saved');
   } catch {
@@ -1217,12 +1296,12 @@ useEffect(() => {
 const isRowComplete = (r: ReceivingDetailRow | undefined) =>
   !!(r && r.quedan_no && Number(r.quantity || 0) > 0);
 
-const makeBlankRow = (): ReceivingDetailRow => ({
+const makeBlankRow = (prev?: ReceivingDetailRow): ReceivingDetailRow => ({
   quedan_no: '',
   quantity: undefined,
   liens: undefined,
-  week_ending: null,
-  date_issued: null,
+  week_ending: prev?.week_ending ?? null,
+  date_issued: prev?.date_issued ?? null,
   planter_tin: '',
   planter_name: '',
   item_no: itemNumber || '',
@@ -1236,9 +1315,12 @@ const makeBlankRow = (): ReceivingDetailRow => ({
 
 const ensureTrailingBuffer = (rows: ReceivingDetailRow[]) => {
   const copy = [...rows];
+  const lastNonEmpty = copy.length > 0 ? copy[copy.length - 1] : undefined;
+
   if (copy.length === 0 || isRowComplete(copy[copy.length - 1])) {
-    copy.push(makeBlankRow());
+    copy.push(makeBlankRow(lastNonEmpty));
   }
+
   return copy;
 };
 
@@ -1632,18 +1714,26 @@ useEffect(() => {
   data: 'planter_tin',
   type: 'autocomplete',
   strict: false,       // allow typing, not only pick
-  filter: true,
+  filter: false,       // ✅ IMPORTANT: disable HOT built-in literal filter
   visibleRows: 8,
   className: 'htCenter',
 
-  // Handsontable expects (query, process)
-source: function (this: any, query: string, process: (items: string[]) => void) {
-  process([]); // ✅ immediate response to keep editor alive
-  fetchPlanterOptions(query)
-    .then((rows) => process(rows.map((r) => r.tin)))
-    .catch(() => process([]));
-},
+  source: function (this: any, query: string, process: (items: string[]) => void) {
+    process([]);
 
+    const normQuery = normalizeTinDigits(query);
+
+    fetchPlanterOptions(query)
+      .then((rows) => {
+        const filtered = rows.filter((r) => {
+          const normTin = normalizeTinDigits(r.tin);
+          return normTin.includes(normQuery);
+        });
+
+        process(filtered.map((r) => r.tin));
+      })
+      .catch(() => process([]));
+  },
 },
             { data: 'planter_name', readOnly: true },
             { data: 'item_no',     readOnly: true, className: 'htCenter' },
@@ -1654,9 +1744,93 @@ source: function (this: any, query: string, process: (items: string[]) => void) 
             { data: 'total_ap',    type: 'numeric', readOnly: true, numericFormat: { pattern: '0,0.00' }, className: 'htRight' },
           ]}
 
+beforeKeyDown={(e: KeyboardEvent) => {
+  if (e.key !== 'Enter') return;
+
+  const hot = hotRef.current?.hotInstance as any;
+  if (!hot) return;
+
+  const sel = hot.getSelectedLast?.();
+  if (!sel) return;
+
+  const [row, col] = sel;
+  const rowData = tableData[row] || {};
+
+  const editor = hot.getActiveEditor?.();
+  const typedValue =
+    typeof editor?.getValue === 'function'
+      ? String(editor.getValue() ?? '').trim()
+      : '';
+
+  const quedan = col === 0
+    ? typedValue || String(rowData.quedan_no ?? '').trim()
+    : String(rowData.quedan_no ?? '').trim();
+
+  const qty = col === 1
+    ? Number(typedValue || 0)
+    : Number(rowData.quantity || 0);
+
+  // 🚫 DO NOTHING if Quedan is empty
+  if (!quedan) return;
+
+  e.preventDefault();
+  e.stopImmediatePropagation?.();
+  e.stopPropagation();
+
+  try {
+    // ✅ commit current value immediately (NO DELAY)
+    if (col === 0) {
+      hot.setDataAtCell(row, 0, quedan, 'enterFlow');
+    } else if (col === 1) {
+      hot.setDataAtCell(row, 1, qty, 'enterFlow');
+    }
+  } catch {}
+
+  // ===== FLOW CONTROL =====
+
+  // 👉 FROM QUEDAN → GO TO QUANTITY
+  if (col === 0) {
+    requestAnimationFrame(() => {
+      try {
+        hot.selectCell(row, 1);
+        hot.getActiveEditor?.()?.beginEditing?.();
+      } catch {}
+    });
+    return;
+  }
+
+  // 👉 FROM QUANTITY → GO TO NEXT ROW QUEDAN
+  if (col === 1) {
+    if (qty <= 0) return; // require quantity
+
+    setTableData((prev) => {
+      const updated = [...prev];
+
+      if (row + 1 >= updated.length) {
+        updated.push(makeBlankRow(updated[row]));
+      }
+
+      const finalRows = ensureTrailingBuffer(updated);
+
+      requestAnimationFrame(() => {
+        try {
+          hot.selectCell(row + 1, 0);
+          hot.scrollViewportTo(row + 1, 0);
+          hot.getActiveEditor?.()?.beginEditing?.();
+        } catch {}
+      });
+
+      return finalRows;
+    });
+
+    return;
+  }
+}}
+
+
           /* Your existing autosave + recompute logic */
 afterChange={(changes, source) => {
-  if (!changes || !['edit', 'Autocomplete', 'paste'].includes(String(source))) return;
+  if (!changes || !['edit', 'Autocomplete', 'paste', 'enterMoveNextQuedan', 'enterFlow'].includes(String(source))) return;
 
   // ✅ ADDED: prevent infinite loop when we revert a duplicate value programmatically
   if (String(source) === 'dupQuedanRevert') return;
@@ -1793,26 +1967,56 @@ if (prop === 'quedan_no') {
   });
 
   if (shouldAppendRow) {
-    updated.push({
-      quedan_no: '',
-      quantity: undefined,
-      liens: undefined,
-      week_ending: null,
-      date_issued: null,
-      planter_tin: '',
-      planter_name: '',
-      item_no: itemNumber || '',
-      mill: mill || '',
-      unit_cost: unitCost || 0,
-      commission: commission || 0,
-      storage: 0,
-      insurance: 0,
-      total_ap: 0,
-    });
+    updated.push(makeBlankRow(updated[updated.length - 1]));
   }
 
   setTableData(updated);
 }}
+
+contextMenu={{
+  items: {
+    remove_row: {
+      name: '🗑️ Remove row',
+      callback: async function (_key, selection) {
+        const rowIndex = selection?.[0]?.start?.row;
+
+        if (rowIndex === undefined || rowIndex === null) return;
+
+        const rowData = tableData[rowIndex];
+        if (!rowData) return;
+
+
+
+        const ok = window.confirm('Do you want to remove this row?');
+        if (!ok) return;
+
+        try {
+          // Unsaved / blank row -> local remove only
+          if (!rowData.id) {
+            const updated = [...tableData];
+            updated.splice(rowIndex, 1);
+            setTableData(ensureTrailingBuffer(updated));
+            toast.success('Row removed.');
+            return;
+          }
+
+          // Saved row -> backend delete
+          await napi.post('/receiving/delete-detail', {
+            receipt_no: selectedRR,
+            id: rowData.id,
+          });
+
+          await reloadDetailsFromServer(selectedRR);
+          toast.success('✅ Row deleted successfully');
+        } catch (e: any) {
+          console.error(e);
+          toast.error(e?.response?.data?.message || 'Failed to delete row.');
+        }
+      },
+    },
+  },
+}}
+
 
         />
 <style>{`
@@ -1848,7 +2052,7 @@ if (prop === 'quedan_no') {
     <div>
       Total AP Cost___{' '}
       <span className="font-semibold">
-        {currency(tAP + Number(assocDues || 0) + Number(others || 0))}
+        {currency(totalApCostDisplay)}
       </span>
     </div>
   </div>
@@ -1891,6 +2095,15 @@ if (prop === 'quedan_no') {
           onChange={(e) => setAssocDues(e.target.value === '' ? '' : Number(e.target.value))}
           className="w-full border p-2 rounded bg-yellow-50"
         />
+        <label className="mt-2 inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-blue-600"
+            checked={assocDuesIsDebit}
+            onChange={(e) => setAssocDuesIsDebit(e.target.checked)}
+          />
+          <span>Debit</span>
+        </label>
       </div>
 
       <div className="col-span-3">
@@ -1900,9 +2113,17 @@ if (prop === 'quedan_no') {
           step="0.01"
           value={others}
           onChange={(e) => setOthers(e.target.value === '' ? '' : Number(e.target.value))}
-
           className="w-full border p-2 rounded bg-yellow-50"
         />
+        <label className="mt-2 inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-blue-600"
+            checked={othersIsDebit}
+            onChange={(e) => setOthersIsDebit(e.target.checked)}
+          />
+          <span>Debit</span>
+        </label>
       </div>
 
 <div className="col-span-6 flex justify-end">
@@ -2036,7 +2257,9 @@ if (prop === 'quedan_no') {
       setVendorName('');
       setMill('');
       setAssocDues('');
+      setAssocDuesIsDebit(true);
       setOthers('');
+      setOthersIsDebit(false);
       setNoInsurance(false);
       setNoStorage(false);
       setInsuranceWeek('');

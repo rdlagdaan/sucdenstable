@@ -39,6 +39,11 @@ class BillOfLadingController extends Controller
         return trim((string) ($v ?? ''));
     }
 
+    private function boolFlag($v): bool
+    {
+        return filter_var($v, FILTER_VALIDATE_BOOLEAN);
+    }
+
     private function isActiveDeleteFlagQuery($query, string $tableAlias, string $tableName)
     {
         return $query->where(function ($w) use ($tableAlias, $tableName) {
@@ -59,6 +64,11 @@ class BillOfLadingController extends Controller
             ->max('id');
 
         return 'BL-' . str_pad((string) ($maxId + 1), 6, '0', STR_PAD_LEFT);
+    }
+
+    private function formatBlEntryNo(int $id): string
+    {
+        return 'BL-' . str_pad((string) $id, 6, '0', STR_PAD_LEFT);
     }
 
     private function computeLineValues(array $row): array
@@ -115,366 +125,6 @@ class BillOfLadingController extends Controller
             'other_taxes'    => $otherTaxes,
             'boc_total'      => $bocTotal,
         ];
-    }
-
-    public function poList(Request $req)
-    {
-        $companyId = $this->companyIdFromRequest($req);
-        $q = trim((string) $req->get('q', ''));
-
-        $rows = DB::table('pbn_entry as p')
-            ->select([
-                'p.id',
-                DB::raw('p.pbn_number as po_no'),
-                DB::raw('COALESCE(p.vend_code, \'\') as vendor_code'),
-                DB::raw('COALESCE(p.vendor_name, \'\') as vendor_name'),
-            ])
-            ->where('p.company_id', $companyId)
-            ->where('p.posted_flag', 1)
-            ->where(function ($w) {
-                if (Schema::hasColumn('pbn_entry', 'delete_flag')) {
-                    $w->whereNull('p.delete_flag')
-                      ->orWhere('p.delete_flag', 0)
-                      ->orWhere('p.delete_flag', false);
-                } else {
-                    $w->whereRaw('1=1');
-                }
-            })
-            ->when($q !== '', function ($qq) use ($q) {
-                $like = '%' . strtolower($q) . '%';
-                $qq->where(function ($w) use ($like) {
-                    $w->whereRaw('LOWER(CAST(p.pbn_number as text)) LIKE ?', [$like])
-                      ->orWhereRaw('LOWER(CAST(COALESCE(p.vend_code, \'\') as text)) LIKE ?', [$like])
-                      ->orWhereRaw('LOWER(CAST(COALESCE(p.vendor_name, \'\') as text)) LIKE ?', [$like]);
-                });
-            })
-            ->orderByDesc('p.id')
-            ->limit(200)
-            ->get();
-
-        return response()->json($rows);
-    }
-
-    public function poItems(Request $req)
-    {
-        $companyId = $this->companyIdFromRequest($req);
-
-        $purchaseOrderId = (int) ($req->get('purchase_order_id') ?: 0);
-        $poNo = trim((string) $req->get('po_no', ''));
-
-        if ($purchaseOrderId <= 0 && $poNo === '') {
-            return response()->json([]);
-        }
-
-        $headerQ = DB::table('pbn_entry as p')
-            ->select(['p.id', 'p.pbn_number'])
-            ->where('p.company_id', $companyId);
-
-        if ($purchaseOrderId > 0) {
-            $headerQ->where('p.id', $purchaseOrderId);
-        } else {
-            $headerQ->where('p.pbn_number', $poNo);
-        }
-
-        $header = $headerQ->first();
-
-        if (!$header) {
-            return response()->json([]);
-        }
-
-        $detailQ = DB::table('pbn_entry_details as d')
-            ->select([
-                'd.id',
-                'd.row',
-                'd.pbn_entry_id',
-                'd.pbn_number',
-                DB::raw('COALESCE(d.particulars, \'\') as particulars'),
-                DB::raw('COALESCE(d.mill_code, \'\') as mill_code'),
-                DB::raw('COALESCE(d.mill, \'\') as mill'),
-                DB::raw('COALESCE(d.quantity, 0) as quantity'),
-                DB::raw('COALESCE(d.price, 0) as price'),
-                DB::raw('COALESCE(d.cost, 0) as cost'),
-                DB::raw('COALESCE(d.total_cost, 0) as total_cost'),
-            ])
-            ->where('d.pbn_entry_id', $header->id);
-
-        if (Schema::hasColumn('pbn_entry_details', 'company_id')) {
-            $detailQ->where(function ($w) use ($companyId) {
-                $w->whereNull('d.company_id')
-                  ->orWhere('d.company_id', '')
-                  ->orWhereRaw('CAST(d.company_id as text) = ?', [(string) $companyId]);
-            });
-        }
-
-        if (Schema::hasColumn('pbn_entry_details', 'delete_flag')) {
-            $detailQ->where(function ($w) {
-                $w->whereNull('d.delete_flag')
-                  ->orWhere('d.delete_flag', 0)
-                  ->orWhere('d.delete_flag', false);
-            });
-        }
-
-        $rows = $detailQ
-            ->orderBy('d.row')
-            ->orderBy('d.id')
-            ->get()
-            ->map(function ($r) {
-                $particulars = trim((string) ($r->particulars ?? ''));
-                return [
-                    'id'            => (int) $r->id,
-                    'row'           => (int) ($r->row ?? 0),
-                    'pbn_entry_id'  => (int) ($r->pbn_entry_id ?? 0),
-                    'pbn_number'    => (string) ($r->pbn_number ?? ''),
-                    'particulars'   => $particulars,
-                    'item_label'    => $particulars !== '' ? $particulars : ('Item ' . ((int) ($r->row ?? 0))),
-                    'mill_code'     => (string) ($r->mill_code ?? ''),
-                    'mill'          => (string) ($r->mill ?? ''),
-                    'quantity'      => (float) ($r->quantity ?? 0),
-                    'price'         => (float) ($r->price ?? 0),
-                    'cost'          => (float) ($r->cost ?? 0),
-                    'total_cost'    => (float) ($r->total_cost ?? 0),
-                    'is_refined_sugar' => strtolower($particulars) === 'refined sugar',
-                ];
-            })
-            ->values();
-
-        return response()->json($rows);
-    }
-
-    public function list(Request $req)
-    {
-        $companyId = $this->companyIdFromRequest($req);
-        $q = trim((string) $req->get('q', ''));
-
-        $rows = DB::table('bill_of_lading as b')
-            ->select([
-                'b.id',
-                DB::raw("('BL-' || lpad(CAST(b.id as text), 6, '0')) as bl_entry_no"),
-                'b.po_no',
-                'b.vendor_name',
-                'b.bl_date',
-                'b.status',
-                DB::raw('0 as line_count'),
-            ])
-            ->where('b.company_id', $companyId)
-            ->where(function ($w) {
-                if (Schema::hasColumn('bill_of_lading', 'delete_flag')) {
-                    $w->whereNull('b.delete_flag')
-                      ->orWhere('b.delete_flag', 0)
-                      ->orWhere('b.delete_flag', false);
-                } else {
-                    $w->whereRaw('1=1');
-                }
-            })
-            ->when($q !== '', function ($qq) use ($q) {
-                $like = '%' . strtolower($q) . '%';
-                $qq->where(function ($w) use ($like) {
-                    $w->whereRaw("LOWER(('BL-' || lpad(CAST(b.id as text), 6, '0'))) LIKE ?", [$like])
-                      ->orWhereRaw('LOWER(CAST(COALESCE(b.po_no, \'\') as text)) LIKE ?', [$like])
-                      ->orWhereRaw('LOWER(CAST(COALESCE(b.vendor_name, \'\') as text)) LIKE ?', [$like]);
-                });
-            })
-            ->orderByDesc('b.id')
-            ->limit(200)
-            ->get();
-
-        return response()->json($rows);
-    }
-
-    public function getEntry(Request $req)
-    {
-        $companyId = $this->companyIdFromRequest($req);
-        $id = (int) $req->get('id');
-
-        $row = DB::table('bill_of_lading as b')
-            ->select([
-                'b.*',
-                DB::raw("('BL-' || lpad(CAST(b.id as text), 6, '0')) as bl_entry_no"),
-                DB::raw("COALESCE(b.processed_flag, false) as processed_flag"),
-                'b.processed_by',
-                'b.processed_at',
-                'b.cash_purchase_id',
-                'b.cp_no',
-            ])
-            ->where('b.company_id', $companyId)
-            ->where('b.id', $id)
-            ->firstOrFail();
-
-        return response()->json($row);
-    }
-
-    public function getDetails(Request $req)
-    {
-        $companyId = $this->companyIdFromRequest($req);
-        $id = (int) $req->get('id');
-
-        $exists = DB::table('bill_of_lading')
-            ->where('company_id', $companyId)
-            ->where('id', $id)
-            ->exists();
-
-        if (!$exists) {
-            abort(404, 'Bill of Lading header not found.');
-        }
-
-        $rows = DB::table('bill_of_lading_line')
-            ->where('bill_of_lading_id', $id)
-            ->orderBy('line_no')
-            ->get()
-            ->map(function ($r) {
-                return [
-                    'id'                    => $r->id,
-                    'line_no'               => (int) $r->line_no,
-                    'item_no'               => (int) ($r->item_no ?? 0),
-                    'bl_no'                 => (string) ($r->bl_no ?? ''),
-                    'mt'                    => (float) ($r->mt ?? 0),
-                    'bags'                  => (float) ($r->bags ?? 0),
-                    'cif_price'             => (float) ($r->cif_price ?? 0),
-                    'cif_usd'               => (float) ($r->cif_usd ?? 0),
-                    'fx_rate'               => (float) ($r->fx_rate ?? 0),
-                    'cif_php'               => (float) ($r->cif_php ?? 0),
-                    'sad_no'                => (string) ($r->sad_no ?? ''),
-                    'ssdt_no'               => (string) ($r->ssdt_no ?? ''),
-                    'fan_no'                => (string) ($r->fan_no ?? ''),
-                    'registration_date'     => $r->registration_date ? date('Y-m-d', strtotime((string) $r->registration_date)) : '',
-                    'assessment_date'       => $r->assessment_date ? date('Y-m-d', strtotime((string) $r->assessment_date)) : '',
-                    'pay_date'              => $r->pay_date ? date('Y-m-d', strtotime((string) $r->pay_date)) : '',
-                    'si_no'                 => (string) ($r->si_no ?? ''),
-                    'dutiable_value'        => (float) ($r->dutiable_value ?? 0),
-                    'duty'                  => (float) ($r->duty ?? 0),
-                    'brokerage'             => (float) ($r->brokerage ?? 0),
-                    'wharfage'              => (float) ($r->wharfage ?? 0),
-                    'arrastre'              => (float) ($r->arrastre ?? 0),
-                    'other_charges'         => (float) ($r->other_charges ?? 0),
-                    'adjustment'            => (float) ($r->adjustment ?? 0),
-                    'landed_cost'           => (float) ($r->landed_cost ?? 0),
-                    'vat'                   => (float) ($r->vat ?? 0),
-                    'other_taxes'           => (float) ($r->other_taxes ?? 0),
-                    'boc_total'             => (float) ($r->boc_total ?? 0),
-                    'remarks'               => (string) ($r->remarks ?? ''),
-                    'purchase_order_line_id'=> (int) ($r->purchase_order_line_id ?? 0),
-                    'consumed_qty_mt'       => (float) ($r->consumed_qty_mt ?? 0),
-                    'consumed_bags'         => (int) ($r->consumed_bags ?? 0),
-                ];
-            });
-
-        return response()->json($rows);
-    }
-
-public function createEntry(Request $req)
-{
-    try {
-        $companyId = $this->companyIdFromRequest($req);
-
-        $v = $req->validate([
-            'purchase_order_id' => 'required|integer',
-            'po_no'             => 'required|string|max:50',
-            'vendor_code'       => 'nullable|string|max:50',
-            'vendor_name'       => 'required|string|max:200',
-            'bl_date'           => 'nullable|date',
-            'remarks'           => 'nullable|string',
-            'user_id'           => 'nullable|integer',
-            'workstation_id'    => 'nullable|string|max:100',
-        ]);
-
-        $existing = DB::table('bill_of_lading')
-            ->where('company_id', $companyId)
-            ->where('po_no', $v['po_no'])
-            ->where(function ($w) {
-                $w->whereNull('delete_flag')
-                  ->orWhere('delete_flag', false)
-                  ->orWhere('delete_flag', 0);
-            })
-            ->orderByDesc('id')
-            ->first();
-
-        if ($existing) {
-            $blEntryNo = 'BL-' . str_pad((string) $existing->id, 6, '0', STR_PAD_LEFT);
-
-            return response()->json([
-                'id'          => (int) $existing->id,
-                'bl_entry_no' => $blEntryNo,
-                'po_no'       => (string) ($existing->po_no ?? $v['po_no']),
-                'vendor_code' => $existing->vendor_code ?? ($v['vendor_code'] ?? null),
-                'vendor_name' => (string) ($existing->vendor_name ?? $v['vendor_name']),
-                'bl_date'     => $existing->bl_date ? $this->toDate($existing->bl_date) : $this->toDate($v['bl_date'] ?? null),
-                'remarks'     => $existing->remarks ?? ($v['remarks'] ?? null),
-                'reused'      => true,
-            ], 200);
-        }
-
-        $id = DB::table('bill_of_lading')->insertGetId([
-            'purchase_order_id' => (int) $v['purchase_order_id'],
-            'po_no'             => $v['po_no'],
-            'vendor_id'         => null,
-            'vendor_code'       => $v['vendor_code'] ?? null,
-            'vendor_name'       => $v['vendor_name'],
-            'bl_no'             => null,
-            'bl_date'           => $this->toDate($v['bl_date'] ?? null),
-            'remarks'           => $v['remarks'] ?? null,
-            'status'            => 'draft',
-            'posted_flag'       => false,
-            'closed_flag'       => false,
-            'delete_flag'       => false,
-            'visible_flag'      => 1,
-            'company_id'        => $companyId,
-            'workstation_id'    => $req->input('workstation_id') ?: $req->ip(),
-            'created_by'        => (string) ($req->input('user_id') ?? '0'),
-            'created_at'        => now(),
-            'updated_at'        => now(),
-        ]);
-
-        $blEntryNo = 'BL-' . str_pad((string) $id, 6, '0', STR_PAD_LEFT);
-
-        return response()->json([
-            'id'          => $id,
-            'bl_entry_no' => $blEntryNo,
-            'po_no'       => $v['po_no'],
-            'vendor_code' => $v['vendor_code'] ?? null,
-            'vendor_name' => $v['vendor_name'],
-            'bl_date'     => $this->toDate($v['bl_date'] ?? null),
-            'remarks'     => $v['remarks'] ?? null,
-            'reused'      => false,
-        ], 201);
-    } catch (\Throwable $e) {
-        Log::error('BillOfLading createEntry failed', [
-            'message' => $e->getMessage(),
-            'payload' => $req->all(),
-        ]);
-
-        return response()->json([
-            'message' => 'Server Error',
-            'debug'   => $e->getMessage(),
-        ], 500);
-    }
-}
-
-    public function updateMain(Request $req)
-    {
-        $companyId = $this->companyIdFromRequest($req);
-
-        $v = $req->validate([
-            'id'          => 'required|integer',
-            'bl_date'     => 'nullable|date',
-            'remarks'     => 'nullable|string',
-        ]);
-
-        DB::table('bill_of_lading')
-            ->where('company_id', $companyId)
-            ->where('id', $v['id'])
-            ->update([
-                'bl_date'    => $this->toDate($v['bl_date'] ?? null),
-                'remarks'    => $v['remarks'] ?? null,
-                'updated_at' => now(),
-            ]);
-
-        return response()->json(['ok' => true]);
-    }
-
-
-    private function boolFlag($v): bool
-    {
-        return filter_var($v, FILTER_VALIDATE_BOOLEAN);
     }
 
     private function amountToWords(float $amount): string
@@ -664,8 +314,361 @@ public function createEntry(Request $req)
             'crop_year'  => $pbn->crop_year ?? null,
             'sugar_type' => $pbn->sugar_type ?? null,
             'mill_id'    => $millCode,
-            'rr_no'      => null,
         ];
+    }
+
+    public function poList(Request $req)
+    {
+        $companyId = $this->companyIdFromRequest($req);
+        $q = trim((string) $req->get('q', ''));
+
+        $rows = DB::table('pbn_entry as p')
+            ->select([
+                'p.id',
+                DB::raw('p.pbn_number as po_no'),
+                DB::raw('COALESCE(p.vend_code, \'\') as vendor_code'),
+                DB::raw('COALESCE(p.vendor_name, \'\') as vendor_name'),
+            ])
+            ->where('p.company_id', $companyId)
+            ->where('p.posted_flag', 1)
+            ->where(function ($w) {
+                if (Schema::hasColumn('pbn_entry', 'delete_flag')) {
+                    $w->whereNull('p.delete_flag')
+                      ->orWhere('p.delete_flag', 0)
+                      ->orWhere('p.delete_flag', false);
+                } else {
+                    $w->whereRaw('1=1');
+                }
+            })
+            ->when($q !== '', function ($qq) use ($q) {
+                $like = '%' . strtolower($q) . '%';
+                $qq->where(function ($w) use ($like) {
+                    $w->whereRaw('LOWER(CAST(p.pbn_number as text)) LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(CAST(COALESCE(p.vend_code, \'\') as text)) LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(CAST(COALESCE(p.vendor_name, \'\') as text)) LIKE ?', [$like]);
+                });
+            })
+            ->orderByDesc('p.id')
+            ->limit(200)
+            ->get();
+
+        return response()->json($rows);
+    }
+
+    public function poItems(Request $req)
+    {
+        $companyId = $this->companyIdFromRequest($req);
+
+        $purchaseOrderId = (int) ($req->get('purchase_order_id') ?: 0);
+        $poNo = trim((string) $req->get('po_no', ''));
+
+        if ($purchaseOrderId <= 0 && $poNo === '') {
+            return response()->json([]);
+        }
+
+        $headerQ = DB::table('pbn_entry as p')
+            ->select(['p.id', 'p.pbn_number'])
+            ->where('p.company_id', $companyId);
+
+        if ($purchaseOrderId > 0) {
+            $headerQ->where('p.id', $purchaseOrderId);
+        } else {
+            $headerQ->where('p.pbn_number', $poNo);
+        }
+
+        $header = $headerQ->first();
+
+        if (!$header) {
+            return response()->json([]);
+        }
+
+        $detailQ = DB::table('pbn_entry_details as d')
+            ->select([
+                'd.id',
+                'd.row',
+                'd.pbn_entry_id',
+                'd.pbn_number',
+                DB::raw('COALESCE(d.particulars, \'\') as particulars'),
+                DB::raw('COALESCE(d.mill_code, \'\') as mill_code'),
+                DB::raw('COALESCE(d.mill, \'\') as mill'),
+                DB::raw('COALESCE(d.quantity, 0) as quantity'),
+                DB::raw('COALESCE(d.price, 0) as price'),
+                DB::raw('COALESCE(d.cost, 0) as cost'),
+                DB::raw('COALESCE(d.total_cost, 0) as total_cost'),
+            ])
+            ->where('d.pbn_entry_id', $header->id);
+
+        if (Schema::hasColumn('pbn_entry_details', 'company_id')) {
+            $detailQ->where(function ($w) use ($companyId) {
+                $w->whereNull('d.company_id')
+                  ->orWhere('d.company_id', '')
+                  ->orWhereRaw('CAST(d.company_id as text) = ?', [(string) $companyId]);
+            });
+        }
+
+        if (Schema::hasColumn('pbn_entry_details', 'delete_flag')) {
+            $detailQ->where(function ($w) {
+                $w->whereNull('d.delete_flag')
+                  ->orWhere('d.delete_flag', 0)
+                  ->orWhere('d.delete_flag', false);
+            });
+        }
+
+        $rows = $detailQ
+            ->orderBy('d.row')
+            ->orderBy('d.id')
+            ->get()
+            ->map(function ($r) {
+                $particulars = trim((string) ($r->particulars ?? ''));
+                return [
+                    'id'               => (int) $r->id,
+                    'row'              => (int) ($r->row ?? 0),
+                    'pbn_entry_id'     => (int) ($r->pbn_entry_id ?? 0),
+                    'pbn_number'       => (string) ($r->pbn_number ?? ''),
+                    'particulars'      => $particulars,
+                    'item_label'       => $particulars !== '' ? $particulars : ('Item ' . ((int) ($r->row ?? 0))),
+                    'mill_code'        => (string) ($r->mill_code ?? ''),
+                    'mill'             => (string) ($r->mill ?? ''),
+                    'quantity'         => (float) ($r->quantity ?? 0),
+                    'price'            => (float) ($r->price ?? 0),
+                    'cost'             => (float) ($r->cost ?? 0),
+                    'total_cost'       => (float) ($r->total_cost ?? 0),
+                    'is_refined_sugar' => strtolower($particulars) === 'refined sugar',
+                ];
+            })
+            ->values();
+
+        return response()->json($rows);
+    }
+
+    public function list(Request $req)
+    {
+        $companyId = $this->companyIdFromRequest($req);
+        $q = trim((string) $req->get('q', ''));
+
+        $rows = DB::table('bill_of_lading as b')
+            ->select([
+                'b.id',
+                DB::raw("('BL-' || lpad(CAST(b.id as text), 6, '0')) as bl_entry_no"),
+                'b.po_no',
+                'b.vendor_name',
+                'b.bl_date',
+                'b.status',
+                DB::raw('0 as line_count'),
+            ])
+            ->where('b.company_id', $companyId)
+            ->where(function ($w) {
+                if (Schema::hasColumn('bill_of_lading', 'delete_flag')) {
+                    $w->whereNull('b.delete_flag')
+                      ->orWhere('b.delete_flag', 0)
+                      ->orWhere('b.delete_flag', false);
+                } else {
+                    $w->whereRaw('1=1');
+                }
+            })
+            ->when($q !== '', function ($qq) use ($q) {
+                $like = '%' . strtolower($q) . '%';
+                $qq->where(function ($w) use ($like) {
+                    $w->whereRaw("LOWER(('BL-' || lpad(CAST(b.id as text), 6, '0'))) LIKE ?", [$like])
+                      ->orWhereRaw('LOWER(CAST(COALESCE(b.po_no, \'\') as text)) LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(CAST(COALESCE(b.vendor_name, \'\') as text)) LIKE ?', [$like]);
+                });
+            })
+            ->orderByDesc('b.id')
+            ->limit(200)
+            ->get();
+
+        return response()->json($rows);
+    }
+
+    public function getEntry(Request $req)
+    {
+        $companyId = $this->companyIdFromRequest($req);
+        $id = (int) $req->get('id');
+
+        $row = DB::table('bill_of_lading as b')
+            ->select([
+                'b.*',
+                DB::raw("('BL-' || lpad(CAST(b.id as text), 6, '0')) as bl_entry_no"),
+                DB::raw("COALESCE(b.processed_flag, false) as processed_flag"),
+                'b.processed_by',
+                'b.processed_at',
+                'b.cash_purchase_id',
+                'b.cp_no',
+            ])
+            ->where('b.company_id', $companyId)
+            ->where('b.id', $id)
+            ->firstOrFail();
+
+        return response()->json($row);
+    }
+
+    public function getDetails(Request $req)
+    {
+        $companyId = $this->companyIdFromRequest($req);
+        $id = (int) $req->get('id');
+
+        $exists = DB::table('bill_of_lading')
+            ->where('company_id', $companyId)
+            ->where('id', $id)
+            ->exists();
+
+        if (!$exists) {
+            abort(404, 'Bill of Lading header not found.');
+        }
+
+        $rows = DB::table('bill_of_lading_line')
+            ->where('bill_of_lading_id', $id)
+            ->orderBy('line_no')
+            ->get()
+            ->map(function ($r) {
+                return [
+                    'id'                     => $r->id,
+                    'line_no'                => (int) $r->line_no,
+                    'item_no'                => (int) ($r->item_no ?? 0),
+                    'bl_no'                  => (string) ($r->bl_no ?? ''),
+                    'mt'                     => (float) ($r->mt ?? 0),
+                    'bags'                   => (float) ($r->bags ?? 0),
+                    'cif_price'              => (float) ($r->cif_price ?? 0),
+                    'cif_usd'                => (float) ($r->cif_usd ?? 0),
+                    'fx_rate'                => (float) ($r->fx_rate ?? 0),
+                    'cif_php'                => (float) ($r->cif_php ?? 0),
+                    'sad_no'                 => (string) ($r->sad_no ?? ''),
+                    'ssdt_no'                => (string) ($r->ssdt_no ?? ''),
+                    'fan_no'                 => (string) ($r->fan_no ?? ''),
+                    'registration_date'      => $r->registration_date ? date('Y-m-d', strtotime((string) $r->registration_date)) : '',
+                    'assessment_date'        => $r->assessment_date ? date('Y-m-d', strtotime((string) $r->assessment_date)) : '',
+                    'pay_date'               => $r->pay_date ? date('Y-m-d', strtotime((string) $r->pay_date)) : '',
+                    'si_no'                  => (string) ($r->si_no ?? ''),
+                    'dutiable_value'         => (float) ($r->dutiable_value ?? 0),
+                    'duty'                   => (float) ($r->duty ?? 0),
+                    'brokerage'              => (float) ($r->brokerage ?? 0),
+                    'wharfage'               => (float) ($r->wharfage ?? 0),
+                    'arrastre'               => (float) ($r->arrastre ?? 0),
+                    'other_charges'          => (float) ($r->other_charges ?? 0),
+                    'adjustment'             => (float) ($r->adjustment ?? 0),
+                    'landed_cost'            => (float) ($r->landed_cost ?? 0),
+                    'vat'                    => (float) ($r->vat ?? 0),
+                    'other_taxes'            => (float) ($r->other_taxes ?? 0),
+                    'boc_total'              => (float) ($r->boc_total ?? 0),
+                    'remarks'                => (string) ($r->remarks ?? ''),
+                    'purchase_order_line_id' => (int) ($r->purchase_order_line_id ?? 0),
+                    'consumed_qty_mt'        => (float) ($r->consumed_qty_mt ?? 0),
+                    'consumed_bags'          => (int) ($r->consumed_bags ?? 0),
+                ];
+            });
+
+        return response()->json($rows);
+    }
+
+    public function createEntry(Request $req)
+    {
+        try {
+            $companyId = $this->companyIdFromRequest($req);
+
+            $v = $req->validate([
+                'purchase_order_id' => 'required|integer',
+                'po_no'             => 'required|string|max:50',
+                'vendor_code'       => 'nullable|string|max:50',
+                'vendor_name'       => 'required|string|max:200',
+                'bl_date'           => 'nullable|date',
+                'remarks'           => 'nullable|string',
+                'user_id'           => 'nullable|integer',
+                'workstation_id'    => 'nullable|string|max:100',
+            ]);
+
+            $existing = DB::table('bill_of_lading')
+                ->where('company_id', $companyId)
+                ->where('po_no', $v['po_no'])
+                ->where(function ($w) {
+                    $w->whereNull('delete_flag')
+                      ->orWhere('delete_flag', false)
+                      ->orWhere('delete_flag', 0);
+                })
+                ->orderByDesc('id')
+                ->first();
+
+            if ($existing) {
+                $blEntryNo = $this->formatBlEntryNo((int) $existing->id);
+
+                return response()->json([
+                    'id'          => (int) $existing->id,
+                    'bl_entry_no' => $blEntryNo,
+                    'po_no'       => (string) ($existing->po_no ?? $v['po_no']),
+                    'vendor_code' => $existing->vendor_code ?? ($v['vendor_code'] ?? null),
+                    'vendor_name' => (string) ($existing->vendor_name ?? $v['vendor_name']),
+                    'bl_date'     => $existing->bl_date ? $this->toDate($existing->bl_date) : $this->toDate($v['bl_date'] ?? null),
+                    'remarks'     => $existing->remarks ?? ($v['remarks'] ?? null),
+                    'reused'      => true,
+                ], 200);
+            }
+
+            $id = DB::table('bill_of_lading')->insertGetId([
+                'purchase_order_id' => (int) $v['purchase_order_id'],
+                'po_no'             => $v['po_no'],
+                'vendor_id'         => null,
+                'vendor_code'       => $v['vendor_code'] ?? null,
+                'vendor_name'       => $v['vendor_name'],
+                'bl_no'             => null,
+                'bl_date'           => $this->toDate($v['bl_date'] ?? null),
+                'remarks'           => $v['remarks'] ?? null,
+                'status'            => 'draft',
+                'posted_flag'       => false,
+                'closed_flag'       => false,
+                'delete_flag'       => false,
+                'visible_flag'      => 1,
+                'company_id'        => $companyId,
+                'workstation_id'    => $req->input('workstation_id') ?: $req->ip(),
+                'created_by'        => (string) ($req->input('user_id') ?? '0'),
+                'created_at'        => now(),
+                'updated_at'        => now(),
+            ]);
+
+            $blEntryNo = $this->formatBlEntryNo((int) $id);
+
+            return response()->json([
+                'id'          => $id,
+                'bl_entry_no' => $blEntryNo,
+                'po_no'       => $v['po_no'],
+                'vendor_code' => $v['vendor_code'] ?? null,
+                'vendor_name' => $v['vendor_name'],
+                'bl_date'     => $this->toDate($v['bl_date'] ?? null),
+                'remarks'     => $v['remarks'] ?? null,
+                'reused'      => false,
+            ], 201);
+        } catch (\Throwable $e) {
+            Log::error('BillOfLading createEntry failed', [
+                'message' => $e->getMessage(),
+                'payload' => $req->all(),
+            ]);
+
+            return response()->json([
+                'message' => 'Server Error',
+                'debug'   => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    public function updateMain(Request $req)
+    {
+        $companyId = $this->companyIdFromRequest($req);
+
+        $v = $req->validate([
+            'id'      => 'required|integer',
+            'bl_date' => 'nullable|date',
+            'remarks' => 'nullable|string',
+        ]);
+
+        DB::table('bill_of_lading')
+            ->where('company_id', $companyId)
+            ->where('id', $v['id'])
+            ->update([
+                'bl_date'    => $this->toDate($v['bl_date'] ?? null),
+                'remarks'    => $v['remarks'] ?? null,
+                'updated_at' => now(),
+            ]);
+
+        return response()->json(['ok' => true]);
     }
 
     public function paymentMethods(Request $req)
@@ -757,21 +760,22 @@ public function createEntry(Request $req)
         $lines = $this->getBlAccountingPreview($companyId, $id);
         $totals = $this->getBlTotals($id);
         $derived = $this->getPbnDerivedFields($companyId, $header);
+        $blEntryNo = $this->formatBlEntryNo((int) $header->id);
 
         return response()->json([
-            'cp_no'            => (string) $header->po_no,
-            'vend_id'          => (string) ($header->vendor_code ?? ''),
-            'purchase_date'    => $header->bl_date ? $this->toDate($header->bl_date) : null,
-            'explanation'      => (string) ($header->remarks ?? ''),
-            'amount_in_words'  => $this->amountToWords((float) $totals['credit_total']),
-            'booking_no'       => $derived['booking_no'],
-            'crop_year'        => $derived['crop_year'],
-            'sugar_type'       => $derived['sugar_type'],
-            'mill_id'          => $derived['mill_id'],
-            'rr_no'            => null,
-            'lines'            => $lines,
-            'sum_debit'        => $totals['credit_total'],
-            'sum_credit'       => $totals['credit_total'],
+            'cp_no'           => $blEntryNo,
+            'vend_id'         => (string) ($header->vendor_code ?? ''),
+            'purchase_date'   => $header->bl_date ? $this->toDate($header->bl_date) : null,
+            'explanation'     => (string) ($header->remarks ?? ''),
+            'amount_in_words' => $this->amountToWords((float) $totals['credit_total']),
+            'booking_no'      => $derived['booking_no'],
+            'crop_year'       => $derived['crop_year'],
+            'sugar_type'      => $derived['sugar_type'],
+            'mill_id'         => $derived['mill_id'],
+            'rr_no'           => $blEntryNo,
+            'lines'           => $lines,
+            'sum_debit'       => $totals['credit_total'],
+            'sum_credit'      => $totals['credit_total'],
         ]);
     }
 
@@ -825,9 +829,10 @@ public function createEntry(Request $req)
             $previewLines = $this->getBlAccountingPreview($companyId, $header->id);
             $totals = $this->getBlTotals($header->id);
             $derived = $this->getPbnDerivedFields($companyId, $header);
+            $blEntryNo = $this->formatBlEntryNo((int) $header->id);
 
             $cashPurchaseId = DB::table('cash_purchase')->insertGetId([
-                'cp_no'            => (string) $header->po_no,
+                'cp_no'            => $blEntryNo,
                 'vend_id'          => (string) ($header->vendor_code ?? ''),
                 'purchase_date'    => $header->bl_date ? $this->toDate($header->bl_date) : null,
                 'purchase_amount'  => $totals['credit_total'],
@@ -841,7 +846,7 @@ public function createEntry(Request $req)
                 'crop_year'        => $derived['crop_year'],
                 'sugar_type'       => $derived['sugar_type'],
                 'mill_id'          => $derived['mill_id'],
-                'rr_no'            => null,
+                'rr_no'            => $blEntryNo,
                 'workstation_id'   => $req->input('workstation_id') ?: $req->ip(),
                 'user_id'          => $req->input('user_id') ?? 0,
                 'company_id'       => $companyId,
@@ -874,7 +879,7 @@ public function createEntry(Request $req)
                     'processed_by'     => (string) ($req->input('user_id') ?? '0'),
                     'processed_at'     => now(),
                     'cash_purchase_id' => $cashPurchaseId,
-                    'cp_no'            => (string) $header->po_no,
+                    'cp_no'            => $blEntryNo,
                     'status'           => 'processed',
                     'updated_at'       => now(),
                 ]);
@@ -882,11 +887,10 @@ public function createEntry(Request $req)
             return response()->json([
                 'ok'               => true,
                 'cash_purchase_id' => $cashPurchaseId,
-                'cp_no'            => (string) $header->po_no,
+                'cp_no'            => $blEntryNo,
             ]);
         });
     }
-
 
     public function batchInsert(Request $req)
     {
@@ -909,40 +913,40 @@ public function createEntry(Request $req)
             $computed = $this->computeLineValues($row);
 
             $record = [
-                'bill_of_lading_id'   => $headerId,
-                'line_no'             => $lineNo,
-                'item_no'             => $itemNo,
-                'bl_no'               => $this->normalizeText($row['bl_no'] ?? ''),
-                'mt'                  => $computed['mt'],
-                'bags'                => $computed['bags'],
-                'cif_price'           => $computed['cif_price'],
-                'cif_usd'             => $computed['cif_usd'],
-                'fx_rate'             => $computed['fx_rate'],
-                'cif_php'             => $computed['cif_php'],
-                'sad_no'              => $this->normalizeText($row['sad_no'] ?? ''),
-                'ssdt_no'             => $this->normalizeText($row['ssdt_no'] ?? ''),
-                'fan_no'              => $this->normalizeText($row['fan_no'] ?? ''),
-                'registration_date'   => $this->toDate($row['registration_date'] ?? null),
-                'assessment_date'     => $this->toDate($row['assessment_date'] ?? null),
-                'pay_date'            => $this->toDate($row['pay_date'] ?? null),
-                'si_no'               => $this->normalizeText($row['si_no'] ?? ''),
-                'dutiable_value'      => $computed['dutiable_value'],
-                'duty'                => $computed['duty'],
-                'brokerage'           => $computed['brokerage'],
-                'wharfage'            => $computed['wharfage'],
-                'arrastre'            => $computed['arrastre'],
-                'other_charges'       => $computed['other_charges'],
-                'adjustment'          => $computed['adjustment'],
-                'landed_cost'         => $computed['landed_cost'],
-                'vat'                 => $computed['vat'],
-                'other_taxes'         => $computed['other_taxes'],
-                'boc_total'           => $computed['boc_total'],
-                'remarks'             => $this->normalizeText($row['remarks'] ?? ''),
+                'bill_of_lading_id'    => $headerId,
+                'line_no'              => $lineNo,
+                'item_no'              => $itemNo,
+                'bl_no'                => $this->normalizeText($row['bl_no'] ?? ''),
+                'mt'                   => $computed['mt'],
+                'bags'                 => $computed['bags'],
+                'cif_price'            => $computed['cif_price'],
+                'cif_usd'              => $computed['cif_usd'],
+                'fx_rate'              => $computed['fx_rate'],
+                'cif_php'              => $computed['cif_php'],
+                'sad_no'               => $this->normalizeText($row['sad_no'] ?? ''),
+                'ssdt_no'              => $this->normalizeText($row['ssdt_no'] ?? ''),
+                'fan_no'               => $this->normalizeText($row['fan_no'] ?? ''),
+                'registration_date'    => $this->toDate($row['registration_date'] ?? null),
+                'assessment_date'      => $this->toDate($row['assessment_date'] ?? null),
+                'pay_date'             => $this->toDate($row['pay_date'] ?? null),
+                'si_no'                => $this->normalizeText($row['si_no'] ?? ''),
+                'dutiable_value'       => $computed['dutiable_value'],
+                'duty'                 => $computed['duty'],
+                'brokerage'            => $computed['brokerage'],
+                'wharfage'             => $computed['wharfage'],
+                'arrastre'             => $computed['arrastre'],
+                'other_charges'        => $computed['other_charges'],
+                'adjustment'           => $computed['adjustment'],
+                'landed_cost'          => $computed['landed_cost'],
+                'vat'                  => $computed['vat'],
+                'other_taxes'          => $computed['other_taxes'],
+                'boc_total'            => $computed['boc_total'],
+                'remarks'              => $this->normalizeText($row['remarks'] ?? ''),
                 'purchase_order_line_id' => $purchaseOrderLineId > 0 ? $purchaseOrderLineId : null,
-                'consumed_qty_mt'     => $computed['mt'],
-                'consumed_bags'       => $computed['bags'],
-                'updated_by'          => (string) ($req->input('user_id') ?? $header->created_by ?? '0'),
-                'updated_at'          => now(),
+                'consumed_qty_mt'      => $computed['mt'],
+                'consumed_bags'        => $computed['bags'],
+                'updated_by'           => (string) ($req->input('user_id') ?? $header->created_by ?? '0'),
+                'updated_at'           => now(),
             ];
 
             $existing = DB::table('bill_of_lading_line')
@@ -963,41 +967,41 @@ public function createEntry(Request $req)
             }
 
             return response()->json([
-                'id'                    => $id,
-                'line_no'               => $lineNo,
-                'item_no'               => $itemNo,
-                'bl_no'                 => $record['bl_no'],
-                'mt'                    => $record['mt'],
-                'bags'                  => $record['bags'],
-                'cif_price'             => $record['cif_price'],
-                'cif_usd'               => $record['cif_usd'],
-                'fx_rate'               => $record['fx_rate'],
-                'cif_php'               => $record['cif_php'],
-                'sad_no'                => $record['sad_no'],
-                'ssdt_no'               => $record['ssdt_no'],
-                'fan_no'                => $record['fan_no'],
-                'registration_date'     => $record['registration_date'],
-                'assessment_date'       => $record['assessment_date'],
-                'pay_date'              => $record['pay_date'],
-                'si_no'                 => $record['si_no'],
-                'dutiable_value'        => $record['dutiable_value'],
-                'duty'                  => $record['duty'],
-                'brokerage'             => $record['brokerage'],
-                'wharfage'              => $record['wharfage'],
-                'arrastre'              => $record['arrastre'],
-                'other_charges'         => $record['other_charges'],
-                'adjustment'            => $record['adjustment'],
-                'landed_cost'           => $record['landed_cost'],
-                'vat'                   => $record['vat'],
-                'other_taxes'           => $record['other_taxes'],
-                'boc_total'             => $record['boc_total'],
-                'remarks'               => $record['remarks'],
-                'purchase_order_line_id'=> $record['purchase_order_line_id'],
-                'consumed_qty_mt'       => $record['consumed_qty_mt'],
-                'consumed_bags'         => $record['consumed_bags'],
+                'id'                     => $id,
+                'line_no'                => $lineNo,
+                'item_no'                => $itemNo,
+                'bl_no'                  => $record['bl_no'],
+                'mt'                     => $record['mt'],
+                'bags'                   => $record['bags'],
+                'cif_price'              => $record['cif_price'],
+                'cif_usd'                => $record['cif_usd'],
+                'fx_rate'                => $record['fx_rate'],
+                'cif_php'                => $record['cif_php'],
+                'sad_no'                 => $record['sad_no'],
+                'ssdt_no'                => $record['ssdt_no'],
+                'fan_no'                 => $record['fan_no'],
+                'registration_date'      => $record['registration_date'],
+                'assessment_date'        => $record['assessment_date'],
+                'pay_date'               => $record['pay_date'],
+                'si_no'                  => $record['si_no'],
+                'dutiable_value'         => $record['dutiable_value'],
+                'duty'                   => $record['duty'],
+                'brokerage'              => $record['brokerage'],
+                'wharfage'               => $record['wharfage'],
+                'arrastre'               => $record['arrastre'],
+                'other_charges'          => $record['other_charges'],
+                'adjustment'             => $record['adjustment'],
+                'landed_cost'            => $record['landed_cost'],
+                'vat'                    => $record['vat'],
+                'other_taxes'            => $record['other_taxes'],
+                'boc_total'              => $record['boc_total'],
+                'remarks'                => $record['remarks'],
+                'purchase_order_line_id' => $record['purchase_order_line_id'],
+                'consumed_qty_mt'        => $record['consumed_qty_mt'],
+                'consumed_bags'          => $record['consumed_bags'],
             ]);
         } catch (\Throwable $e) {
-            Log::error('Bill of Lading batchInsert failed', [
+            Log::error('BillOfLading batchInsert failed', [
                 'error'   => $e->getMessage(),
                 'trace'   => $e->getTraceAsString(),
                 'payload' => $req->all(),

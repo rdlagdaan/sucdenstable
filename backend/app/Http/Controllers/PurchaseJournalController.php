@@ -213,19 +213,43 @@ private function requireEditable(int $transactionId, int $companyId): void
 private function requireApprovedEdit(int $transactionId, int $companyId): void
 {
     $row = DB::table('approvals')
-        ->where('module', 'purchase_journal')              // ✅ MUST match frontend MODULE
+        ->where('module', 'purchase_journal')
         ->where('record_id', $transactionId)
         ->where('company_id', $companyId)
-        ->whereRaw('LOWER(action) = ?', ['edit'])          // ✅ case-insensitive like ApprovalController
+        ->whereRaw('LOWER(action) = ?', ['edit'])
         ->whereRaw('LOWER(status) = ?', ['approved'])
         ->whereNull('consumed_at')
-        ->whereNotNull('expires_at')
-        ->where('expires_at', '>', now())
         ->orderByDesc('id')
         ->first();
 
+    // fallback for legacy rows without company_id
     if (!$row) {
-        abort(403, 'No active edit approval window. Please request edit again.');
+        $row = DB::table('approvals')
+            ->where('module', 'purchase_journal')
+            ->where('record_id', $transactionId)
+            ->whereRaw('LOWER(action) = ?', ['edit'])
+            ->whereRaw('LOWER(status) = ?', ['approved'])
+            ->whereNull('consumed_at')
+            ->orderByDesc('id')
+            ->first();
+    }
+
+    if (!$row) {
+        abort(403, 'No active edit approval. Please request edit again.');
+    }
+
+    // if expires_at is null, approval stays active until released/consumed
+    if (!empty($row->expires_at) && now()->gte(\Carbon\Carbon::parse($row->expires_at))) {
+        abort(403, 'Edit approval has expired. Please request edit again.');
+    }
+
+    if (empty($row->first_edit_at)) {
+        DB::table('approvals')
+            ->where('id', $row->id)
+            ->update([
+                'first_edit_at' => now(),
+                'updated_at'    => now(),
+            ]);
     }
 }
 
@@ -614,41 +638,7 @@ public function mills(Request $req)
 // 2c) Update main header (NO approval) — for Save Main button
 public function updateMainNoApproval(Request $req)
 {
-    $data = $req->validate([
-        'id'            => ['required','integer','exists:cash_purchase,id'],
-        'company_id'    => ['required','integer'],
-        'purchase_date' => ['required','date'],
-        'explanation'   => ['nullable','string','max:1000'],
-
-        // optional: allow these if you want Save Main to update them too
-        'vend_id'       => ['nullable','string','max:50'],
-        'sugar_type'    => ['nullable','string','max:10'],
-        'crop_year'     => ['nullable','string','max:10'],
-        'mill_id'       => ['nullable','string','max:25'],
-        'booking_no'    => ['nullable','string','max:25'],
-    ]);
-
-    $tx = CashPurchase::findOrFail($data['id']);
-
-    // still block cancelled/deleted
-    $this->requireNotCancelledOrDeleted((int)$tx->id, (int)$data['company_id']);
-
-    // IMPORTANT: no requireApprovedEdit() here
-
-    $tx->update([
-        // If you want only Date + Explanation to be editable without approval,
-        // just keep these two lines and remove the others.
-        'purchase_date' => $data['purchase_date'],
-        'explanation'   => $data['explanation'],
-
-        'vend_id'    => $data['vend_id']    ?? $tx->vend_id,
-        'sugar_type' => $data['sugar_type'] ?? $tx->sugar_type,
-        'crop_year'  => $data['crop_year']  ?? $tx->crop_year,
-        'mill_id'    => $data['mill_id']    ?? $tx->mill_id,
-        'booking_no' => $data['booking_no'] ?? $tx->booking_no,
-    ]);
-
-    return response()->json(['ok' => true]);
+    abort(403, 'Direct header editing without approval is disabled for Purchase Journal.');
 }
 
 

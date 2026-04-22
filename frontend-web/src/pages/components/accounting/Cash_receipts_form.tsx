@@ -129,7 +129,7 @@ export default function CashReceiptsForm() {
   const [payMethodId, setPayMethodId] = useState('');
   const [details, setDetails] = useState('');
   const [collectionReceipt, setCollectionReceipt] = useState('');
-  const [_locked, setLocked] = useState(false);       // header lock
+  const [locked, setLocked] = useState(false);       // header lock
   const [gridLocked, setGridLocked] = useState(true); // grid lock (separate)
 const [isExported, setIsExported] = useState(false);
 
@@ -146,11 +146,11 @@ const [isDeleted, setIsDeleted] = useState(false);     // true if is_cancel === 
     'none' | 'pending' | 'approved' | 'rejected' | 'expired'
   >('none');
   const [approvedActive, setApprovedActive] = useState<boolean>(false);
-  const [_cd_noapprovalId, setApprovalId] = useState<number | null>(null);
+  const [_approvalId, setApprovalId] = useState<number | null>(null);
 
-const [editMinsLeft, setEditMinsLeft] = useState<number | null>(null);
+const [_editMinsLeft, setEditMinsLeft] = useState<number | null>(null);
 const [approvalReason, setApprovalReason] = useState<string>('');
-const [_keyapprovalExpiresAt, setApprovalExpiresAt] = useState<string | null>(null);
+const [_approvalExpiresAt, setApprovalExpiresAt] = useState<string | null>(null);
 
   const isSaved = useMemo(() => mainId != null, [mainId]);
 
@@ -182,6 +182,20 @@ const canEditNow =
   !isDeleted &&
   (!isExported || approvedActive);
 
+const canEditHeaderNow =
+  !isCancelled &&
+  !isDeleted &&
+  (
+    !isSaved ||               // ✅ brand-new / unsaved form stays editable
+    !isExported ||            // ✅ saved but not exported stays editable
+    approvedActive            // ✅ exported becomes editable again when edit approval is active
+  );
+
+const canSaveMainNow =
+  isSaved &&
+  !isCancelled &&
+  !isDeleted &&
+  (!isExported || approvedActive);
 
   const txDropdownItems = useMemo<DropdownItem[]>(() =>
     (txOptions || []).map(o => ({
@@ -228,64 +242,20 @@ const canEditNow =
   }, []);
   const companyId = user?.company_id;
 
-  const fetchApprovalStatus = useCallback(async (rid: number) => {
-    if (!rid) return;
+const fetchApprovalStatus = useCallback(async (rid: number) => {
+  if (!rid) return;
 
-    try {
-      const { data } = await napi.get('/approvals/status', {
-        params: {
-          module: 'cash_receipts',      // must match ApprovalController module mapping
-          record_id: rid,
-          company_id: companyId || '',
-          action: 'edit',
-        },
-      });
+  try {
+    const { data } = await napi.get('/approvals/status', {
+      params: {
+        module: 'cash_receipts',
+        record_id: rid,
+        company_id: companyId || '',
+        action: 'edit',
+      },
+    });
 
-      if (!data?.exists) {
-        setApprovalStatus('none');
-        setApprovedActive(false);
-        setApprovalId(null);
-        setEditMinsLeft(null);
-        setApprovalReason('');
-        setApprovalExpiresAt(null);
-
-        return;
-      }
-
-const rawStatus = String(data.status || 'none').toLowerCase();
-const isActive = !!data.approved_active;
-
-const minsLeft = minutesLeftFromExpiresAt(data.expires_at);
-setEditMinsLeft(minsLeft);
-
-setApprovalReason(String(data.reason || ''));
-setApprovalExpiresAt(data.expires_at ? String(data.expires_at) : null);
-
-// If backend says "approved" but window already ended, treat as expired in UI
-const uiStatus =
-  rawStatus === 'approved' && !isActive && minsLeft === 0 ? 'expired' : rawStatus;
-
-setApprovalStatus(uiStatus as any);
-setApprovedActive(isActive);
-setApprovalId(Number(data.id || 0) || null);
-
-// ✅ If approved window becomes active, immediately switch UI to edit mode
-if (isActive) {
-  setLocked(false);
-  setGridLocked(false);
-  hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
-} else {
-  // ✅ If not active, force view mode (prevents “history hides Request to Edit”)
-  //setLocked(true);
-  //setGridLocked(true);
-  //hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
-}
-
-
-
-
-    } catch {
-      // safest fallback: no approval info
+    if (!data?.exists) {
       setApprovalStatus('none');
       setApprovedActive(false);
       setApprovalId(null);
@@ -293,20 +263,79 @@ if (isActive) {
       setApprovalReason('');
       setApprovalExpiresAt(null);
 
+      if (isExported) {
+        setLocked(true);
+        setGridLocked(true);
+        hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+      }
 
+      return;
     }
-  }, [companyId]);
+
+    const rawStatus = String(data.status || 'none').toLowerCase();
+    const isActive = !!data.approved_active;
+
+    setEditMinsLeft(data.expires_at ? minutesLeftFromExpiresAt(data.expires_at) : null);
+    setApprovalReason(String(data.reason || ''));
+    setApprovalExpiresAt(data.expires_at ? String(data.expires_at) : null);
+
+    const uiStatus =
+      rawStatus === 'approved' && !isActive && data.expires_at ? 'expired' : rawStatus;
+
+    setApprovalStatus(uiStatus as any);
+    setApprovedActive(isActive);
+    setApprovalId(Number(data.id || 0) || null);
+
+    // ✅ exported receipt unlocks only when approval is active
+    if (isExported) {
+      if (isActive && !isCancelled && !isDeleted) {
+        setLocked(false);
+        setGridLocked(false);
+        hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
+      } else {
+        setLocked(true);
+        setGridLocked(true);
+        hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+      }
+      return;
+    }
+
+    // non-exported behavior stays editable unless cancelled/deleted
+    if (!isCancelled && !isDeleted) {
+      setLocked(false);
+      setGridLocked(false);
+      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
+    } else {
+      setLocked(true);
+      setGridLocked(true);
+      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+    }
+  } catch {
+    setApprovalStatus('none');
+    setApprovedActive(false);
+    setApprovalId(null);
+    setEditMinsLeft(null);
+    setApprovalReason('');
+    setApprovalExpiresAt(null);
+
+    if (isExported) {
+      setLocked(true);
+      setGridLocked(true);
+      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+    }
+  }
+}, [companyId, isExported, isCancelled, isDeleted]);
 
 
 useEffect(() => {
   if (!mainId) return;
 
-  // Only poll while waiting for approval
+  // Poll while waiting for approval
   if (approvalStatus !== 'pending' || approvedActive) return;
 
   const t = window.setInterval(() => {
     fetchApprovalStatus(mainId);
-  }, 3000);
+  }, 10000);
 
   return () => window.clearInterval(t);
 }, [mainId, approvalStatus, approvedActive, fetchApprovalStatus]);
@@ -420,122 +449,87 @@ const ensureAccountInSource = useCallback((code: string, desc?: string) => {
 
 
   /* --------- load one receipt --------- */
-  const loadReceipt = useCallback(async (rid: string | number) => {
-    try {
-      const { data } = await napi.get(`/cash-receipt/${rid}`, {
-        params: { company_id: companyId },
-      });
-      const m = data.main ?? data;
+const loadReceipt = useCallback(async (rid: string | number) => {
+  try {
+    const { data } = await napi.get(`/cash-receipt/${rid}`, {
+      params: { company_id: companyId },
+    });
+    const m = data.main ?? data;
 
- const exported = !!m.exported_at;
-setIsExported(exported);     
-      setMainId(m.id);
-      setCrNo(m.cr_no || '');
-      setCustId(String(m.cust_id || ''));
-      const sel = customers.find(c => String(c.code) === String(m.cust_id));
-      setCustName(sel?.description || '');
+    const exported = !!m.exported_at;
+    setIsExported(exported);
 
-      setReceiptDate((m.receipt_date || '').slice(0, 10));
-      //setReceiptAmount(Number(m.receipt_amount || 0));
-      setBankId(String(m.bank_id || ''));
-      setPayMethodId(String(m.pay_method || ''));
-      setCollectionReceipt(m.collection_receipt || '');
-      setDetails(m.details || '');
-      const flag = String(m.is_cancel || m.is_cancelled || 'n').toLowerCase();
-setIsCancelled(flag === 'c');
-setIsDeleted(flag === 'd');
-if (flag === 'd') {
-  setLocked(true);
-  setGridLocked(true);
-}
+    setMainId(m.id);
+    setCrNo(m.cr_no || '');
+    setCustId(String(m.cust_id || ''));
+    const sel = customers.find(c => String(c.code) === String(m.cust_id));
+    setCustName(sel?.description || '');
 
-      // totals: prefer backend-computed header fields; fallback to details calc
-      /*const hdrD = Number((m.sum_debit ?? 0));
-      const hdrC = Number((m.sum_credit ?? 0));
-      const hdrB = !!(m.is_balanced);
+    setReceiptDate((m.receipt_date || '').slice(0, 10));
+    setBankId(String(m.bank_id || ''));
+    setPayMethodId(String(m.pay_method || ''));
+    setCollectionReceipt(m.collection_receipt || '');
+    setDetails(m.details || '');
 
-      setSumDebit(hdrD);
-      setSumCredit(hdrC);
-      setIsBalanced(hdrB);*/
+    const flag = String(m.is_cancel || m.is_cancelled || 'n').toLowerCase();
+    setIsCancelled(flag === 'c');
+    setIsDeleted(flag === 'd');
 
-      // approvals
-      if (m.id) fetchApprovalStatus(Number(m.id));
+    const details = (data.details || []).map((d: any) => {
+      const code = String(d.acct_code ?? '');
+      const desc = findDesc(code) || String(d.acct_desc ?? '');
+      ensureAccountInSource(code, desc);
 
-
-
-
-      /*const details = (data.details || []).map((d: any) => ({
+      return {
         id: d.id,
-        acct_code: `${d.acct_code};${d.acct_desc || findDesc(d.acct_code)}`,
-        acct_desc: d.acct_desc,
-        debit: Number(d.debit || 0),
-        credit: Number(d.credit || 0),
+        acct_code: desc ? `${code};${desc}` : `${code};`,
+        acct_desc: desc,
+        debit: Number(d.debit ?? 0),
+        credit: Number(d.credit ?? 0),
         workstation_id: d.workstation_id || '',
         persisted: true,
-      })) as DetailRow[];*/
+      } as DetailRow;
+    });
 
-const details = (data.details || []).map((d: any) => {
-  const code = String(d.acct_code ?? '');
-  // Always prefer the description from the accounts list so it matches acctSource exactly.
-  const desc = findDesc(code) || String(d.acct_desc ?? '');
+    const { sumD, sumC, balanced } = calcTotalsFromDetails(details);
+    setSumDebit(sumD);
+    setSumCredit(sumC);
+    setIsBalanced(balanced);
 
-  // Make sure this code is present in the autocomplete source (strict mode needs this).
-  ensureAccountInSource(code, desc);
+    const bank = details.find((r: DetailRow) => String(r.workstation_id || '').toUpperCase() === 'BANK');
+    const bankAmount =
+      bank
+        ? (Number(bank.debit || 0) > 0 ? Number(bank.debit || 0) : Number(bank.credit || 0))
+        : sumC;
 
-  return {
-    id: d.id,
-    // Value must be identical to one of the source items: `${acct_code};${acct_desc}`
-    acct_code: desc ? `${code};${desc}` : `${code};`,
-    acct_desc: desc,
-    debit: Number(d.debit ?? 0),
-    credit: Number(d.credit ?? 0),
-    workstation_id: d.workstation_id || '',
-    persisted: true,
-  } as DetailRow;
-});
+    setReceiptAmount(bankAmount);
+    setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
 
-
-// ✅ Single source of truth: compute totals from DETAILS we actually display
-const { sumD, sumC, balanced } = calcTotalsFromDetails(details);
-setSumDebit(sumD);
-setSumCredit(sumC);
-setIsBalanced(balanced);
-
-// ✅ Amount + Amount in Words must match BANK line amount (workstation_id === 'BANK')
-const bank = details.find((r: DetailRow) => String(r.workstation_id || '').toUpperCase() === 'BANK');
-const bankAmount =
-  bank
-    ? (Number(bank.debit || 0) > 0 ? Number(bank.debit || 0) : Number(bank.credit || 0))
-    : sumC; // fallback
-
-setReceiptAmount(bankAmount);
-
-
-
-
-
-      setTableData(details.length ? details.concat([emptyRow()]) : [emptyRow()]);
-      
-// 🔒 Same rule as Cash Disbursement:
-// - before export: editable
-// - after export: locked unless approval is active
-if (exported && !approvedActive) {
-setGridLocked(true);
-hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
-} else if (!isCancelled && !isDeleted) {
-// editable only if not cancelled/deleted
-setGridLocked(false);
-hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
-}      
-      
-      
+    // default lock behavior before approval refresh
+    if (flag === 'c' || flag === 'd') {
       setLocked(true);
-      //setGridLocked(!!((m.is_cancel || m.is_cancelled) === 'y'));
-      toast.success('Receipt loaded.');
-    } catch {
-      toast.error('Unable to load the selected receipt.');
+      setGridLocked(true);
+      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+    } else if (exported) {
+      setLocked(true);
+      setGridLocked(true);
+      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: true });
+    } else {
+      // ✅ before export: header + details remain editable
+      setLocked(false);
+      setGridLocked(false);
+      hotRef.current?.hotInstance?.updateSettings?.({ readOnly: false });
     }
-  }, [companyId, customers, findDesc, ensureAccountInSource]);
+
+    if (m.id) {
+      await fetchApprovalStatus(Number(m.id));
+    }
+
+    toast.success('Receipt loaded.');
+  } catch {
+    toast.error('Unable to load the selected receipt.');
+  }
+}, [companyId, customers, findDesc, ensureAccountInSource, fetchApprovalStatus]);
 
 const handleSelectTransaction = async (selId: string) => {
   if (!selId) return;
@@ -576,7 +570,7 @@ const handleSelectTransaction = async (selId: string) => {
 
         setMainId(newId);
         setCrNo(res.data.cr_no || '');
-        setLocked(true);
+        setLocked(false);
         setGridLocked(false);
 
         // ✅ immediately load from server so the BANK row appears
@@ -656,10 +650,9 @@ const handleSaveEdits = async () => {
   if (isCancelled || isDeleted) return toast.error('Cannot save edits on cancelled/deleted receipt.');
 
   try {
-    // Require approval still active
     const st = await getApprovalStatus('edit');
     if (!st?.approved_active) {
-      toast.error('No active edit approval window. Click Update to request/refresh approval.');
+      toast.error('No active edit approval. Request edit approval first.');
       setLocked(true);
       setGridLocked(true);
       return;
@@ -677,57 +670,27 @@ const handleSaveEdits = async () => {
       company_id: companyId,
     });
 
-    // consume the approval window (same rule as GA/Sales)
     await releaseEditApproval();
 
     await loadReceipt(mainId);
 
     setLocked(true);
     setGridLocked(true);
+    setApprovedActive(false);
+    setApprovalStatus('none');
+    setEditMinsLeft(null);
+    setApprovalExpiresAt(null);
 
-    toast.success('Edits saved and approval released.');
+    toast.success('Cash Receipt changes saved.');
   } catch (e: any) {
     toast.error(e?.response?.data?.message || 'Failed to save edits.');
   }
 };
 
 
-const handleSaveMainNoApproval = async () => {
-  if (!mainId) return;
-  if (isCancelled || isDeleted) return toast.error('Cannot save main on cancelled/deleted receipt.');
-
-  if (!custId || !receiptDate || !bankId || !payMethodId || !collectionReceipt) {
-    return toast.error('Please complete Customer, Date, Bank, Payment Method, and Collection Receipt.');
-  }
-
-  const ok = await Swal.fire({
-    title: 'Save main details?',
-    icon: 'question',
-    showCancelButton: true,
-    confirmButtonText: 'Save Main',
-  });
-  if (!ok.isConfirmed) return;
-
-  try {
-    await napi.post('/cash-receipt/update-main-no-approval', {
-      id: mainId,
-      cust_id: custId,
-      receipt_date: receiptDate,
-      pay_method: payMethodId,
-      bank_id: bankId,
-      collection_receipt: collectionReceipt,
-      details,
-      amount_in_words: pesoWords(receiptAmount).replace(/^\*\*\*\s|\s\*\*\*$/g, ''),
-      company_id: companyId,
-    });
-
-    await loadReceipt(mainId);
-    toast.success('Main details saved.');
-    fetchTransactions();
-  } catch (e: any) {
-    toast.error(e?.response?.data?.message || 'Failed to save main.');
-  }
-};
+//const handleSaveMainNoApproval = async () => {
+//  toast.error('Direct header editing without approval is disabled for Cash Receipts.');
+//};
 
 
 const minutesLeftFromExpiresAt = (expiresAt?: string) => {
@@ -735,8 +698,7 @@ const minutesLeftFromExpiresAt = (expiresAt?: string) => {
   const exp = new Date(expiresAt).getTime();
   const now = Date.now();
   if (!Number.isFinite(exp)) return null;
-  const mins = Math.max(0, Math.ceil((exp - now) / 60000));
-  return mins;
+  return Math.max(0, Math.ceil((exp - now) / 60000));
 };
 
 
@@ -1004,25 +966,45 @@ const handleOpenPdf = () => {
   setPdfUrl(url);
   setShowPdf(true);
 
+  setIsExported(true);
+  setLocked(true);
+  setGridLocked(true);
+
   setTimeout(() => { if (mainId) loadReceipt(mainId); }, 800);
 };
 
 //setTimeout(() => { if (mainId) loadReceipt(mainId); }, 800);
-  const handleDownloadExcel = async () => {
-    if (!mainId) return toast.info('Save or select a receipt first.');
-    const res = await napi.get(`/cash-receipt/form-excel/${mainId}`, {
-      responseType: 'blob',
-      params: { company_id: companyId||'' },
-    });
-    const name = res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1] || `ReceiptVoucher_${crNo||mainId}.xlsx`;
-    const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  setTimeout(() => { if (mainId) loadReceipt(mainId); }, 800);
+const handleDownloadExcel = async () => {
+  if (!mainId) return toast.info('Save or select a receipt first.');
 
-  
-  };
+  const res = await napi.get(`/cash-receipt/form-excel/${mainId}`, {
+    responseType: 'blob',
+    params: { company_id: companyId || '' },
+  });
+
+  const name =
+    res.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1] ||
+    `ReceiptVoucher_${crNo || mainId}.xlsx`;
+
+  const blob = new Blob([res.data], {
+    type: res.headers['content-type'] || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  });
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+
+  setIsExported(true);
+  setLocked(true);
+  setGridLocked(true);
+
+  setTimeout(() => { if (mainId) loadReceipt(mainId); }, 800);
+};
 
 // add this helper ABOVE your return (anywhere in the component scope)
 const bankRowCells: Handsontable.GridSettings['cells'] = (row, _col) => {
@@ -1053,11 +1035,19 @@ if (!canEditNow) {
 
 
 const isEditPending = approvalStatus === 'pending';
-const canRequestEdit = isSaved && !isCancelled && !isDeleted && _locked && !approvedActive && !isEditPending;
-const canSaveEdits = isSaved && !isCancelled && !isDeleted && !_locked; // your existing meaning
+const canRequestEdit =
+  isSaved &&
+  !isCancelled &&
+  !isDeleted &&
+  isExported &&
+  locked &&
+  !approvedActive &&
+  !isEditPending;
 
-const canSaveMainNoApproval =
-  isSaved && !isCancelled && !isDeleted;
+const canSaveEdits =
+  false;
+
+//const canSaveMainNoApproval = false;
 
 
 
@@ -1070,7 +1060,21 @@ const canSaveMainNoApproval =
 
      {/* HEADER */}
 <div className="bg-blue-50 shadow-md rounded-lg p-6 space-y-4 border border-blue-200">
-  <h2 className="text-xl font-bold text-blue-800 mb-2">CASH RECEIPTS</h2>
+  <div className="flex items-center gap-3 mb-2">
+  <h2 className="text-xl font-bold text-blue-800">CASH RECEIPTS</h2>
+
+  {mainId && !isCancelled && !isDeleted && approvalStatus === 'pending' && (
+    <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+      EDIT REQUEST PENDING
+    </span>
+  )}
+
+  {mainId && !isCancelled && !isDeleted && approvedActive && (
+    <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+      EDIT APPROVED
+    </span>
+  )}
+</div>
 
   {/* Grid container with explicit columns; row spans control the vertical layout */}
   <div className="grid grid-cols-3 auto-rows-auto gap-4">
@@ -1094,7 +1098,7 @@ const canSaveMainNoApproval =
     </div>
 
     {/* ROW 2 — Customer (row-span:2) */}
-    <div className="col-span-2 row-span-2">
+    <div className={`col-span-2 row-span-2 ${!canEditHeaderNow ? 'pointer-events-none opacity-90' : ''}`}>
       <DropdownWithHeaders
         label="Customer"
         value={custId}
@@ -1121,7 +1125,7 @@ const canSaveMainNoApproval =
       <input
         type="date"
         value={receiptDate}
-        disabled={isCancelled || isDeleted}
+        disabled={!canEditHeaderNow}
         onChange={(e) => setReceiptDate(e.target.value)}
         className="w-full border p-2 bg-blue-100 text-blue-900"
       />
@@ -1129,6 +1133,7 @@ const canSaveMainNoApproval =
 
     {/* ROW 3 — Bank Name (row-span:2) */}
     <div className="col-span-2 row-span-2">
+      <div className={!canEditHeaderNow ? 'pointer-events-none opacity-90' : ''}></div>
       <DropdownWithHeaders
         label="Bank Name"
         value={bankId}
@@ -1145,7 +1150,7 @@ const canSaveMainNoApproval =
       />
     </div>
 
-    <div className="col-span-1">
+    <div className={`col-span-1 ${!canEditHeaderNow ? 'pointer-events-none opacity-90' : ''}`}>
       <DropdownWithHeaders
         label="Payment Method"
         value={payMethodId}
@@ -1172,18 +1177,17 @@ const canSaveMainNoApproval =
       <label className="block mb-1">Details</label>
       <input
         value={details}
-        disabled={isCancelled || isDeleted}
+        disabled={!canEditHeaderNow}
         onChange={(e) => setDetails(e.target.value)}
         className="w-full border p-2 bg-blue-100 text-blue-900"
-      />
+    />
     </div>
 
-    {/* ROW 3 — Collection Receipt # (row-span:1) */}
     <div className="col-span-1">
       <label className="block mb-1">Collection Receipt #</label>
       <input
         value={collectionReceipt}
-        disabled={isCancelled || isDeleted}
+        disabled={!canEditHeaderNow}
         onChange={(e) => setCollectionReceipt(e.target.value)}
         className="w-full border p-2 bg-blue-100 text-blue-900"
       />
@@ -1247,14 +1251,14 @@ const canSaveMainNoApproval =
 )}
 
 {isExported && !approvedActive && !isCancelled && !isDeleted && (
+  <div className="text-sm mt-2 text-red-700 font-semibold">
+    This receipt has been printed/downloaded and is locked. Request edit approval to modify details.
+  </div>
+)}
 
-<div className="text-sm mt-2 text-red-700 font-semibold"> This receipt has been printed/downloaded and is locked. Request edit approval to modify details. </div> )}
-
-            {/* optional tiny approval status text */}
-{approvalStatus !== 'none' && (
-  <span className="text-xs font-semibold text-gray-600">
-    Approval: {approvalStatus}
-    {approvedActive ? ` (active${editMinsLeft != null ? ` — ${editMinsLeft} min left` : ''})` : ''}
+{approvedActive && !isCancelled && !isDeleted && (
+  <span className="text-xs font-semibold text-emerald-700">
+    Edit approved — you may now update this receipt.
   </span>
 )}
 
@@ -1309,7 +1313,15 @@ const canSaveMainNoApproval =
 ) : null}
 
 
-
+{canSaveMainNow ? (
+  <button
+    onClick={handleSaveEdits}
+    className="inline-flex items-center gap-2 px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+  >
+    <CheckCircleIcon className="h-5 w-5" />
+    Save Main
+  </button>
+) : null}
 
               {!isCancelled ? (
                 <button onClick={handleCancelTxn} className="inline-flex items-center gap-2 px-4 py-2 rounded bg-amber-500 text-white hover:bg-amber-600">
@@ -1327,24 +1339,15 @@ const canSaveMainNoApproval =
                 Delete
               </button>
 
-{canSaveMainNoApproval ? (
-  <button
-    onClick={handleSaveMainNoApproval}
-    className="inline-flex items-center gap-2 px-4 py-2 rounded bg-gray-600 text-white hover:bg-gray-700"
-    title="Save header changes without requesting edit approval"
-  >
-    <CheckCircleIcon className="h-5 w-5" />
-    Save Main
-  </button>
-) : null}
+            {null}
 
 
             </>
           )}
         </div>
-        {approvalStatus === 'pending' && approvalReason && (
+        {approvalStatus === 'pending' && (
           <div className="mt-2 text-sm text-amber-700 font-semibold">
-            Edit approval is pending — Reason: {approvalReason}
+            Edit approval is pending{approvalReason ? ` — Reason: ${approvalReason}` : ''}
           </div>
         )}
 
@@ -1541,7 +1544,15 @@ const canSaveMainNoApproval =
           onMouseLeave={() => setPrintOpen(false)}
         >
 
-          <button type="button" className="inline-flex items-center gap-2 rounded border px-3 py-2 bg-white text-gray-700 hover:bg-gray-50">
+          <button
+            type="button"
+            disabled={!canExport}
+            className={`inline-flex items-center gap-2 rounded border px-3 py-2 ${
+              canExport
+                ? 'bg-white text-gray-700 hover:bg-gray-50'
+                : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+            }`}
+          >
             <PrinterIcon className="h-5 w-5" /><span>Print</span><ChevronDownIcon className="h-4 w-4 opacity-70" />
           </button>
           {canExport && printOpen && (

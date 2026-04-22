@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import Swal from 'sweetalert2';
 import napi from '../../../../utils/axiosnapi';
 import { toast } from 'react-toastify';
 
@@ -69,10 +70,20 @@ export default function ApprovalCenter() {
 
   const approve = async (id: number) => {
     try {
-      await napi.post(`/approvals/${id}/approve`, { expires_minutes: 120 });
+      const { isConfirmed } = await Swal.fire({
+        title: `Approve request #${id}?`,
+        text: 'This will approve the edit request for the requester with no end-of-day time limit.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Approve',
+      });
+
+      if (!isConfirmed) return;
+
+      await napi.post(`/approvals/${id}/approve`, {});
       toast.success('Approved');
-      await load(true); // refresh quietly to reflect any server-side changes
-      setRows(prev => prev.filter(r => r.id !== id)); // optimistic removal
+      await load(true);
+      setRows(prev => prev.filter(r => r.id !== id));
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Approve failed');
     }

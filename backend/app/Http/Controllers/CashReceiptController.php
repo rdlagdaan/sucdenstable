@@ -349,76 +349,7 @@ public function updateMain(Request $req)
 // 🔓 Save Main (NO approval) — header-only update
 public function updateMainNoApproval(Request $req)
 {
-    $data = $req->validate([
-        'id'                => ['required','integer','exists:cash_receipts,id'],
-        'cust_id'           => ['required','string','max:50'],
-        'receipt_date'      => ['required','date'],
-        'pay_method'        => ['required','string','max:15'],
-        'bank_id'           => ['required','string','max:15'],
-        'collection_receipt'=> ['required','string','max:25'],
-        'details'           => ['nullable','string','max:1000'],
-        'amount_in_words'   => ['nullable','string','max:255'],
-        'company_id'        => ['required','integer'],
-    ]);
-
-    $id = (int)$data['id'];
-
-    // ✅ SAFETY: do not allow changes when cancelled/deleted
-    $this->requireNotCancelledOrDeleted($id);
-
-    $main = CashReceipts::findOrFail($id);
-
-    // ✅ HEADER-ONLY UPDATE (no totals touch, no detail touch)
-    $main->update([
-        'cust_id'            => $data['cust_id'],
-        'receipt_date'       => $data['receipt_date'],
-        'pay_method'         => $data['pay_method'],
-        'bank_id'            => $data['bank_id'],
-        'collection_receipt' => $data['collection_receipt'],
-        'details'            => $data['details'] ?? '',
-        'amount_in_words'    => $data['amount_in_words'] ?? '',
-    ]);
-
-    // ✅ If bank changed, keep BANK row acct_code in sync (same as updateMain)
-$bankAcct = AccountCode::where('bank_id', $data['bank_id'])
-    ->where('company_id', (int) $data['company_id'])
-    ->where('active_flag', 1)
-    ->first(['acct_code']);
-
-
-    if ($bankAcct) {
-        $bankRow = CashReceiptDetails::where('transaction_id', $id)
-            ->where('workstation_id', 'BANK')
-            ->first();
-
-        if ($bankRow) {
-            $bankRow->update([
-                'acct_code' => $bankAcct->acct_code,
-                'credit'    => 0,
-            ]);
-        } else {
-            CashReceiptDetails::create([
-                'transaction_id' => $id,
-                'acct_code'      => $bankAcct->acct_code,
-                'debit'          => 0,
-                'credit'         => 0,
-                'workstation_id' => 'BANK',
-                'company_id'     => $data['company_id'],
-            ]);
-        }
-
-        // Keep BANK debit correct after bank change (safe even if details unchanged)
-        $this->adjustBankDebit($id);
-        $totals = $this->recalcTotals($id);
-    } else {
-        $totals = $this->recalcTotals($id);
-    }
-
-    return response()->json([
-        'ok'     => true,
-        'id'     => $id,
-        'totals' => $totals,
-    ]);
+    abort(403, 'Direct header editing without approval is disabled for Cash Receipts.');
 }
 
 
@@ -1356,13 +1287,27 @@ private function requireApprovedEdit(Request $req, int $transactionId): void
         ->where('action', 'edit')
         ->where('status', 'approved')
         ->whereNull('consumed_at')
-        ->whereNotNull('expires_at')
-        ->where('expires_at', '>', now())
         ->orderByDesc('id')
         ->first();
 
     if (!$row) {
         abort(403, 'Edit requires an active approval.');
+    }
+
+    // ✅ No end-of-day limit:
+    // if expires_at is null, approval stays active until released/consumed
+    if (!empty($row->expires_at) && now()->gte(\Carbon\Carbon::parse($row->expires_at))) {
+        abort(403, 'Edit approval has expired. Please request a new approval.');
+    }
+
+    // ✅ Track first actual use
+    if (empty($row->first_edit_at)) {
+        DB::table('approvals')
+            ->where('id', $row->id)
+            ->update([
+                'first_edit_at' => now(),
+                'updated_at'    => now(),
+            ]);
     }
 }
 

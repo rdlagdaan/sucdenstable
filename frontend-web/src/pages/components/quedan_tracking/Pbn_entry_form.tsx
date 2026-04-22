@@ -19,9 +19,8 @@ import {
   DocumentTextIcon,
   PlusIcon,
   CheckCircleIcon,
-  //XMarkIcon,             // 👈 close icon for modal
-  ArrowDownTrayIcon,       // ✅ NEW (Download button icon)
-  DocumentArrowDownIcon,   // ✅ NEW (Excel menu item icon)
+  ArrowDownTrayIcon,
+  DocumentArrowDownIcon,
 } from '@heroicons/react/24/outline';
 
 Handsontable.cellTypes.registerCellType('numeric', NumericCellType);
@@ -36,6 +35,14 @@ interface PbnDropdownItem {
   crop_year: string;
   pbn_date: string;
   posted_flag: number;
+}
+
+interface TermAdminRow {
+  id: number;
+  term_code: string;
+  term_name: string;
+  active_flag: number;
+  sort_order: number;
 }
 
 interface PbnDetailRow {
@@ -94,6 +101,20 @@ const [note, setNote] = useState('');
 const [selectedTerms, setSelectedTerms] = useState('');
 const [termsSearch, setTermsSearch] = useState('');
 const [termsOptions, setTermsOptions] = useState<{ code: string; description: string }[]>([]);
+
+// VAT flags (mutually exclusive)
+const [vatType, setVatType] = useState<'vatable' | 'zero_rated' | 'vat_exempt'>('vat_exempt');
+
+// Terms modal/admin state
+const [showTermsModal, setShowTermsModal] = useState(false);
+const [adminTerms, setAdminTerms] = useState<TermAdminRow[]>([]);
+const [termFormId, setTermFormId] = useState<number | null>(null);
+const [termCodeInput, setTermCodeInput] = useState('');
+const [termNameInput, setTermNameInput] = useState('');
+const [termActiveInput, setTermActiveInput] = useState(true);
+const [termSortOrderInput, setTermSortOrderInput] = useState<number>(0);
+const [termsAdminLoading, setTermsAdminLoading] = useState(false);
+const [termsSaving, setTermsSaving] = useState(false);
 
   //Establishing data state for the Handsontable
   const [handsontableEnabled, setHandsontableEnabled] = useState(false);
@@ -395,25 +416,30 @@ const isRowEmpty = (r?: PbnDetailRow) =>
     return out;
   };
 
-  const fetchPbnEntries = async () => {
+  const fetchPbnEntries = async (postedValue: boolean = includePosted) => {
     const storedUser = localStorage.getItem('user');
     const user = storedUser ? JSON.parse(storedUser) : null;
 
-    const res = await napi.get('/pbn/dropdown-list', {
-      params: {
-        include_posted: includePosted.toString(),
-        company_id: user?.company_id || '',
-      },
-    });
+    try {
+      const res = await napi.get('/pbn/dropdown-list', {
+        params: {
+          include_posted: postedValue ? 'true' : 'false',
+          company_id: user?.company_id || '',
+        },
+      });
 
-    const mapped = (res.data as PbnDropdownItem[]).map((item) => ({
-      ...item,
-      code: item.id.toString(),
-      label: item.pbn_number,              // this is what will be shown in the dropdown
-      description: item.vendor_name ?? '', // optional: display vendor name next to it
-    }));
-    console.log(res);
-    setPbnOptions(mapped);
+      const mapped = (Array.isArray(res.data) ? res.data : []).map((item: PbnDropdownItem) => ({
+        ...item,
+        code: String(item.id),
+        label: String(item.pbn_number || ''),
+        description: String(item.vendor_name || ''),
+      }));
+
+      setPbnOptions(mapped);
+    } catch (err) {
+      console.error('Failed to fetch PO dropdown list', err);
+      setPbnOptions([]);
+    }
   };
 
 
@@ -444,7 +470,7 @@ const isRowEmpty = (r?: PbnDetailRow) =>
 
 
   useEffect(() => {
-    fetchPbnEntries();
+    fetchPbnEntries(includePosted);
   }, [includePosted]);
 
 
@@ -477,14 +503,53 @@ useEffect(() => {
 }, []);
 
 
-useEffect(() => {
+const loadTerms = async () => {
   const storedUser = localStorage.getItem('user');
   const user = storedUser ? JSON.parse(storedUser) : null;
 
+  const { data } = await napi.get('/pbn/terms', {
+    params: { company_id: user?.company_id || '' },
+  });
+
+  const items = Array.isArray(data)
+    ? data
+        .map((x: any) => ({
+          code: String(x?.term_code || '').trim(),
+          description: String(x?.term_name || '').trim(),
+        }))
+        .filter((x: any) => !!x.code)
+    : [];
+
+  setTermsOptions(items);
+};
+
+const loadAdminTerms = async () => {
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+
+  setTermsAdminLoading(true);
+  try {
+    const { data } = await napi.get('/pbn/terms-admin', {
+      params: { company_id: user?.company_id || '' },
+    });
+    setAdminTerms(Array.isArray(data) ? data : []);
+  } catch (e) {
+    console.error('Failed to load admin terms', e);
+    toast.error('Failed to load terms.');
+    setAdminTerms([]);
+  } finally {
+    setTermsAdminLoading(false);
+  }
+};
+
+useEffect(() => {
   let cancelled = false;
 
-  async function loadTerms() {
+  (async () => {
     try {
+      const storedUser = localStorage.getItem('user');
+      const user = storedUser ? JSON.parse(storedUser) : null;
+
       const { data } = await napi.get('/pbn/terms', {
         params: { company_id: user?.company_id || '' },
       });
@@ -503,52 +568,132 @@ useEffect(() => {
       console.error('Failed to load terms', e);
       if (!cancelled) setTermsOptions([]);
     }
-  }
+  })();
 
-  loadTerms();
   return () => { cancelled = true; };
 }, []);
 
-  /*useEffect(() => {
-    napi.get('/api/mills').then(res => setMills(res.data));
-  }, []);*/
+useEffect(() => {
+  const storedUser = localStorage.getItem('user');
+  const user = storedUser ? JSON.parse(storedUser) : null;
+  const companyId = user?.company_id;
 
-  useEffect(() => {
-    const storedUser = localStorage.getItem('user');
-    const user = storedUser ? JSON.parse(storedUser) : null;
-    const companyId = user?.company_id;
+  let cancelled = false;
 
-    let cancelled = false;
+  async function loadMills() {
+    try {
+      const { data } = await napi.get<MillLite[]>('/mills', {
+        params: { company_id: companyId },
+      });
 
-    async function loadMills() {
-      try {
-        const { data } = await napi.get<MillLite[]>('/mills', {
-          params: { company_id: companyId },       // keep this endpoint light for dropdown
-        });
-        if (!cancelled) {
-          setMills(
-            (data || []).map(m => ({
-              mill_id: String(m.mill_id),
-              mill_name: m.mill_name,
-            }))
-          );
-        }
-      } catch (e) {
-        console.error('Failed to load mills', e);
+      if (!cancelled) {
+        setMills(
+          (data || []).map((m) => ({
+            mill_id: String(m.mill_id),
+            mill_name: m.mill_name,
+          }))
+        );
       }
+    } catch (e) {
+      console.error('Failed to load mills', e);
+      if (!cancelled) setMills([]);
+    }
+  }
+
+  loadMills();
+  return () => { cancelled = true; };
+}, []);
+
+const resetTermForm = () => {
+  setTermFormId(null);
+  setTermCodeInput('');
+  setTermNameInput('');
+  setTermActiveInput(true);
+  setTermSortOrderInput(0);
+};
+
+const handleOpenTermsModal = async () => {
+  resetTermForm();
+  setShowTermsModal(true);
+  await loadAdminTerms();
+};
+
+const handleEditTerm = (term: TermAdminRow) => {
+  setTermFormId(term.id);
+  setTermCodeInput(term.term_code || '');
+  setTermNameInput(term.term_name || '');
+  setTermActiveInput(Number(term.active_flag) === 1);
+  setTermSortOrderInput(Number(term.sort_order || 0));
+};
+
+const handleSaveTerm = async () => {
+  const code = termCodeInput.trim();
+  const name = termNameInput.trim();
+
+  if (!code) {
+    toast.error('Term Code is required.');
+    return;
+  }
+
+  if (!name) {
+    toast.error('Term Name is required.');
+    return;
+  }
+
+  setTermsSaving(true);
+  try {
+    const payload = {
+      term_code: code,
+      term_name: name,
+      active_flag: termActiveInput ? 1 : 0,
+      sort_order: Number(termSortOrderInput || 0),
+    };
+
+    if (termFormId) {
+      await napi.put(`/pbn/terms-admin/${termFormId}`, payload);
+      toast.success('Term updated successfully.');
+    } else {
+      await napi.post('/pbn/terms-admin', payload);
+      toast.success('Term added successfully.');
     }
 
-    loadMills();
-    return () => { cancelled = true; };
-  }, []);
+    resetTermForm();
+    await loadAdminTerms();
+    await loadTerms();
+  } catch (e: any) {
+    console.error('Failed to save term', e);
+    toast.error(e?.response?.data?.message || 'Failed to save term.');
+  } finally {
+    setTermsSaving(false);
+  }
+};
 
-  /* -------- Auto-populate Vendor Name when vendor changes or list updates (REPLACED) -------- */
-// ✅ Auto-fill Vendor Name based on selected vendor code
+const handleToggleTermActive = async (term: TermAdminRow) => {
+  try {
+    await napi.patch(`/pbn/terms-admin/${term.id}/active`, {
+      active_flag: Number(term.active_flag) === 1 ? 0 : 1,
+    });
+
+    toast.success('Term status updated.');
+    await loadAdminTerms();
+    await loadTerms();
+
+    if (selectedTerms === term.term_code && Number(term.active_flag) === 1) {
+      setSelectedTerms('');
+    }
+  } catch (e: any) {
+    console.error('Failed to toggle term', e);
+    toast.error(e?.response?.data?.message || 'Failed to update term status.');
+  }
+};
+
+/* -------- Auto-populate Vendor Name when vendor changes or list updates -------- */
 useEffect(() => {
   if (!selectedVendor) return;
-  const sel = vendors.find(v => String(v.code) === String(selectedVendor));
+  const sel = vendors.find((v) => String(v.code) === String(selectedVendor));
   if (sel) setVendorName(sel.description || '');
 }, [selectedVendor, vendors]);
+/* -------------------------------------------------------------------------------- */
 
 
   /* ------------------------------------------------------------------------------------------ */
@@ -578,6 +723,7 @@ useEffect(() => {
     setPbnDate('');
     setNote('');
     setSelectedTerms('');
+    setVatType('vat_exempt');
     setPosted(false);
     setHandsontableEnabled(false);
     setMainEntryId(null);
@@ -585,7 +731,7 @@ useEffect(() => {
     setTableData(ensureTrailingBuffer([emptyRow()]));
 
     setIsExistingRecord(false);
-    toast.success('✅ PBN Entry form is now ready for new entry');
+    toast.success('✅ PO Entry form is now ready for new entry');
   };
 
 
@@ -614,16 +760,19 @@ const handleSaveMain = async () => {
     const user = storedUser ? JSON.parse(storedUser) : null;
 
     await napi.post('/pbn/update-main', {
-  id: mainEntryId,
-  sugar_type: selectedSugarType,
-  crop_year: selectedCropYear,
-  pbn_date: pbnDate,
-  vend_code: selectedVendor,
-  vendor_name: vendorName,
-  note,
-  terms: selectedTerms || null,
-  company_id: user?.company_id || '',
-});
+      id: mainEntryId,
+      sugar_type: selectedSugarType,
+      crop_year: selectedCropYear,
+      pbn_date: pbnDate,
+      vend_code: selectedVendor,
+      vendor_name: vendorName,
+      note,
+      terms: selectedTerms || null,
+      vatable_sales_flag: vatType === 'vatable' ? 1 : 0,
+      zero_rated_sales_flag: vatType === 'zero_rated' ? 1 : 0,
+      vat_exempt_sales_flag: vatType === 'vat_exempt' ? 1 : 0,
+      company_id: user?.company_id || '',
+    });
 
     await fetchPbnEntries(); // refresh dropdown list display
     toast.success('✅ Main updated successfully');
@@ -665,6 +814,9 @@ const res = await napi.post('/pbn/save-main', {
   vendor_name: vendorName,
   note,
   terms: selectedTerms || null,
+  vatable_sales_flag: vatType === 'vatable' ? 1 : 0,
+  zero_rated_sales_flag: vatType === 'zero_rated' ? 1 : 0,
+  vat_exempt_sales_flag: vatType === 'vat_exempt' ? 1 : 0,
   posted_flag: posted,
   company_id: companyId,
 });
@@ -687,7 +839,7 @@ setPbnNumber(String(po_number || ''));
       setHandsontableEnabled(true);
 
       setIsExistingRecord(true);
-      toast.success('Main PBN Entry saved. You can now input details.');
+      toast.success('Main PO Entry saved. You can now input details.');
 
     } catch (err) {
       toast.error('Failed to save PBN Entry.');
@@ -775,9 +927,17 @@ setVendorName(data.main.vendor_name);
 setNote(data.main.note || '');
 setSelectedTerms(data.main.terms || '');
 
+if (Number(data.main.vatable_sales_flag || 0) === 1) {
+  setVatType('vatable');
+} else if (Number(data.main.zero_rated_sales_flag || 0) === 1) {
+  setVatType('zero_rated');
+} else {
+  setVatType('vat_exempt');
+}
+
 setPosted(data.main.posted_flag === 1);
-      setPbnDate(formatDateToYYYYMMDD(data.main.pbn_date));
-      setIsExistingRecord(true);
+setPbnDate(formatDateToYYYYMMDD(data.main.pbn_date));
+setIsExistingRecord(true);
 
       // 🔁 Fallback if vendor_name missing in the record: derive from vendors list
 // 🔁 Fallback if vendor_name missing in the record: derive from loaded vendors list
@@ -1013,7 +1173,21 @@ if (posted && (col >= 0 && col <= 5)) {
             <input
               type="checkbox"
               checked={includePosted}
-              onChange={() => setIncludePosted(!includePosted)}
+              onChange={(e) => {
+                const checked = e.target.checked;
+
+                setSelectedPbnNo('');
+                setPbnNumber('');
+                setPbnSearch('');
+                setPbnOptions([]);
+                setPbnEntryMain(null);
+                setMainEntryId(null);
+                setHandsontableEnabled(false);
+                setTableData(ensureTrailingBuffer([emptyRow()]));
+                setIsExistingRecord(false);
+
+                setIncludePosted(checked);
+              }}
               className="form-checkbox h-4 w-4 text-blue-600"
             />
             <label className="text-sm font-medium text-gray-700">PO #</label>
@@ -1102,23 +1276,74 @@ if (posted && (col >= 0 && col <= 5)) {
     </div>
 
     <div className="col-span-1">
-<DropdownWithHeaders
-  label="Terms"
-  value={selectedTerms}
-  onChange={(v) => {
-    if (posted) return;
-    setSelectedTerms(v);
-  }}
-  items={termsOptions}
-  search={termsSearch}
-  onSearchChange={(v) => {
-    if (posted) return;
-    setTermsSearch(v);
-  }}
-  headers={['Terms Code', 'Description']}
-  customKey="pbnTerms"
-/>
+      <DropdownWithHeaders
+        label="Terms"
+        value={selectedTerms}
+        onChange={(v) => {
+          if (posted) return;
+          setSelectedTerms(v);
+        }}
+        items={termsOptions}
+        search={termsSearch}
+        onSearchChange={(v) => {
+          if (posted) return;
+          setTermsSearch(v);
+        }}
+        headers={['Terms Code', 'Description']}
+        customKey="pbnTerms"
+      />
+
+      <div className="mt-2 flex justify-end">
+        <button
+          type="button"
+          onClick={handleOpenTermsModal}
+          className="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
+        >
+          Add Term
+        </button>
+      </div>
     </div>
+  </div>
+
+  <div className="mt-4 grid grid-cols-3 gap-4">
+    <label className="flex items-center gap-2">
+      <input
+        type="checkbox"
+        checked={vatType === 'vatable'}
+        disabled={posted}
+        onChange={() => {
+          if (posted) return;
+          setVatType('vatable');
+        }}
+      />
+      <span>Vatable Sales</span>
+    </label>
+
+    <label className="flex items-center gap-2">
+      <input
+        type="checkbox"
+        checked={vatType === 'zero_rated'}
+        disabled={posted}
+        onChange={() => {
+          if (posted) return;
+          setVatType('zero_rated');
+        }}
+      />
+      <span>Zero-Rated Sales</span>
+    </label>
+
+    <label className="flex items-center gap-2">
+      <input
+        type="checkbox"
+        checked={vatType === 'vat_exempt'}
+        disabled={posted}
+        onChange={() => {
+          if (posted) return;
+          setVatType('vat_exempt');
+        }}
+      />
+      <span>VAT Exempt Sales</span>
+    </label>
   </div>
 
   <div className="mt-3 flex justify-end">
@@ -1421,7 +1646,7 @@ newData.push(emptyRow());
                   <DocumentArrowDownIcon
                     className={`h-5 w-5 ${isPbnReady ? 'text-emerald-600' : 'text-gray-400'}`}
                   />
-                  <span className="truncate">PBN Form - Excel</span>
+                  <span className="truncate">PO Form - Excel</span>
                   <span
                     className={`ml-auto text-[10px] font-semibold ${
                       isPbnReady ? 'text-emerald-600' : 'text-gray-400'
@@ -1464,7 +1689,7 @@ newData.push(emptyRow());
                   className="flex w-full items-center gap-3 px-3 py-2 text-sm text-gray-800 hover:bg-gray-100"
                 >
                   <DocumentTextIcon className="h-5 w-5 text-red-600" />
-                  <span className="truncate">PBN Form - PDF</span>
+                  <span className="truncate">PO Form - PDF</span>
                   <span className="ml-auto text-[10px] font-semibold text-red-600">PDF</span>
                 </button>
               </div>
@@ -1562,7 +1787,7 @@ newData.push(emptyRow());
         ) : (
           <iframe
             key={pdfUrl} // rerender when url changes
-            title="PBN Form PDF"
+            title="PO Form PDF"
             src={pdfUrl}
             className="w-full h-full"
             style={{ border: 'none' }}
@@ -1574,6 +1799,148 @@ newData.push(emptyRow());
     </div>
   </div>
 )}
+
+      {showTermsModal && (
+        <div className="fixed inset-0 z-[11000] bg-black/50 flex items-center justify-center">
+          <div className="bg-white rounded-lg shadow-xl w-[92vw] max-w-[1100px] max-h-[90vh] overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <h3 className="text-lg font-semibold text-gray-800">Terms Maintenance</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowTermsModal(false);
+                  resetTermForm();
+                }}
+                className="px-3 py-1 rounded bg-gray-100 hover:bg-gray-200"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              <div className="grid grid-cols-4 gap-4">
+                <div>
+                  <label className="block mb-1">Term Code</label>
+                  <input
+                    type="text"
+                    value={termCodeInput}
+                    onChange={(e) => setTermCodeInput(e.target.value)}
+                    className="w-full border p-2 rounded"
+                  />
+                </div>
+
+                <div>
+                  <label className="block mb-1">Term Name</label>
+                  <input
+                    type="text"
+                    value={termNameInput}
+                    onChange={(e) => setTermNameInput(e.target.value)}
+                    className="w-full border p-2 rounded"
+                  />
+                </div>
+
+                <div>
+                  <label className="block mb-1">Sort Order</label>
+                  <input
+                    type="number"
+                    value={termSortOrderInput}
+                    onChange={(e) => setTermSortOrderInput(Number(e.target.value || 0))}
+                    className="w-full border p-2 rounded"
+                  />
+                </div>
+
+                <div className="flex items-end">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={termActiveInput}
+                      onChange={(e) => setTermActiveInput(e.target.checked)}
+                    />
+                    <span>Active Flag</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleSaveTerm}
+                  disabled={termsSaving}
+                  className={`px-4 py-2 rounded text-white ${
+                    termsSaving ? 'bg-gray-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'
+                  }`}
+                >
+                  {termFormId ? 'Update Term' : 'Save Term'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={resetTermForm}
+                  className="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <div className="border rounded overflow-auto max-h-[420px]">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-100 sticky top-0">
+                    <tr>
+                      <th className="text-left px-3 py-2 border-b">Code</th>
+                      <th className="text-left px-3 py-2 border-b">Name</th>
+                      <th className="text-left px-3 py-2 border-b">Sort Order</th>
+                      <th className="text-left px-3 py-2 border-b">Active</th>
+                      <th className="text-left px-3 py-2 border-b">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {termsAdminLoading ? (
+                      <tr>
+                        <td colSpan={5} className="px-3 py-4 text-center text-gray-500">
+                          Loading terms...
+                        </td>
+                      </tr>
+                    ) : adminTerms.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-3 py-4 text-center text-gray-500">
+                          No terms found.
+                        </td>
+                      </tr>
+                    ) : (
+                      adminTerms.map((term) => (
+                        <tr key={term.id} className="hover:bg-gray-50">
+                          <td className="px-3 py-2 border-b">{term.term_code}</td>
+                          <td className="px-3 py-2 border-b">{term.term_name}</td>
+                          <td className="px-3 py-2 border-b">{term.sort_order}</td>
+                          <td className="px-3 py-2 border-b">
+                            <label className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={Number(term.active_flag) === 1}
+                                onChange={() => handleToggleTermActive(term)}
+                              />
+                              <span>{Number(term.active_flag) === 1 ? 'Active' : 'Inactive'}</span>
+                            </label>
+                          </td>
+                          <td className="px-3 py-2 border-b">
+                            <button
+                              type="button"
+                              onClick={() => handleEditTerm(term)}
+                              className="px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+                            >
+                              Edit
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

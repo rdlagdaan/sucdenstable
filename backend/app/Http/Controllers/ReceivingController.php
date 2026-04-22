@@ -31,12 +31,19 @@ class ReceivingController extends Controller
     // RR list with search + posted filter
     public function rrList(Request $req)
     {
+        $companyId = (int) ($req->get('company_id') ?: $req->header('X-Company-ID') ?: 0);
         $q = trim((string) $req->get('q', ''));
         $includePosted = $req->boolean('include_posted', false) ? 1 : 0;
 
         $rows = DB::table('receiving_entry as r')
-            ->leftJoin('pbn_entry as p', 'p.pbn_number', '=', 'r.pbn_number')
-            ->leftJoin('receiving_details as d', 'd.receipt_no', '=', 'r.receipt_no')
+            ->leftJoin('pbn_entry as p', function ($join) {
+                $join->on('p.pbn_number', '=', 'r.pbn_number')
+                     ->on('p.company_id', '=', 'r.company_id');
+            })
+            ->leftJoin('receiving_details as d', function ($join) {
+                $join->on('d.receipt_no', '=', 'r.receipt_no')
+                     ->on('d.receiving_entry_id', '=', 'r.id');
+            })
             ->select(
                 'r.receipt_no',
                 DB::raw('COALESCE(SUM(d.quantity),0) as quantity'),
@@ -46,6 +53,7 @@ class ReceivingController extends Controller
                 'p.vend_code as vendor_code',
                 'p.vendor_name'
             )
+            ->when($companyId > 0, fn ($w) => $w->where('r.company_id', $companyId))
             ->when($q !== '', function ($qq) use ($q) {
                 $like = "%{$q}%";
                 $qq->where(function ($w) use ($like) {
@@ -55,7 +63,7 @@ class ReceivingController extends Controller
                 });
             })
             ->when(!$includePosted, fn ($w) => $w->where('r.posted_flag', 0))
-            ->groupBy('r.receipt_no', 'p.sugar_type','r.pbn_number','r.receipt_date','p.vend_code','p.vendor_name')
+            ->groupBy('r.receipt_no', 'p.sugar_type', 'r.pbn_number', 'r.receipt_date', 'p.vend_code', 'p.vendor_name')
             ->orderBy('r.receipt_no', 'asc')
             ->limit(200)
             ->get();
@@ -67,7 +75,10 @@ class ReceivingController extends Controller
     public function getReceivingEntry(Request $req)
     {
         $receiptNo = $req->get('receipt_no');
+        $companyId = $this->companyIdFromRequest($req);
+
         $entry = ReceivingEntry::query()
+            ->where('company_id', $companyId)
             ->where('receipt_no', $receiptNo)
             ->firstOrFail();
 
@@ -84,7 +95,15 @@ class ReceivingController extends Controller
     {
         $receiptNo = $req->get('receipt_no');
 
+        $companyId = $this->companyIdFromRequest($req);
+
+        $entry = ReceivingEntry::query()
+            ->where('company_id', $companyId)
+            ->where('receipt_no', $receiptNo)
+            ->firstOrFail();
+
         $rows = ReceivingDetail::query()
+            ->where('receiving_entry_id', $entry->id)
             ->where('receipt_no', $receiptNo)
             ->orderBy('row')
             ->get()
@@ -115,13 +134,27 @@ class ReceivingController extends Controller
     // PBN item (unit_cost, commission) for receiving header
     public function pbnItemForReceiving(Request $req)
     {
-        $pbn = $req->get('pbn_number');
-        $item = $req->get('item_no');
+        $companyId = $this->companyIdFromRequest($req);
+        $pbnNumber = trim((string) $req->get('pbn_number', ''));
+        $itemNo    = trim((string) $req->get('item_no', ''));
+
+        if ($pbnNumber === '' || $itemNo === '') {
+            return response()->json([]);
+        }
+
+        $pbn = PbnEntry::query()
+            ->where('company_id', $companyId)
+            ->where('pbn_number', $pbnNumber)
+            ->first();
+
+        if (!$pbn) {
+            return response()->json([]);
+        }
 
         $row = PbnEntryDetail::query()
-            ->where('pbn_number', $pbn)
-            ->where('row', $item)
-            ->select('price as unit_cost','commission','mill','mill_code')
+            ->where('pbn_entry_id', (int) $pbn->id)
+            ->where('row', $itemNo)
+            ->select('price as unit_cost', 'commission', 'mill', 'mill_code')
             ->first();
 
         return response()->json($row ?: []);
@@ -203,7 +236,12 @@ public function batchInsertDetails(Request $req)
         $rowIdx    = (int) $req->get('row_index', 0);
         $row       = (array) $req->get('row', []);
 
-        $entry = ReceivingEntry::where('receipt_no', $receiptNo)->firstOrFail();
+        $companyId = $this->companyIdFromRequest($req);
+
+        $entry = ReceivingEntry::query()
+            ->where('company_id', $companyId)
+            ->where('receipt_no', $receiptNo)
+            ->firstOrFail();
 
         // ---- safe date helpers ----
         $toDate = function ($v) {
@@ -219,10 +257,29 @@ public function batchInsertDetails(Request $req)
             $planterName = $p?->display_name ?? '';
         }
 
-        // bring pricing context (unit/commission + mill rates)
-        $pbnItem = PbnEntryDetail::where('pbn_number', $entry->pbn_number)
+        // resolve authoritative PBN header first (company-scoped)
+        $pbn = PbnEntry::query()
+            ->where('company_id', $entry->company_id)
+            ->where('pbn_number', $entry->pbn_number)
+            ->first();
+
+        if (!$pbn) {
+            return response()->json([
+                'message' => 'PBN not found for this receiving entry.',
+            ], 422);
+        }
+
+        // bring pricing context from the exact PBN detail row
+        $pbnItem = PbnEntryDetail::query()
+            ->where('pbn_entry_id', (int) $pbn->id)
             ->where('row', $entry->item_number)
             ->first();
+
+        if (!$pbnItem) {
+            return response()->json([
+                'message' => 'PBN detail item not found for this receiving entry.',
+            ], 422);
+        }
 
         $unitCost   = (float) ($pbnItem->price ?? 0);
         $commission = (float) ($pbnItem->commission ?? 0);
@@ -230,11 +287,7 @@ public function batchInsertDetails(Request $req)
         // receipt_date ISO (works whether casted or string)
         $receDateISO = $toDate($entry->receipt_date);
 
-$pbn = PbnEntry::where('pbn_number', $entry->pbn_number)
-    ->where('company_id', $entry->company_id)
-    ->first();
-
-$cropYear = $pbn?->crop_year ?? null;
+        $cropYear = $pbn?->crop_year ?? null;
 
 
         // mill rates as-of receipt date (or latest)
@@ -269,31 +322,69 @@ $totalAP   = ($qty * $unitCost) - $liens - $insurance - $storage;
 
         // ✅ DO NOT upsert by id=0
         // Use (receipt_no,row) as the stable identity
-        $detail = ReceivingDetail::updateOrCreate(
-            [
-                'receipt_no' => $receiptNo,
-                'row'        => $rowIdx,
-            ],
-            [
-                'receiving_entry_id' => $entry->id,
-                'quedan_no'     => $row['quedan_no'] ?? null,
-                'quantity'      => $qty,
-                'liens' => $liens,
-                'week_ending'   => $weISO,
-                'date_issued'   => $toDate($row['date_issued'] ?? null),
-                'planter_tin'   => $row['planter_tin'] ?? null,
-                'planter_name'  => $planterName,
-                'item_no'       => $entry->item_number,
-                'mill'          => $entry->mill,
-                'unit_cost'     => $unitCost,
-                'commission'    => $commission,
-                'storage'       => $storage,
-                'insurance'     => $insurance,
-                'total_ap'      => $totalAP,
-                'user_id'       => $entry->user_id,
-                'workstation_id'=> $entry->workstation_id,
-            ]
-        );
+        $detailId = isset($row['id']) ? (int) $row['id'] : null;
+
+        if ($detailId > 0) {
+            $detail = ReceivingDetail::query()
+                ->where('id', $detailId)
+                ->where('receiving_entry_id', $entry->id)
+                ->where('receipt_no', $receiptNo)
+                ->first();
+
+            if (!$detail) {
+                return response()->json([
+                    'message' => 'Receiving detail not found for update.',
+                ], 404);
+            }
+
+            $detail->fill([
+                'quedan_no'      => $row['quedan_no'] ?? null,
+                'quantity'       => $qty,
+                'liens'          => $liens,
+                'week_ending'    => $weISO,
+                'date_issued'    => $toDate($row['date_issued'] ?? null),
+                'planter_tin'    => $row['planter_tin'] ?? null,
+                'planter_name'   => $planterName,
+                'item_no'        => $entry->item_number,
+                'mill'           => $entry->mill,
+                'unit_cost'      => $unitCost,
+                'commission'     => $commission,
+                'storage'        => $storage,
+                'insurance'      => $insurance,
+                'total_ap'       => $totalAP,
+                'user_id'        => $entry->user_id,
+                'workstation_id' => $entry->workstation_id,
+                'row'            => $detail->row, // keep original stored row
+            ]);
+
+            $detail->save();
+        } else {
+            $detail = ReceivingDetail::updateOrCreate(
+                [
+                    'receipt_no' => $receiptNo,
+                    'row'        => $rowIdx,
+                ],
+                [
+                    'receiving_entry_id' => $entry->id,
+                    'quedan_no'      => $row['quedan_no'] ?? null,
+                    'quantity'       => $qty,
+                    'liens'          => $liens,
+                    'week_ending'    => $weISO,
+                    'date_issued'    => $toDate($row['date_issued'] ?? null),
+                    'planter_tin'    => $row['planter_tin'] ?? null,
+                    'planter_name'   => $planterName,
+                    'item_no'        => $entry->item_number,
+                    'mill'           => $entry->mill,
+                    'unit_cost'      => $unitCost,
+                    'commission'     => $commission,
+                    'storage'        => $storage,
+                    'insurance'      => $insurance,
+                    'total_ap'       => $totalAP,
+                    'user_id'        => $entry->user_id,
+                    'workstation_id' => $entry->workstation_id,
+                ]
+            );
+        }
 
         return response()->json([
             'id'           => $detail->id,
@@ -395,7 +486,12 @@ public function updateDate(Request $req)
             'receipt_no' => 'required',
             'gl_account_key' => 'nullable|string|max:25',
         ]);
-        ReceivingEntry::where('receipt_no', $req->receipt_no)->update(['gl_account_key' => $req->gl_account_key]);
+        $companyId = $this->companyIdFromRequest($req);
+
+        ReceivingEntry::query()
+            ->where('company_id', $companyId)
+            ->where('receipt_no', $req->receipt_no)
+            ->update(['gl_account_key' => $req->gl_account_key]);
         return response()->json(['ok' => true]);
     }
 
@@ -405,11 +501,26 @@ public function updateDate(Request $req)
             'receipt_no' => 'required',
             'assoc_dues' => 'numeric',
             'others'     => 'numeric',
+            'assoc_dues_is_debit' => 'nullable|boolean',
+            'others_is_debit'     => 'nullable|boolean',
         ]);
-        ReceivingEntry::where('receipt_no', $req->receipt_no)->update([
-            'assoc_dues' => $req->assoc_dues,
-            'others'     => $req->others,
-        ]);
+
+        $companyId = $this->companyIdFromRequest($req);
+
+        ReceivingEntry::query()
+            ->where('company_id', $companyId)
+            ->where('receipt_no', $req->receipt_no)
+            ->update([
+                'assoc_dues' => $req->assoc_dues,
+                'others'     => $req->others,
+                'assoc_dues_is_debit' => $req->has('assoc_dues_is_debit')
+                    ? (bool) $req->assoc_dues_is_debit
+                    : true,
+                'others_is_debit' => $req->has('others_is_debit')
+                    ? (bool) $req->others_is_debit
+                    : false,
+            ]);
+
         return response()->json(['ok' => true]);
     }
 
@@ -1081,7 +1192,20 @@ public function receivingReportPdf(Request $req, string $receiptNo)
     $withHoldingTax = $totalCost * 0.01;
     $withHoldingTaxV = floor($withHoldingTax * 100) / 100;
 
-    $netAP = $totalAP - ($withHoldingTax + $totalAssocDues);
+    $assoc = (float) ($entry->assoc_dues ?? 0);
+    $assocIsDebit = (bool) ($entry->assoc_dues_is_debit ?? true);
+
+    $others = (float) ($entry->others ?? 0);
+    $othersIsDebit = (bool) ($entry->others_is_debit ?? false);
+
+    // apply logic: debit = subtract, credit = add
+    $assocEffect = $assocIsDebit ? -$assoc : $assoc;
+    $othersEffect = $othersIsDebit ? -$others : $others;
+
+    $netAP = $totalAP
+        - $withHoldingTax
+        + $assocEffect
+        + $othersEffect;
 
     // Formatting
     $fmt2 = fn($n) => number_format((float)$n, 2);
@@ -1094,6 +1218,13 @@ public function receivingReportPdf(Request $req, string $receiptNo)
     $totalStoV       = $fmt2($totalStorage);
     $totalAPV        = $fmt2($totalAP);
     $assocDuesV      = $fmt2($totalAssocDues);
+
+    $assocIsDebit = (bool) ($entry->assoc_dues_is_debit ?? true);
+
+    $others = (float) ($entry->others ?? 0);
+    $othersIsDebit = (bool) ($entry->others_is_debit ?? false);
+    $othersV = $fmt2($others);    
+
     $withHoldingTaxV = $fmt2($withHoldingTaxV);
     $netAPV          = $fmt2($netAP);
 
@@ -1146,7 +1277,8 @@ public function receivingReportPdf(Request $req, string $receiptNo)
     $whtDesc       = $acctDesc($withHoldingTaxAcct);
     $assocDesc     = $acctDesc($assocDueAcct);
     $apDesc        = $acctDesc($apAcct);
-
+    $othersAcct = (string) ($entry->gl_account_key ?? '');
+    $othersDesc = $othersAcct !== '' ? $acctDesc($othersAcct) : 'Others';
     // ----------------------------
     // 6) TCPDF (legacy layout)
     // ----------------------------
@@ -1396,6 +1528,12 @@ $pdf = new class($logoPath) extends \TCPDF {
                   </tr>
                   <tr>
                     <td colspan="6"></td>
+                    <td align="left"><font size="8">Others</font></td>
+                    <td align="right"></td>
+                    <td align="right"><font size="8">'.$othersV.'</font></td>
+                  </tr>
+                  <tr>
+                    <td colspan="6"></td>
                     <td align="left" colspan="2"><font size="8">Withholding Tax%</font></td>
                     <td align="right"><font size="8">'.$withHoldingTaxV.'</font></td>
                   </tr>
@@ -1473,10 +1611,18 @@ $pdf = new class($logoPath) extends \TCPDF {
                           <tr>
                             <td><font size="8">'.$assocDueAcct.'</font></td>
                             <td><font size="8">'.htmlspecialchars($assocDesc).'</font></td>
-                            <td align="right"><font size="8">'.$assocDuesV.'</font></td>
-                            <td align="right"><font size="8"></font></td>
-                          </tr>
-
+                            <td align="right"><font size="8">'.($assocIsDebit ? $assocDuesV : '').'</font></td>
+                            <td align="right"><font size="8">'.(!$assocIsDebit ? $assocDuesV : '').'</font></td>
+                          </tr>';
+    if ($others != 0) {
+        $tbl .= '<tr>
+                            <td><font size="8">'.htmlspecialchars($othersAcct).'</font></td>
+                            <td><font size="8">'.htmlspecialchars($othersDesc).'</font></td>
+                            <td align="right"><font size="8">'.($othersIsDebit ? $othersV : '').'</font></td>
+                            <td align="right"><font size="8">'.(!$othersIsDebit ? $othersV : '').'</font></td>
+                          </tr>';
+    }
+    $tbl .= '
                           <tr>
                             <td><font size="8">'.$apAcct.'</font></td>
                             <td><font size="8">'.htmlspecialchars($apDesc).'</font></td>
@@ -1583,15 +1729,13 @@ public function quedanListingPdf(Request $req, string $receiptNo)
         ->where('pbn_number', $entry->pbn_number)
         ->first();
 
-    $sugarType = strtoupper((string)($pbn?->sugar_type ?? ''));
-    $cropYearRaw = (string)($pbn?->crop_year ?? '');
+    $cropYearRaw = (string) ($pbn?->crop_year ?? '');
 
     // legacy-like crop year display (CY2022-2023)
     $cropYearDisplay = $cropYearRaw;
     if ($cropYearDisplay !== '' && strpos($cropYearDisplay, '-') === false) {
-        // if numeric year like "2022", show "2022-2023"
         if (preg_match('/^\d{4}$/', $cropYearDisplay)) {
-            $cropYearDisplay = $cropYearDisplay . '-' . ((int)$cropYearDisplay + 1);
+            $cropYearDisplay = $cropYearDisplay . '-' . ((int) $cropYearDisplay + 1);
         }
     }
 
@@ -1602,23 +1746,41 @@ public function quedanListingPdf(Request $req, string $receiptNo)
         ->orderBy('row', 'asc')
         ->get();
 
-    // 4) Resolve mill prefix + millmark (legacy gets from PBN detail + mill_list)
-    // We’ll try: mill_name from entry->mill; prefix from mill_list (company-scoped)
-    $millName = (string)($entry->mill ?? '');
-    $millRow = MillList::query()
-        ->where('company_id', $companyId)
-        ->where('mill_name', $millName)
+    // 4) Resolve MillMark = mill_code
+    $millCode = '';
+    $pbnDetail = PbnEntryDetail::query()
+        ->where('pbn_number', $entry->pbn_number)
+        ->where('row', $entry->item_number)
         ->first();
 
-    $prefix   = (string)($millRow->prefix ?? '');
-    $millMark = $prefix !== '' ? $prefix : $millName; // legacy shows "BISCOM" etc; adjust if your prefix is separate
+    if ($pbnDetail && !empty($pbnDetail->mill_code)) {
+        $millCode = (string) $pbnDetail->mill_code;
+    }
 
-    // 5) Header text by company_id
-    $shipper = 'SUCDEN PHILIPPINES, INC.';
-    $buyer   = ($companyId === 2) ? 'AMEROP AMERICAS CORP' : 'SUCDEN AMERICAS CORP';
+    if ($millCode === '') {
+        $millName = (string) ($entry->mill ?? '');
+
+        $millRow = MillList::query()
+            ->where('company_id', $companyId)
+            ->where('mill_name', $millName)
+            ->first();
+
+        $millCode = (string) ($millRow->mill_code ?? '');
+    }
+
+    if ($millCode === '') {
+        $millCode = (string) ($entry->mill ?? '');
+    }
+
+    $millMark = $millCode;
+
     $currentDate = date('M d, Y');
 
-    // 6) TCPDF setup (no header/footer like legacy)
+    $companyHeader = ($companyId === 2)
+        ? 'AMEROP PHILIPPINES, INC.'
+        : 'SUCDEN PHILIPPINES, INC.';    
+
+    // 6) TCPDF setup
     if (!class_exists('\TCPDF', false)) {
         $tcpdfPath = base_path('vendor/tecnickcom/tcpdf/tcpdf.php');
         if (file_exists($tcpdfPath)) require_once $tcpdfPath;
@@ -1628,21 +1790,19 @@ public function quedanListingPdf(Request $req, string $receiptNo)
     $pdf = new \TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
     $pdf->SetPrintHeader(false);
     $pdf->SetPrintFooter(false);
-
-    // legacy-ish margins
     $pdf->SetMargins(3, 5, 3);
     $pdf->SetAutoPageBreak(true, 10);
     $pdf->AddPage('P', 'LETTER');
     $pdf->SetFont('helvetica', '', 7);
 
-    // 7) Build HTML with legacy paging logic (50 rows/page)
+    // 7) Build HTML with corrected header + corrected Quedan No.
     $tbl = '';
     $tbl .= '<br><br>';
     $tbl .= '<table border="0" cellpadding="0" cellspacing="1" nobr="true" width="100%">';
     $tbl .= '  <tr>
-                <td colspan="8"><font size="8">'
-                .'Shipper:  '.htmlspecialchars($shipper, ENT_QUOTES, 'UTF-8').'<br>'
-                .'Buyer:  '.htmlspecialchars($buyer, ENT_QUOTES, 'UTF-8').'<br>'
+                <td colspan="8"><font size="9"><b>'
+                .htmlspecialchars($companyHeader, ENT_QUOTES, 'UTF-8').'</b><br>'
+                .'</font><font size="8">'
                 .'Quedan Listings (CY'.htmlspecialchars($cropYearDisplay, ENT_QUOTES, 'UTF-8').')<br>'
                 .htmlspecialchars($currentDate, ENT_QUOTES, 'UTF-8').'<br>'
                 .'RR No.:  '.htmlspecialchars($receiptNo, ENT_QUOTES, 'UTF-8').'<br>'
@@ -1660,46 +1820,57 @@ public function quedanListingPdf(Request $req, string $receiptNo)
                 <td width="33%" align="left"><font size="8">PLANTER</font></td>
               </tr>';
 
-    $grandQty  = 0.0;
-    $grandLiens= 0.0;
+    $grandQty   = 0.0;
+    $grandLiens = 0.0;
 
-    $pageQty   = 0.0;
-    $pageLiens = 0.0;
-    $ctr       = 0;
-    $pcs       = 0;
-    $totalPcs  = 0;
+    $pageQty    = 0.0;
+    $pageLiens  = 0.0;
+    $ctr        = 0;
+    $pcs        = 0;
+    $totalPcs   = 0;
 
     $formatDateMDY = function ($v) {
         if (!$v) return '';
-        try { return date('m/d/Y', strtotime((string)$v)); } catch (\Throwable $e) { return ''; }
+        try {
+            return date('m/d/Y', strtotime((string) $v));
+        } catch (\Throwable $e) {
+            return '';
+        }
     };
 
-    $formatQuedanNo = function ($raw) use ($sugarType, $prefix) {
-        $raw = trim((string)$raw);
+    // ✅ corrected: remove B19- / prefix logic, keep numeric padded quedan only
+    $formatQuedanNo = function ($raw) {
+        $raw = trim((string) $raw);
 
-        // if already formatted like "B26-000123" keep it
-        if (preg_match('/^[A-Z].+-\d+$/', $raw)) {
-            return $raw;
+        if ($raw === '') return '';
+
+        // if already plain numeric, pad it
+        if (preg_match('/^\d+$/', $raw)) {
+            return str_pad((string) ((int) $raw), 6, '0', STR_PAD_LEFT);
         }
 
-        // otherwise extract digits and pad to 6
+        // if formatted like B19-019582 or 19-019582, keep only right-side digits
+        if (preg_match('/-(\d+)$/', $raw, $m)) {
+            return str_pad((string) ((int) $m[1]), 6, '0', STR_PAD_LEFT);
+        }
+
+        // fallback: extract digits only
         $digits = preg_replace('/\D+/', '', $raw);
-        if ($digits === '') $digits = '0';
-        $num = (int)$digits;
-        $pad = str_pad((string)$num, 6, '0', STR_PAD_LEFT);
-        return $sugarType . $prefix . '-' . $pad;
+        if ($digits === '') return '';
+
+        return str_pad((string) ((int) $digits), 6, '0', STR_PAD_LEFT);
     };
 
     foreach ($rows as $r) {
-        $qty   = (float)($r->quantity ?? 0);
-        $liens = (float)($r->liens ?? 0);
+        $qty   = (float) ($r->quantity ?? 0);
+        $liens = (float) ($r->liens ?? 0);
 
-        $quedanNo = $formatQuedanNo($r->quedan_no ?? '');
+        $quedanNo   = $formatQuedanNo($r->quedan_no ?? '');
         $weekEnding = $formatDateMDY($r->week_ending);
         $dateIssued = $formatDateMDY($r->date_issued);
 
-        $planterTIN  = (string)($r->planter_tin ?? '');
-        $planterName = (string)($r->planter_name ?? '');
+        $planterTIN  = (string) ($r->planter_tin ?? '');
+        $planterName = (string) ($r->planter_name ?? '');
 
         $ctr++;
         $pcs = $ctr;
@@ -1722,11 +1893,10 @@ public function quedanListingPdf(Request $req, string $receiptNo)
             <td align="left"><font size="7">'.htmlspecialchars($planterName).'</font></td>
         </tr>';
 
-        // legacy: page total every 50 rows
         if (($ctr % 50) === 0) {
             $tbl .= '<tr>
                 <td align="right"><font size="8">PAGE TOTAL:</font></td>
-                <td align="right"><font size="8">'.(int)$pcs.' PCS.</font></td>
+                <td align="right"><font size="8">'.(int) $pcs.' PCS.</font></td>
                 <td align="right"><font size="8">'.number_format($pageQty, 2).'</font></td>
                 <td align="right"><font size="8">'.number_format($pageLiens, 2).'</font></td>
                 <td align="right" colspan="4"></td>
@@ -1734,12 +1904,11 @@ public function quedanListingPdf(Request $req, string $receiptNo)
 
             $tbl .= '<br pagebreak="true"/>';
 
-            // repeat header + column headers after page break
             $tbl .= '<tr><td colspan="8"></td></tr>';
             $tbl .= '<tr>
-                <td colspan="8"><font size="8">'
-                .'Shipper:  '.htmlspecialchars($shipper, ENT_QUOTES, 'UTF-8').'<br>'
-                .'Buyer:  '.htmlspecialchars($buyer, ENT_QUOTES, 'UTF-8').'<br>'
+                <td colspan="8"><font size="9"><b>'
+                .htmlspecialchars($companyHeader, ENT_QUOTES, 'UTF-8').'</b><br>'
+                .'</font><font size="8">'
                 .'Quedan Listings (CY'.htmlspecialchars($cropYearDisplay, ENT_QUOTES, 'UTF-8').')<br>'
                 .htmlspecialchars($currentDate, ENT_QUOTES, 'UTF-8').'<br>'
                 .'RR No.:  '.htmlspecialchars($receiptNo, ENT_QUOTES, 'UTF-8').'<br>'
@@ -1757,17 +1926,15 @@ public function quedanListingPdf(Request $req, string $receiptNo)
                 <td width="33%" align="left"><font size="8">PLANTER</font></td>
             </tr>';
 
-            // reset page totals
             $pageQty = 0.0;
             $pageLiens = 0.0;
             $ctr = 0;
         }
     }
 
-    // final page total + grand total
     $tbl .= '<tr>
         <td align="right"><font size="8">PAGE TOTAL:</font></td>
-        <td align="right"><font size="8">'.(int)$pcs.' PCS.</font></td>
+        <td align="right"><font size="8">'.(int) $pcs.' PCS.</font></td>
         <td align="right"><font size="8">'.number_format($pageQty, 2).'</font></td>
         <td align="right"><font size="8">'.number_format($pageLiens, 2).'</font></td>
         <td align="right" colspan="4"></td>
@@ -1775,7 +1942,7 @@ public function quedanListingPdf(Request $req, string $receiptNo)
 
     $tbl .= '<tr>
         <td align="right"><font size="8">GRAND TOTAL:</font></td>
-        <td align="right"><font size="8">'.(int)$totalPcs.' PCS.</font></td>
+        <td align="right"><font size="8">'.(int) $totalPcs.' PCS.</font></td>
         <td align="right"><font size="8">'.number_format($grandQty, 2).'</font></td>
         <td align="right"><font size="8">'.number_format($grandLiens, 2).'</font></td>
         <td align="right" colspan="4"></td>
@@ -1820,55 +1987,64 @@ public function quedanListingInsStoPdf(Request $req, string $receiptNo)
         ->where('pbn_number', $entry->pbn_number)
         ->first();
 
-    $sugarType   = strtoupper((string)($pbn?->sugar_type ?? ''));
-    $cropYearRaw = (string)($pbn?->crop_year ?? '');
+    $cropYearRaw = (string) ($pbn?->crop_year ?? '');
 
-    // legacy-like crop year display (CY2022-2023)
     $cropYearDisplay = $cropYearRaw;
     if ($cropYearDisplay !== '' && strpos($cropYearDisplay, '-') === false) {
         if (preg_match('/^\d{4}$/', $cropYearDisplay)) {
-            $cropYearDisplay = $cropYearDisplay . '-' . ((int)$cropYearDisplay + 1);
+            $cropYearDisplay = $cropYearDisplay . '-' . ((int) $cropYearDisplay + 1);
         }
     }
 
-    // 3) Load receiving details (quedan lines)
+    // 3) Load receiving details
     $rows = ReceivingDetail::query()
         ->where('receiving_entry_id', $entry->id)
         ->where('receipt_no', $entry->receipt_no)
         ->orderBy('row', 'asc')
         ->get();
 
-    // 4) Resolve mill prefix + millmark (same approach as regular listing)
-    $millName = (string)($entry->mill ?? '');
-    $millRow = MillList::query()
-        ->where('company_id', $companyId)
-        ->where('mill_name', $millName)
+    // 4) Resolve MillMark = mill_code
+    $millCode = '';
+    $pbnDetail = PbnEntryDetail::query()
+        ->where('pbn_number', $entry->pbn_number)
+        ->where('row', $entry->item_number)
         ->first();
 
-    $prefix   = (string)($millRow->prefix ?? '');
-    $millMark = $prefix !== '' ? $prefix : $millName;
-
-    // 5) Header company text (legacy)
-    if ($companyId === 2) {
-        $shipper = 'AMEROP PHILIPPINES, INC.';
-        $buyer   = 'AMEROP AMERICAS CORP';
-    } else {
-        $shipper = 'SUCDEN PHILIPPINES, INC.';
-        $buyer   = 'SUCDEN AMERICAS CORP';
+    if ($pbnDetail && !empty($pbnDetail->mill_code)) {
+        $millCode = (string) $pbnDetail->mill_code;
     }
+
+    if ($millCode === '') {
+        $millName = (string) ($entry->mill ?? '');
+
+        $millRow = MillList::query()
+            ->where('company_id', $companyId)
+            ->where('mill_name', $millName)
+            ->first();
+
+        $millCode = (string) ($millRow->mill_code ?? '');
+    }
+
+    if ($millCode === '') {
+        $millCode = (string) ($entry->mill ?? '');
+    }
+
+    $millMark = $millCode;
 
     $currentDate = date('M d, Y');
 
-    // 6) Resolve rates by crop_year (matches your existing logic)
-    $rate = $this->resolveMillRateByCropYear($millName, $companyId, (string)$cropYearRaw);
-    $insuranceRate = $entry->no_insurance ? 0.0 : (float)($rate['insurance_rate'] ?? 0);
-    $storageRate   = $entry->no_storage   ? 0.0 : (float)($rate['storage_rate'] ?? 0);
-    $daysFree      = (int)  ($rate['days_free'] ?? 0);
+    $companyHeader = ($companyId === 2)
+        ? 'AMEROP PHILIPPINES, INC.'
+        : 'SUCDEN PHILIPPINES, INC.';    
+    // 6) Resolve rates
+    $rate = $this->resolveMillRateByCropYear((string) $entry->mill, $companyId, (string) $cropYearRaw);
+    $insuranceRate = $entry->no_insurance ? 0.0 : (float) ($rate['insurance_rate'] ?? 0);
+    $storageRate   = $entry->no_storage   ? 0.0 : (float) ($rate['storage_rate'] ?? 0);
+    $daysFree      = (int) ($rate['days_free'] ?? 0);
 
-    // legacy uses receiptDate vs row.weekEnding
-    $receiptDateISO = $entry->receipt_date ? date('Y-m-d', strtotime((string)$entry->receipt_date)) : null;
+    $receiptDateISO = $entry->receipt_date ? date('Y-m-d', strtotime((string) $entry->receipt_date)) : null;
 
-    // 7) TCPDF setup (same as regular listing)
+    // 7) TCPDF setup
     if (!class_exists('\TCPDF', false)) {
         $tcpdfPath = base_path('vendor/tecnickcom/tcpdf/tcpdf.php');
         if (file_exists($tcpdfPath)) require_once $tcpdfPath;
@@ -1883,28 +2059,33 @@ public function quedanListingInsStoPdf(Request $req, string $receiptNo)
     $pdf->AddPage('P', 'LETTER');
     $pdf->SetFont('helvetica', '', 7);
 
-    // ---- helpers ----
     $formatDateMDY = function ($v) {
         if (!$v) return '';
-        try { return date('m/d/Y', strtotime((string)$v)); } catch (\Throwable $e) { return ''; }
+        try {
+            return date('m/d/Y', strtotime((string) $v));
+        } catch (\Throwable $e) {
+            return '';
+        }
     };
 
-    // ✅ IMPORTANT: legacy Ins/Storage uses: prefix-000001 (NO sugarType)
-    $formatQuedanNoInsSto = function ($raw) use ($prefix) {
-        $raw = trim((string)$raw);
+    // ✅ corrected: remove 19- / prefix logic, keep numeric padded quedan only
+    $formatQuedanNoInsSto = function ($raw) {
+        $raw = trim((string) $raw);
 
-        // If already formatted "BISCOM-000001" or "XX-000001", keep it
-        if (preg_match('/^[A-Z0-9]+-\d{1,}$/', $raw)) {
-            return $raw;
+        if ($raw === '') return '';
+
+        if (preg_match('/^\d+$/', $raw)) {
+            return str_pad((string) ((int) $raw), 6, '0', STR_PAD_LEFT);
+        }
+
+        if (preg_match('/-(\d+)$/', $raw, $m)) {
+            return str_pad((string) ((int) $m[1]), 6, '0', STR_PAD_LEFT);
         }
 
         $digits = preg_replace('/\D+/', '', $raw);
-        if ($digits === '') $digits = '0';
-        $num = (int)$digits;
+        if ($digits === '') return '';
 
-        // legacy pad to 6
-        $pad = str_pad((string)$num, 6, '0', STR_PAD_LEFT);
-        return $prefix . '-' . $pad;
+        return str_pad((string) ((int) $digits), 6, '0', STR_PAD_LEFT);
     };
 
     $monthsCeilLegacy = function (?string $receiptISO, ?string $weekEndingMDY): int {
@@ -1927,32 +2108,32 @@ public function quedanListingInsStoPdf(Request $req, string $receiptNo)
         return (int) floor($days / 30);
     };
 
-    // 8) Build HTML with legacy paging logic (50 rows/page)
-    $renderHeader = function () use ($shipper, $buyer, $cropYearDisplay, $currentDate, $receiptNo) {
-        return '
-        <tr>
-          <td colspan="10"><font size="8">
-            Shipper:  '.htmlspecialchars($shipper, ENT_QUOTES, 'UTF-8').'<br>
-            Buyer:  '.htmlspecialchars($buyer, ENT_QUOTES, 'UTF-8').'<br>
-            Quedan Listings (CY'.htmlspecialchars($cropYearDisplay, ENT_QUOTES, 'UTF-8').')<br>
-            '.htmlspecialchars($currentDate, ENT_QUOTES, 'UTF-8').'<br>
-            RR No.:  '.htmlspecialchars($receiptNo, ENT_QUOTES, 'UTF-8').'<br>
-          </font></td>
-        </tr>
-        <tr align="center">
-          <td width="15%"><font size="8">MillMark</font></td>
-          <td width="10%"><font size="8">Quedan No.</font></td>
-          <td width="8%"><font size="8">Quantity</font></td>
-          <td width="8%"><font size="8">Liens</font></td>
-          <td width="8%"><font size="8">Insurance</font></td>
-          <td width="8%"><font size="8">Storage</font></td>
-          <td width="8%"><font size="7">Week Ending</font></td>
-          <td width="8%"><font size="8">Date Issued</font></td>
-          <td width="10%"><font size="8">TIN</font></td>
-          <td width="17%" align="left"><font size="8">PLANTER</font></td>
-        </tr>
-        ';
-    };
+$renderHeader = function () use ($cropYearDisplay, $currentDate, $receiptNo, $companyHeader) {
+    return '
+    <tr>
+      <td colspan="10">
+        <font size="9"><b>'.htmlspecialchars($companyHeader, ENT_QUOTES, 'UTF-8').'</b></font><br>
+        <font size="8">
+          Quedan Listings (CY'.htmlspecialchars($cropYearDisplay, ENT_QUOTES, 'UTF-8').')<br>
+          '.htmlspecialchars($currentDate, ENT_QUOTES, 'UTF-8').'<br>
+          RR No.: '.htmlspecialchars($receiptNo, ENT_QUOTES, 'UTF-8').'<br>
+        </font>
+      </td>
+    </tr>
+    <tr align="center">
+      <td width="15%"><font size="8">MillMark</font></td>
+      <td width="10%"><font size="8">Quedan No.</font></td>
+      <td width="8%"><font size="8">Quantity</font></td>
+      <td width="8%"><font size="8">Liens</font></td>
+      <td width="8%"><font size="8">Insurance</font></td>
+      <td width="8%"><font size="8">Storage</font></td>
+      <td width="8%"><font size="7">Week Ending</font></td>
+      <td width="8%"><font size="8">Date Issued</font></td>
+      <td width="10%"><font size="8">TIN</font></td>
+      <td width="17%" align="left"><font size="8">PLANTER</font></td>
+    </tr>
+    ';
+};
 
     $tbl  = '<br><br>';
     $tbl .= '<table border="0" cellpadding="0" cellspacing="1" nobr="true" width="100%">';
@@ -1968,13 +2149,12 @@ public function quedanListingInsStoPdf(Request $req, string $receiptNo)
     $totalPcs   = 0;
 
     foreach ($rows as $r) {
-        $qty   = (float)($r->quantity ?? 0);
-        $liens = (float)($r->liens ?? 0);
+        $qty   = (float) ($r->quantity ?? 0);
+        $liens = (float) ($r->liens ?? 0);
 
         $weekEndingMDY = $formatDateMDY($r->week_ending);
         $dateIssuedMDY = $formatDateMDY($r->date_issued);
 
-        // legacy calc uses receipt_date vs weekEnding
         $monthsIns = $monthsCeilLegacy($receiptDateISO, $weekEndingMDY);
         $monthsSto = $monthsFloorStorageLegacy($receiptDateISO, $weekEndingMDY, $daysFree);
 
@@ -1983,8 +2163,8 @@ public function quedanListingInsStoPdf(Request $req, string $receiptNo)
 
         $quedanNo = $formatQuedanNoInsSto($r->quedan_no ?? '');
 
-        $planterTIN  = (string)($r->planter_tin ?? '');
-        $planterName = (string)($r->planter_name ?? '');
+        $planterTIN  = (string) ($r->planter_tin ?? '');
+        $planterName = (string) ($r->planter_name ?? '');
 
         $ctr++;
         $pcs = $ctr;
@@ -2009,32 +2189,28 @@ public function quedanListingInsStoPdf(Request $req, string $receiptNo)
           <td align="left"><font size="7">'.htmlspecialchars($planterName).'</font></td>
         </tr>';
 
-        // legacy: page total every 50 rows
         if (($ctr % 50) === 0) {
             $tbl .= '<tr>
               <td align="right"><font size="8">PAGE TOTAL:</font></td>
-              <td align="right"><font size="8">'.(int)$pcs.' PCS.</font></td>
+              <td align="right"><font size="8">'.(int) $pcs.' PCS.</font></td>
               <td align="right"><font size="8">'.number_format($pageQty, 2).'</font></td>
               <td align="right"><font size="8">'.number_format($pageLiens, 2).'</font></td>
               <td align="right" colspan="6"></td>
             </tr>';
 
             $tbl .= '<br pagebreak="true"/>';
-
             $tbl .= '<tr><td colspan="10"></td></tr>';
             $tbl .= $renderHeader();
 
-            // reset page totals
             $pageQty   = 0.0;
             $pageLiens = 0.0;
             $ctr = 0;
         }
     }
 
-    // final page total + grand total
     $tbl .= '<tr>
       <td align="right"><font size="8">PAGE TOTAL:</font></td>
-      <td align="right"><font size="8">'.(int)$pcs.' PCS.</font></td>
+      <td align="right"><font size="8">'.(int) $pcs.' PCS.</font></td>
       <td align="right"><font size="8">'.number_format($pageQty, 2).'</font></td>
       <td align="right"><font size="8">'.number_format($pageLiens, 2).'</font></td>
       <td align="right" colspan="6"></td>
@@ -2042,7 +2218,7 @@ public function quedanListingInsStoPdf(Request $req, string $receiptNo)
 
     $tbl .= '<tr>
       <td align="right"><font size="8">GRAND TOTAL:</font></td>
-      <td align="right"><font size="8">'.(int)$totalPcs.' PCS.</font></td>
+      <td align="right"><font size="8">'.(int) $totalPcs.' PCS.</font></td>
       <td align="right"><font size="8">'.number_format($grandQty, 2).'</font></td>
       <td align="right"><font size="8">'.number_format($grandLiens, 2).'</font></td>
       <td align="right" colspan="6"></td>
@@ -2542,7 +2718,41 @@ public function quedanListingInsuranceStorageExcel(Request $req, ?string $receip
 }
 
 
+public function deleteDetail(Request $req)
+{
+    $companyId = $this->companyIdFromRequest($req);
 
+    $data = $req->validate([
+        'receipt_no' => 'required|string',
+        'id'         => 'required|integer',
+    ]);
+
+    $entry = ReceivingEntry::query()
+        ->where('company_id', $companyId)
+        ->where('receipt_no', $data['receipt_no'])
+        ->first();
+
+    if (!$entry) {
+        return response()->json(['message' => 'Receiving entry not found.'], 404);
+    }
+
+    $detail = ReceivingDetail::query()
+        ->where('id', (int) $data['id'])
+        ->where('receiving_entry_id', $entry->id)
+        ->where('receipt_no', $entry->receipt_no)
+        ->first();
+
+    if (!$detail) {
+        return response()->json(['message' => 'Receiving detail not found.'], 404);
+    }
+
+    $detail->delete();
+
+    return response()->json([
+        'message' => 'Receiving detail deleted successfully.',
+        'id'      => (int) $data['id'],
+    ]);
+}
 
 
 

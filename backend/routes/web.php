@@ -68,6 +68,19 @@ use App\Http\Controllers\ReceivingPostingController;
 use App\Http\Controllers\VendorSummaryReportController;
 
 use App\Http\Controllers\BillOfLadingController;
+use App\Http\Controllers\ScheduleOfInventoryController;
+use App\Http\Controllers\ScheduleOfInventoryDetailedController;
+use App\Http\Controllers\EndingInventoryController;
+use App\Http\Controllers\ExportDetailedController;
+use App\Http\Controllers\SummaryOfPurchasesController;
+use App\Http\Controllers\TotalPurchasesController;
+use App\Http\Controllers\TotalPurchasesByMonthController;
+use App\Http\Controllers\TotalPurchasesCalendarYearController;
+use App\Http\Controllers\PurchaseVarianceReportController;
+use App\Http\Controllers\ExportSummaryController;
+use App\Http\Controllers\TotalPurchasesBySupplierWithDrilldownController;
+use App\Http\Controllers\MonthlySummaryController;
+
 
 // VENDOR SUMMARY REPORT (stateful)
 Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
@@ -111,6 +124,8 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 
     // Status / token for a specific record (module + record_id)
     Route::get('/approvals/status', [ApprovalController::class, 'statusBySubject']);
+    Route::get('/approvals/my-approved-edit-alerts', [ApprovalController::class, 'myApprovedEditAlerts']);    
+    
     Route::get('/approvals/status-by-subject', [ApprovalController::class, 'statusBySubject']);
 
     // Mark an approved request as consumed
@@ -166,6 +181,12 @@ Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
 // --- Particulars dropdown (company-scoped) ---
 Route::get('/pbn/particulars', [PbnEntryController::class, 'particulars']);
     Route::get('/pbn/terms', [PbnEntryController::class, 'terms']);
+
+    Route::get('/pbn/terms-admin', [PbnEntryController::class, 'termsAdmin']);
+    Route::post('/pbn/terms-admin', [PbnEntryController::class, 'storeTerm']);
+    Route::put('/pbn/terms-admin/{id}', [PbnEntryController::class, 'updateTerm'])->whereNumber('id');
+    Route::patch('/pbn/terms-admin/{id}/active', [PbnEntryController::class, 'toggleTermActive'])->whereNumber('id');    
+
     // Show a specific PBN (used by handlePbnSelect)
     Route::get('/pbn/{id}', [PbnEntryController::class, 'show'])->whereNumber('id');
 
@@ -603,9 +624,51 @@ Route::middleware(['web'])->group(function () {
     //Route::get('/api/sugar-types', [SugarTypeController::class, 'index']);
     //Route::get('/api/crop-years', [CropYearController::class, 'index']);
     //Route::get('/api/vendors', [VendorListController::class, 'index']);
-
+Route::get('/api/schedule-of-inventory/crop-years', [ScheduleOfInventoryController::class, 'cropYears']);
+Route::get('/api/schedule-of-inventory/generate', [ScheduleOfInventoryController::class, 'generate']);
     // Auto-generated PBN Number
     //Route::get('/api/pbn/generate-pbn-number', [ApplicationSettingsController::class, 'getNextPbnNumber']);
+Route::get('/api/schedule-of-inventory-detailed/mills', [ScheduleOfInventoryDetailedController::class, 'mills']);
+Route::get('/api/schedule-of-inventory-detailed/crop-years', [ScheduleOfInventoryDetailedController::class, 'cropYears']);
+Route::get('/api/schedule-of-inventory-detailed/generate', [ScheduleOfInventoryDetailedController::class, 'generate']);
+
+Route::get('/api/ending-inventory/mills', [EndingInventoryController::class, 'mills']);
+Route::get('/api/ending-inventory/crop-years', [EndingInventoryController::class, 'cropYears']);
+Route::get('/api/ending-inventory/generate', [EndingInventoryController::class, 'generate']);
+
+Route::get('/api/export-detailed/vessels', [ExportDetailedController::class, 'vessels']);
+Route::get('/api/export-detailed/crop-years', [ExportDetailedController::class, 'cropYears']);
+Route::get('/api/export-detailed/generate', [ExportDetailedController::class, 'generate']);
+
+Route::get('/api/summary-of-purchases/sugar-types', [SummaryOfPurchasesController::class, 'sugarTypes']);
+Route::get('/api/summary-of-purchases/crop-years', [SummaryOfPurchasesController::class, 'cropYears']);
+Route::get('/api/summary-of-purchases/generate', [SummaryOfPurchasesController::class, 'generate']);
+
+Route::get('/api/total-purchases/sugar-types', [TotalPurchasesController::class, 'sugarTypes']);
+Route::get('/api/total-purchases/crop-years', [TotalPurchasesController::class, 'cropYears']);
+Route::get('/api/total-purchases/generate', [TotalPurchasesController::class, 'generate']);
+
+Route::get('/api/total-purchases-by-month/sugar-types', [TotalPurchasesByMonthController::class, 'sugarTypes']);
+Route::get('/api/total-purchases-by-month/crop-years', [TotalPurchasesByMonthController::class, 'cropYears']);
+Route::get('/api/total-purchases-by-month/generate', [TotalPurchasesByMonthController::class, 'generate']);
+
+Route::get('/api/total-purchases-calendar-year/sugar-types', [TotalPurchasesCalendarYearController::class, 'sugarTypes']);
+Route::get('/api/total-purchases-calendar-year/crop-years', [TotalPurchasesCalendarYearController::class, 'cropYears']);
+Route::get('/api/total-purchases-calendar-year/generate', [TotalPurchasesCalendarYearController::class, 'generate']);
+
+Route::get('/api/purchase-variance-report/sugar-types', [PurchaseVarianceReportController::class, 'sugarTypes']);
+Route::get('/api/purchase-variance-report/crop-years', [PurchaseVarianceReportController::class, 'cropYears']);
+Route::get('/api/purchase-variance-report/generate', [PurchaseVarianceReportController::class, 'generate']);
+
+Route::get('/api/export-summary/crop-years', [ExportSummaryController::class, 'cropYears']);
+Route::get('/api/export-summary/generate', [ExportSummaryController::class, 'generate']);
+
+Route::get('/api/total-purchases-by-supplier-with-drilldown/crop-years', [TotalPurchasesBySupplierWithDrilldownController::class, 'cropYears']);
+Route::get('/api/total-purchases-by-supplier-with-drilldown/generate', [TotalPurchasesBySupplierWithDrilldownController::class, 'generate']);
+
+Route::get('/api/monthly-summary/years', [MonthlySummaryController::class, 'years']);
+Route::get('/api/monthly-summary/months', [MonthlySummaryController::class, 'months']);
+Route::get('/api/monthly-summary/generate', [MonthlySummaryController::class, 'generate']);
 
     // Forms
     Route::get('/api/pbn/form-pdf/{id?}', [PbnEntryController::class, 'formPdf']);
@@ -627,6 +690,7 @@ Route::middleware(['web'])->group(function () {
     Route::post('/api/receiving/update-date', [ReceivingController::class, 'updateDate']);
     Route::post('/api/receiving/update-gl', [ReceivingController::class, 'updateGL']);
     Route::post('/api/receiving/update-assoc-others', [ReceivingController::class, 'updateAssocOthers']);
+    Route::post('/api/receiving/delete-detail', [ReceivingController::class, 'deleteDetail']);
     Route::post('/api/receiving/update-mill', [ReceivingController::class, 'updateMillName']);
 
     // helpers reused from PBN & mills
@@ -644,6 +708,7 @@ Route::get('/api/receiving/quedan-listing-pdf/{receiptNo}', [ReceivingController
 Route::get('/api/receiving/quedan-listing-inssto-pdf/{receiptNo}', [ReceivingController::class, 'quedanListingInsStoPdf']);
 Route::get('/api/receiving/quedan-listing-excel/{receiptNo}', [ReceivingController::class, 'quedanListingExcel']);
 Route::get('/api/receiving/quedan-listing-insurance-storage-excel/{receiptNo?}', [ReceivingController::class, 'quedanListingInsuranceStorageExcel']);
+
 // Bill of Lading
 Route::get('/api/bill-of-lading/po-list', [BillOfLadingController::class, 'poList']);
 Route::get('/api/bill-of-lading/po-items', [BillOfLadingController::class, 'poItems']);
@@ -664,6 +729,8 @@ Route::post('/api/bill-of-lading/process-entry', [BillOfLadingController::class,
     Route::get('/api/sales/generate-cs-number', [SalesJournalController::class, 'generateCsNumber']);
     Route::post('/api/sales/save-main', [SalesJournalController::class, 'storeMain']);
     Route::post('/api/sales/save-detail', [SalesJournalController::class, 'saveDetail']);
+    
+    Route::post('/api/sales/save-detail', [SalesJournalController::class, 'saveDetail']);
     Route::post('/api/sales/update-detail', [SalesJournalController::class, 'updateDetail']);
     Route::post('/api/sales/delete-detail', [SalesJournalController::class, 'deleteDetail']);
     Route::get('/api/sales/list', [SalesJournalController::class, 'list']);
@@ -679,6 +746,7 @@ Route::post('/api/bill-of-lading/process-entry', [BillOfLadingController::class,
 
     // Print/download
     Route::get('/api/sales/form-pdf/{id}', [SalesJournalController::class, 'formPdf']);
+Route::get('/api/sales/sales-invoice-pdf/{id}', [SalesJournalController::class, 'salesInvoicePdf']);  
     Route::get('/api/sales/check-pdf/{id}', [SalesJournalController::class, 'checkPdf']);
     Route::get('/api/sales/form-excel/{id}', [SalesJournalController::class, 'formExcel']);
 

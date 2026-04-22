@@ -409,8 +409,8 @@ public function statusBySubject(\Illuminate\Http\Request $req)
     try {
         $module    = (string) $req->query('module', '');
         $recordId  = (int) $req->query('record_id', 0);
-        $companyId = $req->query('company_id'); // optional
-        $action    = (string) $req->query('action', ''); // 🔹 optional, e.g. 'edit'
+        $companyId = $req->query('company_id');
+        $action    = strtolower(trim((string) $req->query('action', '')));
 
         if ($module === '' || $recordId <= 0) {
             return response()->json(['exists' => false]);
@@ -424,53 +424,185 @@ public function statusBySubject(\Illuminate\Http\Request $req)
             $q->where('company_id', $companyId);
         }
 
-        $action = (string) $req->query('action', '');
         if ($action !== '') {
-            $q->whereRaw('LOWER(action) = ?', [strtolower($action)]);
+            $q->whereRaw('LOWER(action) = ?', [$action]);
         }
 
         $row = $q->orderByDesc('id')->first();
+
+        \Log::info('APPROVAL_STATUS_LOOKUP_PRIMARY', [
+            'module'     => $module,
+            'record_id'  => $recordId,
+            'company_id' => $companyId,
+            'action'     => $action,
+            'row'        => $row,
+        ]);
 
         // Fallback without company filter (legacy)
         if (!$row && !is_null($companyId) && $companyId !== '') {
             $q2 = \DB::table('approvals')
                 ->where('module', $module)
                 ->where('record_id', $recordId);
+
             if ($action !== '') {
-                $q2->where('action', $action);
+                $q2->whereRaw('LOWER(action) = ?', [$action]);
             }
+
             $row = $q2->orderByDesc('id')->first();
+
+            \Log::info('APPROVAL_STATUS_LOOKUP_FALLBACK', [
+                'module'     => $module,
+                'record_id'  => $recordId,
+                'company_id' => $companyId,
+                'action'     => $action,
+                'row'        => $row,
+            ]);
         }
 
-        if (!$row) return response()->json(['exists' => false]);
+        if (!$row) {
+            return response()->json(['exists' => false]);
+        }
 
         $now       = now();
         $status    = strtolower((string) $row->status);
         $expiresAt = $row->expires_at ? \Carbon\Carbon::parse($row->expires_at) : null;
         $consumed  = !empty($row->consumed_at);
 
+        // ✅ IMPORTANT:
+        // approved edit requests stay active even when expires_at is NULL
         $active = $status === 'approved'
-            && $expiresAt && $now->lt($expiresAt)
-            && !$consumed;
+            && !$consumed
+            && (!$expiresAt || $now->lt($expiresAt));
 
         return response()->json([
-            'exists'             => true,
-            'id'                 => $row->id,
-            'status'             => $status,
-            'reason'             => $row->reason ?? null,
-            'approved_at'        => $row->approved_at ?? null,
-            'expires_at'         => $expiresAt?->toISOString(),
-            'approved_active'    => $active,
-            'first_edit_at'      => $row->first_edit_at,
-            'approval_token'     => $row->approval_token ?? null,
-            'edit_window_minutes'=> $row->edit_window_minutes ?? null,
-            'action'             => $row->action ?? null,
+            'exists'              => true,
+            'id'                  => $row->id,
+            'status'              => $status,
+            'reason'              => $row->reason ?? null,
+            'approved_at'         => $row->approved_at ?? null,
+            'expires_at'          => $expiresAt?->toISOString(),
+            'approved_active'     => $active,
+            'first_edit_at'       => $row->first_edit_at,
+            'approval_token'      => $row->approval_token ?? null,
+            'edit_window_minutes' => $row->edit_window_minutes ?? null,
+            'action'              => $row->action ?? null,
         ]);
     } catch (\Throwable $e) {
         \Log::warning('approvals.status error', ['err' => $e->getMessage()]);
         return response()->json(['exists' => false], 200);
     }
 }
+
+public function myApprovedEditAlerts(\Illuminate\Http\Request $req)
+{
+    try {
+        $user = $this->userFromAnyGuard($req);
+        if (!$user?->id) {
+            return response()->json(['items' => []]);
+        }
+
+        $companyId = $req->query('company_id');
+
+        $rows = \DB::table('approvals')
+            ->where('requester_id', (int) $user->id)
+            ->whereRaw('LOWER(action) = ?', ['edit'])
+            ->whereRaw('LOWER(status) = ?', ['approved'])
+            ->whereNull('consumed_at')
+            ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
+            ->orderByDesc('id')
+            ->limit(20)
+            ->get([
+                'id',
+                'module',
+                'record_id',
+                'requester_id',
+                'approved_at',
+                'expires_at',
+                'company_id',
+                'reason',
+            ]);
+
+        $items = collect($rows)
+            ->filter(function ($row) {
+                // if expires_at is null, treat as still active
+                if (empty($row->expires_at)) return true;
+                return now()->lt(\Carbon\Carbon::parse($row->expires_at));
+            })
+            ->values()
+            ->map(function ($row) {
+                $module = strtolower(trim((string) $row->module));
+                $recordId = (int) ($row->record_id ?? 0);
+                $companyId = (int) ($row->company_id ?? 0);
+
+                $moduleLabel = match ($module) {
+                    'sales_journal'      => 'Sales Journal',
+                    'cash_receipts',
+                    'cash_receipt'       => 'Cash Receipts',
+                    'cash_disbursement',
+                    'cash_disbursements' => 'Cash Disbursement',
+                    'purchase_journal'   => 'Purchase Journal',
+                    'general_accounting' => 'General Accounting',
+                    default              => ucwords(str_replace('_', ' ', (string) $row->module)),
+                };
+
+                $recordNo = null;
+                $recordLabel = null;
+
+                if ($module === 'sales_journal') {
+                    $recordLabel = 'Sales No.';
+                    $recordNo = \DB::table('cash_sales')
+                        ->where('id', $recordId)
+                        ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                        ->value('cs_no');
+                } elseif (in_array($module, ['cash_receipts', 'cash_receipt'], true)) {
+                    $recordLabel = 'Receipt No.';
+                    $recordNo = \DB::table('cash_receipts')
+                        ->where('id', $recordId)
+                        ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                        ->value('cr_no');
+                } elseif (in_array($module, ['cash_disbursement', 'cash_disbursements'], true)) {
+                    $recordLabel = 'Disbursement No.';
+                    $recordNo = \DB::table('cash_disbursement')
+                        ->where('id', $recordId)
+                        ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                        ->value('cd_no');
+                } elseif ($module === 'purchase_journal') {
+                    $recordLabel = 'Purchase No.';
+                    $recordNo = \DB::table('cash_purchase')
+                        ->where('id', $recordId)
+                        ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                        ->value('cp_no');
+                } elseif ($module === 'general_accounting') {
+                    $recordLabel = 'General No.';
+                    $recordNo = \DB::table('general_accounting')
+                        ->where('id', $recordId)
+                        ->when($companyId > 0, fn ($q) => $q->where('company_id', $companyId))
+                        ->value('ga_no');
+                }
+
+                return [
+                    'id'           => $row->id,
+                    'module'       => $row->module,
+                    'module_label' => $moduleLabel,
+                    'record_id'    => $row->record_id,
+                    'record_label' => $recordLabel,
+                    'record_no'    => $recordNo,
+                    'approved_at'  => $row->approved_at,
+                    'reason'       => $row->reason,
+                ];
+            });
+
+        return response()->json([
+            'items' => $items,
+            'count' => $items->count(),
+        ]);
+    } catch (\Throwable $e) {
+        \Log::warning('approvals.myApprovedEditAlerts error', ['err' => $e->getMessage()]);
+        return response()->json(['items' => [], 'count' => 0], 200);
+    }
+}
+
+
 
 public function releaseBySubject(Request $req)
 {
@@ -516,67 +648,108 @@ public function releaseBySubject(Request $req)
      */
 public function approve(Request $request, int $id)
 {
-    // 1) Optional minutes for EDIT approvals only
-    $data = $request->validate([
-        'edit_window_minutes' => ['nullable', 'integer', 'min:1', 'max:240'],
-    ]);
-
-    // 2) Load approval + permission
     $approval = Approval::findOrFail($id);
     $this->authorizeManage($approval);
 
     $now    = now();
-    $action = strtoupper((string) ($approval->action ?? 'EDIT'));
+    $action = strtoupper(trim((string) ($approval->action ?? 'EDIT')));
+    $user   = $this->userFromAnyGuard($request);
 
-    // Who approved
-    $user = $this->userFromAnyGuard($request);
+    \Log::info('APPROVAL_APPROVE_ENTER', [
+        'approval_id' => $id,
+        'before'      => DB::table('approvals')->where('id', $id)->first(),
+        'action'      => $action,
+        'user_id'     => $user?->id,
+        'payload'     => $request->all(),
+    ]);
 
-    // Base fields for all approvals
-    $baseUpdate = [
-        'status'      => 'approved',
-        'approved_by' => $user?->id,
-        'approved_at' => $now,
-        'updated_at'  => $now,
-    ];
+    DB::beginTransaction();
 
-    if ($action === '' || $action === 'EDIT') {
-        // ─────────────────────────────────────────────
-        // EDIT → has an edit window (same behavior as GA)
-        // ─────────────────────────────────────────────
-        $minutes = $data['edit_window_minutes'] ?? 60;
-        $expires = $now->copy()->addMinutes($minutes);
+    try {
+        if ($action === '' || $action === 'EDIT') {
+            // ✅ No end-of-day time limit
+            // edit_window_minutes must NOT be NULL because column is NOT NULL
+            $affected = DB::table('approvals')
+                ->where('id', $id)
+                ->update([
+                    'status'              => 'approved',
+                    'approved_by'         => $user?->id,
+                    'approved_at'         => $now,
+                    'edit_window_minutes' => 0,
+                    'expires_at'          => null,
+                    'consumed_at'         => null,
+                    'updated_at'          => $now,
+                ]);
 
-        $approval->fill(array_merge($baseUpdate, [
-            'edit_window_minutes' => $minutes,
-            'expires_at'          => $expires,
-            'consumed_at'         => null,   // still usable until released/expired
-        ]));
-        $approval->save();
+            $after = DB::table('approvals')->where('id', $id)->first();
+
+            \Log::info('APPROVAL_APPROVE_EDIT_UPDATED', [
+                'approval_id' => $id,
+                'affected'    => $affected,
+                'after'       => $after,
+            ]);
+
+            DB::commit();
+
+            return response()->json([
+                'ok'       => true,
+                'affected' => $affected,
+                'approval' => $after,
+            ]);
+        }
+
+        $affected = DB::table('approvals')
+            ->where('id', $id)
+            ->update([
+                'status'              => 'approved',
+                'approved_by'         => $user?->id,
+                'approved_at'         => $now,
+                'edit_window_minutes' => 0,
+                'expires_at'          => null,
+                'consumed_at'         => $now,
+                'updated_at'          => $now,
+            ]);
+
+        $after = DB::table('approvals')->where('id', $id)->first();
+
+        \Log::info('APPROVAL_APPROVE_ONE_SHOT_UPDATED', [
+            'approval_id' => $id,
+            'affected'    => $affected,
+            'after'       => $after,
+        ]);
+
+        $fresh = Approval::findOrFail($id);
+        $this->applyModuleAction($fresh, $request);
+
+        \Log::info('APPROVAL_APPROVE_ONE_SHOT_ACTION_APPLIED', [
+            'approval_id' => $id,
+            'module'      => $fresh->module,
+            'action'      => $fresh->action,
+        ]);
+
+        DB::commit();
 
         return response()->json([
-            'ok'         => true,
-            'expires_at' => $expires->toISOString(),
+            'ok'       => true,
+            'affected' => $affected,
+            'approval' => $after,
         ]);
+    } catch (\Throwable $e) {
+        DB::rollBack();
+
+        \Log::error('APPROVAL_APPROVE_FAILED', [
+            'approval_id' => $id,
+            'error'       => $e->getMessage(),
+            'trace_line'  => $e->getLine(),
+            'trace_file'  => $e->getFile(),
+        ]);
+
+        return response()->json([
+            'message' => 'Approval failed.',
+            'error'   => $e->getMessage(),
+        ], 500);
     }
-
-    // ─────────────────────────────────────────────
-    // CANCEL / DELETE (or other one-shot actions)
-    // → NO edit window, apply immediately
-    // ─────────────────────────────────────────────
-    $approval->fill(array_merge($baseUpdate, [
-        'edit_window_minutes' => 0,   // ❗ MUST NOT be NULL
-        'expires_at'          => null,
-        'consumed_at'         => $now,
-    ]));
-
-    $approval->save();
-
-    // Apply module-specific side-effects (e.g. update cash_sales)
-$this->applyModuleAction($approval, $request);
-
-    return response()->json(['ok' => true]);
 }
-
 
 /**
  * Apply the side-effect of an approved action to its module/record.
@@ -923,7 +1096,6 @@ private function applyModuleAction(Approval $approval, Request $request): void
      */
 public function reject(Request $request, int $id)
 {
-    // 1) Load row from the approvals table via Approval model
     $req = Approval::find($id);
     if (!$req) {
         return response()->json([
@@ -931,13 +1103,11 @@ public function reject(Request $request, int $id)
         ], 404);
     }
 
-    // 2) Supervisor / admin permission check
     $this->authorizeManage($req);
 
     $user = $this->userFromAnyGuard($request);
     $now  = now();
 
-    // 3) Only pending can be rejected
     if ($req->status !== 'pending') {
         return response()->json([
             'message' => 'Already processed',
@@ -945,21 +1115,20 @@ public function reject(Request $request, int $id)
         ], 409);
     }
 
-    // 4) Apply reject update
-    $update = [
-        'status'      => 'rejected',
-        'approved_by' => $user?->id,
-        'updated_at'  => $now,
-    ];
+    DB::table('approvals')
+        ->where('id', $id)
+        ->update([
+            'status'           => 'rejected',
+            'approved_by'      => $user?->id,
+            'response_message' => $request->filled('response_message')
+                ? $request->input('response_message')
+                : DB::raw('response_message'),
+            'updated_at'       => $now,
+        ]);
 
-    // optional supervisor note
-    if ($request->filled('response_message')) {
-        $update['response_message'] = $request->input('response_message');
-    }
-
-    $req->update($update);
-
-    return response()->json($req->fresh());
+    return response()->json(
+        DB::table('approvals')->where('id', $id)->first()
+    );
 }
 
 
@@ -1056,6 +1225,17 @@ public function inbox(Request $req)
 
         return $row;
     })->values();
+
+    \Log::info('APPROVAL_INBOX_ROWS', [
+        'status'      => $status,
+        'company_id'  => $companyId,
+        'search'      => $search,
+        'page'        => $page,
+        'per_page'    => $perPage,
+        'total'       => $total,
+        'row_ids'     => $rows->pluck('id')->values()->all(),
+        'row_statuses'=> $rows->map(fn($r) => ['id' => $r->id, 'status' => $r->status, 'action' => $r->action])->values()->all(),
+    ]);
 
     return response()->json([
         'data'       => $rows,

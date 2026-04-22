@@ -921,44 +921,7 @@ if (in_array((string)$main->is_cancel, ['c','d','y'], true)) {
  */
 public function updateMainNoApproval(Request $req)
 {
-    $data = $req->validate([
-        'id'           => ['required','integer','exists:general_accounting,id'],
-        'gen_acct_date'=> ['required','date'],
-        'explanation'  => ['required','string','max:1000'],
-    ]);
-
-    $main = GeneralAccounting::findOrFail($data['id']);
-
-    // ❗ safety rule (same intent as Cash Disbursement):
-    // cannot update cancelled or deleted
-    if (in_array($main->is_cancel, ['c','d','y'], true)) {
-        abort(403, 'Cancelled or deleted journal cannot be updated.');
-    }
-
-if (!empty($main->exported_at)) {
-    abort(403, 'Exported journal cannot be modified.');
-}
-
-
-$update = [
-    'gen_acct_date' => $data['gen_acct_date'],
-    'explanation'   => $data['explanation'],
-];
-
-// ✅ If workstation_id is still empty (older records), set it to client IP once
-if (empty($main->workstation_id)) {
-    $update['workstation_id'] = (string) $req->ip();
-}
-
-$main->update($update);
-
-
-    return response()->json([
-        'ok'            => true,
-        'id'            => $main->id,
-        'gen_acct_date' => $main->gen_acct_date,
-        'explanation'   => $main->explanation,
-    ]);
+    abort(403, 'Direct header editing without approval is disabled for General Accounting.');
 }
 
 
@@ -989,16 +952,17 @@ protected function requireEditApproval(int $transactionId): \stdClass
         abort(403, 'Supervisor approval required for editing this journal entry.');
     }
 
-    // Check expiry
     $now = now();
-    if ($row->expires_at) {
+
+    // ✅ No end-of-day limit:
+    // if expires_at is null, approval stays active until released/consumed
+    if (!empty($row->expires_at)) {
         $expires = \Carbon\Carbon::parse($row->expires_at);
         if ($now->gte($expires)) {
             abort(403, 'Edit approval has expired. Please request a new approval.');
         }
     }
 
-    // First time used? mark first_edit_at
     if (empty($row->first_edit_at)) {
         DB::table('approvals')->where('id', $row->id)->update([
             'first_edit_at' => $now,

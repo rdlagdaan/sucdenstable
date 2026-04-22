@@ -370,24 +370,8 @@ class BuildGeneralLedgerTaxReport implements ShouldQueue
             $acctInput = 0.0;
             $acctEwt = 0.0;
 
-            $emitMonthSubtotal = function () use (&$html, $money, &$monthDebit, &$monthCredit, &$monthInput, &$monthEwt) {
-                $html .= "
-<tr>
-  <td colspan=\"6\"></td>
-  <td align=\"right\">____________</td>
-  <td align=\"right\">____________</td>
-  <td align=\"right\">____________</td>
-  <td align=\"right\">____________</td>
-</tr>
-<tr>
-  <td colspan=\"6\"></td>
-  <td align=\"right\"><b>".$money($monthDebit)."</b></td>
-  <td align=\"right\"><b>".$money($monthCredit)."</b></td>
-  <td align=\"right\"><b>".$money($monthInput)."</b></td>
-  <td align=\"right\"><b>".$money($monthEwt)."</b></td>
-</tr>
-<tr><td colspan=\"10\"><br/></td></tr>
-";
+            $emitMonthSubtotal = function () {
+                // Monthly subtotal removed intentionally
             };
 
             foreach ($rows as $r) {
@@ -395,7 +379,6 @@ class BuildGeneralLedgerTaxReport implements ShouldQueue
                 $m  = $dt->format('Y-m');
 
                 if ($monthKey !== null && $monthKey !== $m) {
-                    $emitMonthSubtotal();
                     $monthDebit = $monthCredit = $monthInput = $monthEwt = 0.0;
                 }
                 $monthKey = $m;
@@ -443,7 +426,7 @@ class BuildGeneralLedgerTaxReport implements ShouldQueue
             }
 
             if ($monthKey !== null) {
-                $emitMonthSubtotal();
+                // Monthly subtotal removed intentionally
             }
 
             $html .= "
@@ -560,14 +543,6 @@ class BuildGeneralLedgerTaxReport implements ShouldQueue
                 $m  = $dt->format('Y-m');
 
                 if ($monthKey !== null && $monthKey !== $m) {
-                    $row++;
-                    $sheet->setCellValue("F{$row}", $monthDebit);
-                    $sheet->setCellValue("G{$row}", $monthCredit);
-                    $sheet->setCellValue("H{$row}", $monthInput);
-                    $sheet->setCellValue("I{$row}", $monthEwt);
-                    $bold("F{$row}:I{$row}");
-                    $row += 2;
-
                     $monthDebit = $monthCredit = $monthInput = $monthEwt = 0.0;
                 }
                 $monthKey = $m;
@@ -612,13 +587,7 @@ class BuildGeneralLedgerTaxReport implements ShouldQueue
             }
 
             if ($monthKey !== null) {
-                $row++;
-                $sheet->setCellValue("F{$row}", $monthDebit);
-                $sheet->setCellValue("G{$row}", $monthCredit);
-                $sheet->setCellValue("H{$row}", $monthInput);
-                $sheet->setCellValue("I{$row}", $monthEwt);
-                $bold("F{$row}:I{$row}");
-                $row += 2;
+                // Monthly subtotal removed intentionally
             }
 
             $sheet->setCellValue("F{$row}", $acctDebit);

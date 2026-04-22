@@ -44,7 +44,18 @@ const ReceiptRegister          = lazy(() => import('./components/accounting/repo
 const TrialBalance             = lazy(() => import('./components/accounting/reports/TrialBalance'));
 const CustomerSummaryReport    = lazy(() => import('./components/accounting/reports/CustomerSummaryReport'));
 const VendorSummaryReport    = lazy(() => import('./components/accounting/reports/VendorSummaryReport'));
-
+const ScheduleOfInventory = lazy(() => import('./components/quedan_tracking/reports/schedule_of_inventory'));
+const ScheduleOfInventoryDetailed = lazy(() => import('./components/quedan_tracking/reports/schedule_of_inventory_detailed'));
+const EndingInventory = lazy(() => import('./components/quedan_tracking/reports/ending_inventory'));
+const ExportDetailed = lazy(() => import('./components/quedan_tracking/reports/export_detailed'));
+const SummaryOfPurchases = lazy(() => import('./components/quedan_tracking/reports/summary_of_purchases'));
+const TotalPurchases = lazy(() => import('./components/quedan_tracking/reports/total_purchases'));
+const TotalPurchasesByMonth = lazy(() => import('./components/quedan_tracking/reports/total_purchases_by_month'));
+const TotalPurchasesCalendarYear = lazy(() => import('./components/quedan_tracking/reports/total_purchases_calendar_year'));
+const PurchaseVarianceReport = lazy(() => import('./components/quedan_tracking/reports/purchase_variance_report'));
+const ExportSummary = lazy(() => import('./components/quedan_tracking/reports/export_summary'));
+const TotalPurchasesBySupplierWithDrilldown = lazy(() => import('./components/quedan_tracking/reports/total_purchases_by_supplier_with_drilldown'));
+const MonthlySummary = lazy(() => import('./components/quedan_tracking/reports/monthly_summary'));
 
 
 const FloatingWindow = lazy(() => import('./components/ui/FloatingWindow'));
@@ -91,7 +102,19 @@ const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>>
   trial_balance: TrialBalance,
   customer_summary_report: CustomerSummaryReport,
   vendor_summary_report: VendorSummaryReport,
-  
+  schedule_of_inventory: ScheduleOfInventory,
+  schedule_of_inventory_detailed: ScheduleOfInventoryDetailed,
+  ending_inventory: EndingInventory,
+  export_detailed: ExportDetailed,
+  summary_of_purchases: SummaryOfPurchases,
+  total_purchases: TotalPurchases,
+  total_purchases_by_month: TotalPurchasesByMonth,
+  total_purchases_calendar_year: TotalPurchasesCalendarYear,
+  purchase_variance_report: PurchaseVarianceReport,
+  export_summary: ExportSummary,
+  total_purchases_by_supplier_with_drilldown: TotalPurchasesBySupplierWithDrilldown,
+  monthly_summary: MonthlySummary,
+
   approvals_center: ApprovalCenter,
   approvals_inbox: ApprovalsInbox,
   approvals_outbox: ApprovalsOutbox,
@@ -142,6 +165,19 @@ export default function Dashboard() {
   const [companyLogo, setCompanyLogo] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
 
+ const [approvalAlerts, setApprovalAlerts] = useState<Array<{
+  id: number;
+  module: string;
+  module_label: string;
+  record_id: number;
+  record_label?: string | null;
+  record_no?: string | null;
+  approved_at?: string | null;
+  reason?: string | null;
+}>>([]);
+const [approvalAlertsOpen, setApprovalAlertsOpen] = useState(false); 
+
+
   // permission toggles for References (wire real values later)
   const [refPerms, setRefPerms] = useState<Record<RefKey, boolean>>({
     accounts: true, banks: true, customers: true, mills: true, planters: true, vendors: true,
@@ -151,6 +187,8 @@ export default function Dashboard() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [refsOpen, setRefsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+
+  const approvalAlertsRef = useRef<HTMLDivElement | null>(null);
 
   // floating windows state
   const [windows, setWindows] = useState<Array<{ id: string; type: RefKey; title: string; minimized?: boolean }>>([]);
@@ -189,17 +227,19 @@ export default function Dashboard() {
   }, []);
 
   // click outside to close menu
-  useEffect(() => {
-    function onDocClick(e: MouseEvent) {
-      if (!menuRef.current) return;
-      if (!menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-        setRefsOpen(false);
-      }
+useEffect(() => {
+  function onDocClick(e: MouseEvent) {
+    if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+      setMenuOpen(false);
+      setRefsOpen(false);
     }
-    document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
-  }, []);
+    if (approvalAlertsRef.current && !approvalAlertsRef.current.contains(e.target as Node)) {
+      setApprovalAlertsOpen(false);
+    }
+  }
+  document.addEventListener('mousedown', onDocClick);
+  return () => document.removeEventListener('mousedown', onDocClick);
+}, []);
 
   useEffect(() => {
     const stored = localStorage.getItem('user');
@@ -229,6 +269,42 @@ export default function Dashboard() {
       }
     })();
   }, [companyId]);
+
+useEffect(() => {
+  if (!companyId) return;
+
+  let cancelled = false;
+
+  const fetchApprovalAlerts = async () => {
+    try {
+      const res = await napi.get('/approvals/my-approved-edit-alerts', {
+        params: { company_id: companyId },
+      });
+      if (!cancelled) {
+        setApprovalAlerts(Array.isArray(res.data?.items) ? res.data.items : []);
+      }
+    } catch {
+      if (!cancelled) setApprovalAlerts([]);
+    }
+  };
+
+  fetchApprovalAlerts();
+
+  const t = window.setInterval(fetchApprovalAlerts, 10000);
+
+  const onFocus = () => fetchApprovalAlerts();
+  const onVis = () => { if (!document.hidden) fetchApprovalAlerts(); };
+
+  window.addEventListener('focus', onFocus);
+  document.addEventListener('visibilitychange', onVis);
+
+  return () => {
+    cancelled = true;
+    window.clearInterval(t);
+    window.removeEventListener('focus', onFocus);
+    document.removeEventListener('visibilitychange', onVis);
+  };
+}, [companyId]);
 
 useEffect(() => {
   const token = localStorage.getItem('token');
@@ -385,8 +461,65 @@ useEffect(() => {
         <div className={`${t.header} text-white px-6 py-3 flex items-center justify-between shadow w-full`}>
           <h1 className="text-lg font-semibold truncate">{selectedSubModuleName}</h1>
 
-          {/* User menu */}
-          <div className="relative" ref={menuRef}>
+          <div className="flex items-center gap-3">
+            {/* Approved edit alerts */}
+            <div className="relative" ref={approvalAlertsRef}>
+              <button
+                type="button"
+                onClick={() => setApprovalAlertsOpen((v) => !v)}
+                className={`relative flex items-center gap-2 rounded-full px-3 py-2 ${t.headerBtn} transition-colors`}
+                title="Approved edit requests"
+              >
+                <span className="text-sm">
+                  {approvalAlerts.length > 0
+                    ? `${approvalAlerts.length} Edit Approval${approvalAlerts.length > 1 ? 's' : ''}`
+                    : 'No Edit Alerts'}
+                </span>
+
+                {approvalAlerts.length > 0 && (
+                  <span className="inline-flex min-w-[20px] items-center justify-center rounded-full bg-amber-400 px-2 py-0.5 text-xs font-bold text-black">
+                    {approvalAlerts.length}
+                  </span>
+                )}
+              </button>
+
+              {approvalAlertsOpen && (
+                <div className="absolute right-0 mt-2 w-96 bg-white text-gray-800 rounded-lg shadow-lg z-50 overflow-hidden">
+                  <div className="px-4 py-3 border-b border-gray-200 font-semibold">
+                    Approved Edit Requests
+                  </div>
+
+                  {approvalAlerts.length === 0 ? (
+                    <div className="px-4 py-3 text-sm text-gray-500">
+                      No approved edit requests.
+                    </div>
+                  ) : (
+                    <div className="max-h-80 overflow-auto">
+                      {approvalAlerts.map((item) => (
+                        <div key={item.id} className="px-4 py-3 border-b border-gray-100">
+                          <div className="text-sm font-semibold text-emerald-700">
+                            {item.module_label} edit approved
+                          </div>
+                          <div className="text-xs text-gray-600">
+                            {item.record_no && String(item.record_no).trim() !== ''
+                              ? `${item.record_label ?? 'Record No.'} ${item.record_no}`
+                              : `Record #${item.record_id}`}
+                          </div>
+                          {item.reason ? (
+                            <div className="text-xs text-gray-500 mt-1">
+                              Reason: {item.reason}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* User menu */}
+            <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((v) => !v)}
               className={`flex items-center gap-2 rounded-full px-3 py-2 ${t.headerBtn} transition-colors`}
@@ -461,6 +594,7 @@ useEffect(() => {
                 </button>
               </div>
             )}
+            </div>
           </div>
         </div>
 

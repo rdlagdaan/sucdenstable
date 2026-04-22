@@ -107,6 +107,14 @@ useEffect(() => {
 
 
 const handleApprove = async (row: ApprovalRow) => {
+
+  console.log('HANDLE_APPROVE_CLICK', {
+    id: row.id,
+    module: row.subject_type,
+    action: row.action,
+    status: row.status,
+  });  
+
   const action = (row.action || '').toUpperCase();
   const module = (row.subject_type || '').toLowerCase();
 
@@ -114,6 +122,8 @@ const handleApprove = async (row: ApprovalRow) => {
   if (module === 'receiving_entries' && action === 'PROCESS') {
     try {
 const res = await napi.get(`/approvals/${row.id}`);
+
+console.log('APPROVE_RESPONSE', res?.data);
 
 const previewErr = res?.data?.context?.purchase_journal_preview_error;
 if (previewErr) {
@@ -164,31 +174,31 @@ return;
     }
   }
 
-  // ✅ EDIT
-  if (action === '' || action === 'EDIT') {
-    const { value: minutes } = await Swal.fire({
-      title: `Approve request #${row.id}?`,
-      input: 'number',
-      inputLabel: 'Set how many minutes this approval will remain valid.',
-      inputAttributes: { min: '1', max: '240', step: '1' },
-      inputValue: 60,
-      showCancelButton: true,
-    });
 
-    if (minutes === undefined) return;
+// ✅ EDIT
+if (action === '' || action === 'EDIT') {
+  const { isConfirmed } = await Swal.fire({
+    title: `Approve request #${row.id}?`,
+    text: 'This will approve the edit request for the requester with no end-of-day time limit.',
+    icon: 'question',
+    showCancelButton: true,
+    confirmButtonText: 'Approve',
+  });
 
-    const mins = Math.max(1, Math.min(240, Number(minutes)));
+  if (!isConfirmed) return;
 
-    await napi.post(`/approvals/${row.id}/approve`, {
-      edit_window_minutes: mins,
-    });
+  const res = await napi.post(`/approvals/${row.id}/approve`, {});
+  console.log('APPROVE_RESPONSE_EDIT', res?.data);
 
-    toast.success('Request approved.');
-    await load();
-    return;
-  }
+  await load();
+  console.log('APPROVE_RELOAD_DONE_EDIT');
+
+  toast.success('Request approved.');
+  return;
+}
 
   // ✅ One-shot actions (POST, UNPOST, PROCESS (non-receiving), SOFT DELETE, etc.)
+// ✅ One-shot actions (POST, UNPOST, PROCESS (non-receiving), SOFT DELETE, etc.)
   const { isConfirmed } = await Swal.fire({
     title: `Approve ${action.toLowerCase()} request #${row.id}?`,
     text: 'This request has no edit window.',
@@ -199,9 +209,13 @@ return;
 
   if (!isConfirmed) return;
 
-  await napi.post(`/approvals/${row.id}/approve`, {});
-  toast.success('Request approved.');
+  const res = await napi.post(`/approvals/${row.id}/approve`, {});
+  console.log('APPROVE_RESPONSE_ONE_SHOT', res?.data);
+
   await load();
+  console.log('APPROVE_RELOAD_DONE_ONE_SHOT');
+
+  toast.success('Request approved.');
 };
 
 
@@ -346,9 +360,13 @@ const confirmProcessApproval = async (approvalId: number, preview: any) => {
 
     if (!isConfirmed) return;
 
-    await napi.post(`/approvals/${approvalId}/approve`, formValues || {});
-    toast.success('Request approved.');
-    await load();
+      const res = await napi.post(`/approvals/${approvalId}/approve`, formValues || {});
+      console.log('APPROVE_RESPONSE_PROCESS', res?.data);
+
+      await load();
+      console.log('APPROVE_RELOAD_DONE_PROCESS');
+
+      toast.success('Request approved.');
   } catch (e: any) {
     toast.error(e?.response?.data?.message || 'Failed to approve PROCESS.');
   } finally {
