@@ -97,21 +97,70 @@ class MyPurchaseVoucherPDF extends \TCPDF {
 
 public function Footer()
 {
-    $this->SetY(-24);
+    $this->SetY(-50);
     $this->SetFont('helvetica', 'I', 8);
 
     $currentDate = date('M d, Y');
     $currentTime = date('h:i:sa');
 
+    $companyId = (int)($this->companyId ?? 0);
+    $receivedFrom = ($companyId === 2)
+        ? 'AMEROP PHILIPPINES, INC.'
+        : 'SUCDEN PHILIPPINES, INC.';
+
     $html = '
-    <table border="0" cellpadding="0" cellspacing="0" width="100%">
-      <tr>
-        <td width="100%">
-          <hr>
-        </td>
-      </tr>
-    </table>
-    <table border="0" cellpadding="1" cellspacing="0" width="100%">
+    <table border="0"><tr>
+      <td width="70%">
+        <table border="1" cellpadding="5" cellspacing="0" width="100%">
+          <tr>
+            <td width="33.33%">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                <tr>
+                  <td valign="top" align="left"><font size="8">Prepared:</font></td>
+                </tr>
+                <tr>
+                  <td height="42"></td>
+                </tr>
+                <tr>
+                  <td height="12" valign="bottom" align="left" style="padding-left:4px; padding-bottom:0px; white-space:nowrap;">
+                    <font size="7"><b>'.htmlspecialchars((string)$this->preparedByInitials).'</b></font>
+                  </td>
+                </tr>
+              </table>
+            </td>
+            <td width="33.33%">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                <tr>
+                  <td valign="top" align="left"><font size="8">Checked:</font></td>
+                </tr>
+                <tr>
+                  <td height="54"></td>
+                </tr>
+              </table>
+            </td>
+            <td width="33.34%">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" height="65">
+                <tr>
+                  <td valign="top" align="left"><font size="8">Approved:</font></td>
+                </tr>
+                <tr>
+                  <td height="54"></td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+      <td width="5%"></td>
+      <td width="25%">
+        <table border="1" cellpadding="5">
+          <tr><td align="center"><font size="8">Received from '.htmlspecialchars($receivedFrom).'</font><br><br></td></tr>
+          <tr><td align="center"><font size="8">Signature Over Printed Name</font></td></tr>
+        </table>
+      </td>
+    </tr></table>
+    <br>
+    <table border="0">
       <tr>
         <td width="10%"><font size="8">Printed:</font></td>
         <td width="15%"><font size="8">'.$currentDate.'</font></td>
@@ -119,7 +168,7 @@ public function Footer()
         <td width="60%"></td>
       </tr>
       <tr>
-        <td width="10%"><font size="8">Created:</font></td>
+        <td><font size="8">Created:</font></td>
         <td width="15%"><font size="8">'.$this->createdDate.'</font></td>
         <td width="15%"><font size="8">'.$this->createdTime.'</font></td>
         <td width="60%"></td>
@@ -140,15 +189,22 @@ protected function userInitials(?int $userId): string
     if (empty($userId)) return '';
 
     if (\Illuminate\Support\Facades\Schema::hasTable('users_employees')) {
-        $u = (string) DB::table('users_employees')
-            ->where('id', (int)$userId)
+        $firstName = (string) DB::table('users_employees')
+            ->where('id', (int) $userId)
+            ->value('first_name');
+
+        $firstName = strtoupper(trim($firstName));
+        if ($firstName !== '') return $firstName;
+
+        $username = (string) DB::table('users_employees')
+            ->where('id', (int) $userId)
             ->value('username');
 
-        $u = strtoupper(trim((string)$u));
-        if ($u !== '') return $u;
+        $username = strtoupper(trim($username));
+        if ($username !== '') return $username;
     }
 
-    return 'U' . (int)$userId;
+    return 'U' . (int) $userId;
 }
 
     
@@ -739,12 +795,8 @@ $pdf = new MyPurchaseVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
 // ✅ pass company_id so Header() can switch logo (AMEROP vs SUCDEN)
 $pdf->setCompanyId($companyId ? (int)$companyId : null);
 
-// ✅ prepared initials (priority: URL user_id, else header user_id)
-$preparedUserId = (int) ($request->query('user_id') ?: 0);
-if ($preparedUserId <= 0) {
-    $preparedUserId = (int) ($header->user_id ?? 0);
-}
-$pdf->setPreparedByInitials($this->userInitials($preparedUserId));
+// Prepared by must come from the transaction creator, not the currently logged-in user.
+$pdf->setPreparedByInitials($this->userInitials((int) ($header->user_id ?? 0)));
 
 $pdf->setPrintHeader(true);
 $pdf->setPrintFooter(true);

@@ -979,7 +979,7 @@ const handleOpenPdf = () => {
   if (!mainId) return toast.info('Select or save a journal first.');
   if (isCancelled) return toast.info('Cancelled journals cannot be printed.');
 
-  const url = `/api/ga/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id||'')}&user_id=${encodeURIComponent(user?.id||'')}&_=${Date.now()}`;
+  const url = `/api/ga/form-pdf/${mainId}?company_id=${encodeURIComponent(user?.company_id || '')}&_=${Date.now()}`;
   setPdfUrl(url);
   setShowPdf(true);
   setIsExported(true);

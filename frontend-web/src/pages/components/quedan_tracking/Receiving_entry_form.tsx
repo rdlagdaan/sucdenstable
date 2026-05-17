@@ -22,7 +22,8 @@ import {
   PrinterIcon,
   PlusIcon,
   CheckCircleIcon,
-  ArrowDownTrayIcon, // ✅ NEW
+  ArrowDownTrayIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
 
 
@@ -1237,6 +1238,68 @@ const onSaveNewReceiving = async () => {
   }
 };
 
+const clearReceivingForm = () => {
+  setSelectedRR('');
+  setHandsontableEnabled(false);
+  setTableData([]);
+
+  setDateReceived('');
+  setPbnNumber('');
+  setItemNumber('');
+  setVendorName('');
+  setMill('');
+  setGlAccountKey('');
+
+  setAssocDues('');
+  setAssocDuesIsDebit(true);
+  setOthers('');
+  setOthersIsDebit(false);
+
+  setNoInsurance(false);
+  setNoStorage(false);
+  setInsuranceWeek('');
+  setStorageWeek('');
+
+  setUnitCost(0);
+  setCommission(0);
+  setInsuranceRate(0);
+  setStorageRate(0);
+  setDaysFree(0);
+  setCropYear('');
+
+  setTQty(0);
+  setTLiens(0);
+  setTStorage(0);
+  setTInsurance(0);
+  setTUnitCost(0);
+  setTAP(0);
+};
+
+const handleDeleteReceiving = async () => {
+  if (!selectedRR) {
+    toast.error('No Receiving Entry selected.');
+    return;
+  }
+
+  const ok = window.confirm(`Delete Receiving Entry ${selectedRR}? This will soft-delete the transaction.`);
+  if (!ok) return;
+
+  try {
+    await napi.post('/receiving/delete-entry', {
+      receipt_no: selectedRR,
+      company_id: companyId,
+      user_id: user?.id ?? user?.user_id ?? null,
+    });
+
+    setRrOptions((prev) => prev.filter((r) => r.receipt_no !== selectedRR));
+    clearReceivingForm();
+
+    toast.success('Receiving Entry deleted successfully.');
+  } catch (e: any) {
+    console.error(e);
+    toast.error(e?.response?.data?.message || 'Failed to delete Receiving Entry.');
+  }
+};
 
 
 const saveAssocOthers = async () => {
@@ -2248,22 +2311,7 @@ contextMenu={{
   <button
     className="inline-flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
     onClick={() => {
-      setSelectedRR('');
-      setHandsontableEnabled(false);
-      setTableData([]);
-      setDateReceived('');
-      setPbnNumber('');
-      setItemNumber('');
-      setVendorName('');
-      setMill('');
-      setAssocDues('');
-      setAssocDuesIsDebit(true);
-      setOthers('');
-      setOthersIsDebit(false);
-      setNoInsurance(false);
-      setNoStorage(false);
-      setInsuranceWeek('');
-      setStorageWeek('');
+      clearReceivingForm();
       toast.success('Ready for new Receiving Entry');
     }}
   >
@@ -2280,6 +2328,17 @@ contextMenu={{
   >
     <CheckCircleIcon className="h-5 w-5" />
     Save
+  </button>
+
+  <button
+    type="button"
+    disabled={!selectedRR}
+    className={`inline-flex items-center gap-2 px-4 py-2 rounded border
+      ${selectedRR ? 'bg-red-600 text-white hover:bg-red-700 border-red-700' : 'bg-gray-200 text-gray-500 cursor-not-allowed border-gray-300'}`}
+    onClick={handleDeleteReceiving}
+  >
+    <TrashIcon className="h-5 w-5" />
+    Delete
   </button>
 </div>
 

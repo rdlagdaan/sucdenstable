@@ -934,34 +934,10 @@ const handleAutoSave = async (row: DetailRow, _rowIndex: number) => {
 const handleOpenPdf = () => {
   if (!mainId) return toast.info('Save or select a receipt first.');
 
-  const rawUser = user || {};
-
-  const preparedBy = String(
-    rawUser.username ??
-    rawUser.user_name ??
-    rawUser.userid ??
-    rawUser.user_id ??
-    rawUser.login ??
-    rawUser.login_id ??
-    rawUser.account ??
-    rawUser.account_name ??
-    rawUser.employee_username ??
-    rawUser.employee_user_name ??
-    rawUser.email ??
-    ''
-  ).trim();
-
-  console.log('RV user object full:', rawUser);
-  console.log('RV prepared_by resolved:', preparedBy);
-
   const url =
     `/api/cash-receipt/form-pdf/${mainId}` +
     `?company_id=${encodeURIComponent(companyId || '')}` +
-    `&user_id=${encodeURIComponent(String(rawUser.id || ''))}` +
-    `&prepared_by=${encodeURIComponent(preparedBy)}` +
     `&_=${Date.now()}`;
-
-  console.log('RV PDF URL:', url);
 
   setPdfUrl(url);
   setShowPdf(true);

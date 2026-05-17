@@ -80,7 +80,8 @@ use App\Http\Controllers\PurchaseVarianceReportController;
 use App\Http\Controllers\ExportSummaryController;
 use App\Http\Controllers\TotalPurchasesBySupplierWithDrilldownController;
 use App\Http\Controllers\MonthlySummaryController;
-
+use App\Http\Controllers\SoDomesticRawSugarController;
+use App\Http\Controllers\SoImportedRefinedSugarController;
 
 // VENDOR SUMMARY REPORT (stateful)
 Route::prefix('api')->middleware(['web','auth:sanctum'])->group(function () {
@@ -691,6 +692,7 @@ Route::get('/api/monthly-summary/generate', [MonthlySummaryController::class, 'g
     Route::post('/api/receiving/update-gl', [ReceivingController::class, 'updateGL']);
     Route::post('/api/receiving/update-assoc-others', [ReceivingController::class, 'updateAssocOthers']);
     Route::post('/api/receiving/delete-detail', [ReceivingController::class, 'deleteDetail']);
+    Route::post('/api/receiving/delete-entry', [ReceivingController::class, 'deleteEntry']);   
     Route::post('/api/receiving/update-mill', [ReceivingController::class, 'updateMillName']);
 
     // helpers reused from PBN & mills
@@ -837,6 +839,79 @@ Route::get('/api/purchase-journal/check-pdf/{id}', [PurchaseJournalController::c
 
     // Cash Disbursement
     Route::get('/api/cash-disbursement/generate-cd-number', [\App\Http\Controllers\CashDisbursementController::class, 'generateCdNumber']);
+    
+    // =====================================================
+    // Sales Order Entry - Domestic Raw Sugar (Sales Invoice)
+    // =====================================================
+
+    // Generate SI number (optional if frontend needs it)
+    Route::get('/api/so-domestic-raw-sugar/generate-si-number', function () {
+        $setting = \Illuminate\Support\Facades\DB::table('application_settings')
+            ->where('apset_code', 'SINo')
+            ->first();
+
+        return response()->json([
+            'value' => $setting?->value ?? '0'
+        ]);
+    });
+
+    // Main
+    Route::get('/api/so-domestic-raw-sugar/list', [SoDomesticRawSugarController::class, 'list']);
+    Route::get('/api/so-domestic-raw-sugar/{id}', [SoDomesticRawSugarController::class, 'show'])->whereNumber('id');
+
+    Route::post('/api/so-domestic-raw-sugar/save-main', [SoDomesticRawSugarController::class, 'storeMain']);
+    Route::post('/api/so-domestic-raw-sugar/update-main', [SoDomesticRawSugarController::class, 'updateMain']);
+
+    // Details
+    Route::post('/api/so-domestic-raw-sugar/save-detail', [SoDomesticRawSugarController::class, 'saveDetail']);
+    Route::post('/api/so-domestic-raw-sugar/update-detail', [SoDomesticRawSugarController::class, 'updateDetail']);
+    Route::post('/api/so-domestic-raw-sugar/delete-detail', [SoDomesticRawSugarController::class, 'deleteDetail']);
+
+    // Dropdowns
+    Route::get('/api/so-domestic-raw-sugar/dropdowns/si', [SoDomesticRawSugarController::class, 'siDropdown']);
+    Route::get('/api/so-domestic-raw-sugar/dropdowns/po', [SoDomesticRawSugarController::class, 'poDropdown']);
+    Route::get('/api/so-domestic-raw-sugar/dropdowns/po-items', [SoDomesticRawSugarController::class, 'poItemsDropdown']);
+    Route::get('/api/so-domestic-raw-sugar/dropdowns/rr', [SoDomesticRawSugarController::class, 'rrDropdown']);    
+    Route::get('/api/so-domestic-raw-sugar/quedans', [SoDomesticRawSugarController::class, 'quedanList']);
+    Route::post('/api/so-domestic-raw-sugar/save-quedans', [SoDomesticRawSugarController::class, 'saveQuedans']);    
+    Route::get('/api/so-domestic-raw-sugar/dropdowns/customers', [SoDomesticRawSugarController::class, 'customerDropdown']);   
+    
+    Route::get('/api/so-domestic-raw-sugar/form-pdf/{id?}', [SoDomesticRawSugarController::class, 'formPdf']);    
+    Route::post('/api/so-domestic-raw-sugar/post', [SoDomesticRawSugarController::class, 'postTransaction']);
+    Route::post('/api/so-domestic-raw-sugar/process', [SoDomesticRawSugarController::class, 'processTransaction']);
+    Route::get('/api/so-domestic-raw-sugar/dropdowns/bl', [SoDomesticRawSugarController::class, 'blDropdown']);
+    Route::get('/api/so-domestic-raw-sugar/dropdowns/mills', [SoDomesticRawSugarController::class, 'millDropdown']);
+
+    Route::get('/api/so-domestic-raw-sugar/payment-methods', [SoDomesticRawSugarController::class, 'paymentMethods']);
+    Route::get('/api/so-domestic-raw-sugar/banks', [SoDomesticRawSugarController::class, 'banks']);
+    Route::post('/api/so-domestic-raw-sugar/process-to-sales-journal', [SoDomesticRawSugarController::class, 'processToSalesJournal']);
+
+    // =====================================================
+    // Sales Order Entry - Imported Refined Sugar
+    // =====================================================
+
+    Route::get('/api/so-imported-refined-sugar/list', [SoImportedRefinedSugarController::class, 'list']);
+    Route::get('/api/so-imported-refined-sugar/{id}', [SoImportedRefinedSugarController::class, 'show'])->whereNumber('id');
+
+    Route::post('/api/so-imported-refined-sugar/save-main', [SoImportedRefinedSugarController::class, 'storeMain']);
+    Route::post('/api/so-imported-refined-sugar/update-main', [SoImportedRefinedSugarController::class, 'updateMain']);
+
+    Route::get('/api/so-imported-refined-sugar/dropdowns/si', [SoImportedRefinedSugarController::class, 'siDropdown']);
+    Route::get('/api/so-imported-refined-sugar/dropdowns/po', [SoImportedRefinedSugarController::class, 'poDropdown']);
+    Route::get('/api/so-imported-refined-sugar/dropdowns/po-items', [SoImportedRefinedSugarController::class, 'poItemsDropdown']);
+    Route::get('/api/so-imported-refined-sugar/dropdowns/bl', [SoImportedRefinedSugarController::class, 'blDropdown']);
+
+    Route::get('/api/so-imported-refined-sugar/bl-lines', [SoImportedRefinedSugarController::class, 'blLineList']);
+    Route::post('/api/so-imported-refined-sugar/save-bl-lines', [SoImportedRefinedSugarController::class, 'saveBlLines']);
+
+    Route::get('/api/so-imported-refined-sugar/dropdowns/customers', [SoImportedRefinedSugarController::class, 'customerDropdown']);
+    Route::get('/api/so-imported-refined-sugar/form-pdf/{id?}', [SoImportedRefinedSugarController::class, 'formPdf']);
+
+    Route::post('/api/so-imported-refined-sugar/post', [SoImportedRefinedSugarController::class, 'postTransaction']);
+    Route::post('/api/so-imported-refined-sugar/process', [SoImportedRefinedSugarController::class, 'processTransaction']);
+    Route::post('/api/so-imported-refined-sugar/process-to-sales-journal', [SoImportedRefinedSugarController::class, 'processToSalesJournal']);
+
+
     Route::post('/api/cash-disbursement/save-main', [\App\Http\Controllers\CashDisbursementController::class, 'storeMain']);
     Route::post('/api/cash-disbursement/save-detail', [\App\Http\Controllers\CashDisbursementController::class, 'saveDetail']);
     Route::post('/api/cash-disbursement/update-detail', [\App\Http\Controllers\CashDisbursementController::class, 'updateDetail']);

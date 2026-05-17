@@ -1138,7 +1138,7 @@ const handleSelectTransaction = async (selectedId: string) => {
 
     const url = `/api/sales/form-pdf/${mainId}?company_id=${encodeURIComponent(
       user?.company_id || '',
-    )}&user_id=${encodeURIComponent(user?.id || '')}&t=${Date.now()}`;
+    )}&t=${Date.now()}`;
 
     setPdfUrl(url);
     setShowPdf(true);

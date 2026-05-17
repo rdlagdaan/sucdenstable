@@ -167,15 +167,22 @@ protected function userInitials(?int $userId): string
     if (empty($userId)) return '';
 
     if (\Illuminate\Support\Facades\Schema::hasTable('users_employees')) {
-        $u = (string) DB::table('users_employees')
-            ->where('id', (int)$userId)
+        $firstName = (string) DB::table('users_employees')
+            ->where('id', (int) $userId)
+            ->value('first_name');
+
+        $firstName = strtoupper(trim($firstName));
+        if ($firstName !== '') return $firstName;
+
+        $username = (string) DB::table('users_employees')
+            ->where('id', (int) $userId)
             ->value('username');
 
-        $u = strtoupper(trim((string)$u));
-        if ($u !== '') return $u;
+        $username = strtoupper(trim($username));
+        if ($username !== '') return $username;
     }
 
-    return 'U' . (int)$userId;
+    return 'U' . (int) $userId;
 }
     
     
@@ -646,12 +653,8 @@ $pdf = new MySalesVoucherPDF('P','mm','LETTER',true,'UTF-8',false);
 // ✅ pass company_id into PDF so Header() can pick the correct logo
 $pdf->setCompanyId($companyId ? (int)$companyId : null);
 
-// ✅ prepared initials (priority: URL user_id, else header user_id)
-$preparedUserId = (int) ($request->query('user_id') ?: 0);
-if ($preparedUserId <= 0) {
-    $preparedUserId = (int) ($header->user_id ?? 0);
-}
-$pdf->setPreparedByInitials($this->userInitials($preparedUserId));
+// Prepared by must come from the transaction creator, not the currently logged-in user.
+$pdf->setPreparedByInitials($this->userInitials((int) ($header->user_id ?? 0)) );
 
 $pdf->setPrintHeader(true);
 $pdf->setPrintFooter(true);

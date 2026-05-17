@@ -320,6 +320,11 @@ if ($cpNo === '') {
         $purchaseAmount = round($sumDebit, 2);
         $amountInWords  = $this->numberToPesoWords($purchaseAmount);
 
+        $millIdForCashPurchase = $this->resolveCashPurchaseMillId(
+            $companyId,
+            (string)($r['mill'] ?? '')
+        );
+
         $headerData = [
             // required
             'cp_no'          => $cpNo,
@@ -340,7 +345,7 @@ if ($cpNo === '') {
             'sugar_type'     => (string)($r['sugar_type'] ?? ''),
 
             // from receiving header
-            'mill_id'        => (string)($r['mill'] ?? ''),
+            'mill_id'        => $millIdForCashPurchase,
             'rr_no'          => (string)($r['receipt_no'] ?? ''),
 
             // system
@@ -404,6 +409,60 @@ if ($cpNo === '') {
         return $cpId;
     });
 }
+
+private function resolveCashPurchaseMillId(int $companyId, string $millValue): string
+{
+    $millValue = trim($millValue);
+
+    if ($millValue === '') {
+        return '';
+    }
+
+    $q = DB::table('mill_list')
+        ->where('company_id', $companyId)
+        ->where(function ($w) use ($millValue) {
+            $w->where('mill_name', $millValue);
+
+            if (Schema::hasColumn('mill_list', 'mill_id')) {
+                $w->orWhere('mill_id', $millValue);
+            }
+
+            if (Schema::hasColumn('mill_list', 'mill_code')) {
+                $w->orWhere('mill_code', $millValue);
+            }
+
+            if (Schema::hasColumn('mill_list', 'prefix')) {
+                $w->orWhere('prefix', $millValue);
+            }
+        });
+
+    $mill = $q->first();
+
+    if ($mill) {
+        foreach (['mill_id', 'mill_code', 'prefix'] as $col) {
+            if (
+                Schema::hasColumn('mill_list', $col)
+                && isset($mill->{$col})
+                && trim((string)$mill->{$col}) !== ''
+            ) {
+                $value = trim((string)$mill->{$col});
+
+                if (mb_strlen($value) <= 25) {
+                    return $value;
+                }
+            }
+        }
+    }
+
+    if (mb_strlen($millValue) <= 25) {
+        return $millValue;
+    }
+
+    throw new \RuntimeException(
+        "Cannot PROCESS: mill value '{$millValue}' is longer than 25 characters and no short mill_id/mill_code/prefix was found in mill_list."
+    );
+}
+
 
 private function generateNextCpNo(int $companyId): string
 {

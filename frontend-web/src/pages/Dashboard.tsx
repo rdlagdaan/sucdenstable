@@ -18,7 +18,7 @@ const Pbn_entry_form = lazy(() => import('./components/quedan_tracking/Pbn_entry
 const Pbn_posting = lazy(() => import('./components/quedan_tracking/Pbn_posting'));
 const Receiving_posting = lazy(() => import('./components/quedan_tracking/Receiving_posting'));
 const Bill_of_lading = lazy(() => import('./components/quedan_tracking/BillOfLadingEntry'));
-
+const So_domestic_raw_sugar = lazy(() => import('./components/quedan_tracking/SoDomesticRawSugar'));
 
 const Receiving_entry_form = lazy(() => import('./components/quedan_tracking/Receiving_entry_form'));
 const Sales_journal_form = lazy(() => import('./components/accounting/Sales_journal_form'));
@@ -56,7 +56,7 @@ const PurchaseVarianceReport = lazy(() => import('./components/quedan_tracking/r
 const ExportSummary = lazy(() => import('./components/quedan_tracking/reports/export_summary'));
 const TotalPurchasesBySupplierWithDrilldown = lazy(() => import('./components/quedan_tracking/reports/total_purchases_by_supplier_with_drilldown'));
 const MonthlySummary = lazy(() => import('./components/quedan_tracking/reports/monthly_summary'));
-
+const So_imported_refined_sugar = lazy(() => import('./components/quedan_tracking/SoImportedRefinedSugar'));
 
 const FloatingWindow = lazy(() => import('./components/ui/FloatingWindow'));
 const BanksWindow = lazy(() => import('./components/references/BanksWindow'));
@@ -78,6 +78,7 @@ const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>>
   pbn_posting: Pbn_posting,
   receiving_posting: Receiving_posting,
   bill_of_lading: Bill_of_lading,
+  so_domestic_raw_sugar: So_domestic_raw_sugar,
 
   receiving_entry_forms: Receiving_entry_form,
   sales_journal_forms: Sales_journal_form,
@@ -114,7 +115,8 @@ const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>>
   export_summary: ExportSummary,
   total_purchases_by_supplier_with_drilldown: TotalPurchasesBySupplierWithDrilldown,
   monthly_summary: MonthlySummary,
-
+  so_imported_refined_sugar: So_imported_refined_sugar,
+  
   approvals_center: ApprovalCenter,
   approvals_inbox: ApprovalsInbox,
   approvals_outbox: ApprovalsOutbox,
@@ -122,7 +124,12 @@ const componentMap: Record<string, React.LazyExoticComponent<() => JSX.Element>>
 };
 
 interface SubModule { sub_module_id: number; sub_module_name: string; component_path: string | null; }
-interface Module { module_id: number; module_name: string; sub_modules: SubModule[]; }
+interface Module {
+  module_id: number;
+  module_name: string;
+  module_component_path?: string | null;
+  sub_modules: SubModule[];
+}
 interface System { system_id: number; system_name: string; modules: Module[]; }
 
 type RefKey = 'accounts' | 'banks' | 'customers' | 'mills' | 'planters' | 'vendors';
@@ -354,6 +361,16 @@ useEffect(() => {
   const toggleModule = (id: number) =>
     setOpenModules((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]));
 
+  const handleModuleClick = (module: Module) => {
+    toggleModule(module.module_id);
+
+    const path = module.module_component_path?.trim();
+    if (path && componentMap[path]) {
+      setSelectedContent(path);
+      setSelectedSubModuleName(module.module_name);
+    }
+  };  
+
   // window helpers
   const openRefWindow = (type: RefKey) => {
     const titleMap: Record<RefKey, string> = {
@@ -418,7 +435,7 @@ useEffect(() => {
                   {getFilteredModules(system.modules).map((module) => (
                     <div key={module.module_id} className="mb-1">
                       <button
-                        onClick={() => toggleModule(module.module_id)}
+                        onClick={() => handleModuleClick(module)}
                         className={`flex items-center w-full text-left text-sm ${t.sidebarText} font-medium ${t.sidebar} ${t.hoverSwap} px-2 py-1 rounded`}
                       >
                         {openModules.includes(module.module_id) ? (

@@ -63,8 +63,13 @@ class ReceivingController extends Controller
                 });
             })
             ->when(!$includePosted, fn ($w) => $w->where('r.posted_flag', 0))
+            ->where(function ($w) {
+                $w->whereNull('r.deleted_flag')
+                  ->orWhere('r.deleted_flag', false);
+            })
             ->groupBy('r.receipt_no', 'p.sugar_type', 'r.pbn_number', 'r.receipt_date', 'p.vend_code', 'p.vendor_name')
-            ->orderBy('r.receipt_no', 'asc')
+            ->orderByDesc('r.receipt_date')
+            ->orderByDesc('r.receipt_no')
             ->limit(200)
             ->get();
 
@@ -757,6 +762,8 @@ public function createEntry(\Illuminate\Http\Request $req)
             'posted_flag'    => false,
             'selected_flag'  => false,
             'processed_flag' => false,
+            'deleted_flag'   => false,
+            'deleted_by'     => null,
             'workstation_id' => $req->input('workstation_id') ?: $req->ip(), // inet column ok
             'user_id'        => $req->input('user_id'),
         ]);
@@ -2717,6 +2724,55 @@ public function quedanListingInsuranceStorageExcel(Request $req, ?string $receip
     ])->deleteFileAfterSend(true);
 }
 
+public function deleteEntry(Request $req)
+{
+    $companyId = $this->companyIdFromRequest($req);
+
+    $data = $req->validate([
+        'receipt_no' => 'required|string',
+    ]);
+
+    $entry = ReceivingEntry::query()
+        ->where('company_id', $companyId)
+        ->where('receipt_no', $data['receipt_no'])
+        ->where(function ($q) {
+            $q->whereNull('deleted_flag')
+              ->orWhere('deleted_flag', false);
+        })
+        ->first();
+
+    if (!$entry) {
+        return response()->json([
+            'message' => 'Receiving entry not found or already deleted.',
+        ], 404);
+    }
+
+    $userId = $req->user()?->id
+        ?? $req->input('user_id')
+        ?? Auth::id();
+
+    $update = [
+        'deleted_flag' => true,
+    ];
+
+    if (Schema::hasColumn('receiving_entry', 'deleted_by')) {
+        $update['deleted_by'] = $userId;
+    }
+
+    if (Schema::hasColumn('receiving_entry', 'updated_at')) {
+        $update['updated_at'] = now();
+    }
+
+    DB::table('receiving_entry')
+        ->where('id', $entry->id)
+        ->where('company_id', $companyId)
+        ->update($update);
+
+    return response()->json([
+        'message'    => 'Receiving entry deleted successfully.',
+        'receipt_no' => $entry->receipt_no,
+    ]);
+}
 
 public function deleteDetail(Request $req)
 {

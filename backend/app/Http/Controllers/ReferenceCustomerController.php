@@ -31,9 +31,12 @@ class ReferenceCustomerController extends Controller
 
         if ($search !== '') {
             $like = "%{$search}%";
+
             $q->where(function ($x) use ($like) {
                 $x->where('cust_id', 'ILIKE', $like)
                   ->orWhere('cust_name', 'ILIKE', $like)
+                  ->orWhere('tin', 'ILIKE', $like)
+                  ->orWhere('address', 'ILIKE', $like)
                   ->orWhere('workstation_id', 'ILIKE', $like);
             });
         }
@@ -52,25 +55,33 @@ class ReferenceCustomerController extends Controller
 
         $data = $request->validate([
             'cust_id'   => [
-                'required', 'string', 'max:50',
+                'required',
+                'string',
+                'max:50',
                 Rule::unique('customer_list', 'cust_id')
                     ->where(fn ($q) => $q->where('company_id', (string) $companyId)),
             ],
             'cust_name' => 'required|string|max:250',
+            'tin'       => 'nullable|string|max:50',
+            'address'   => 'nullable|string',
         ]);
 
         $data['cust_id']        = strtoupper(trim($data['cust_id']));
         $data['cust_name']      = trim($data['cust_name']);
-        $data['company_id']     = (string) $companyId; // varchar(25)
+        $data['tin']            = isset($data['tin']) ? trim((string) $data['tin']) : null;
+        $data['address']        = isset($data['address']) ? trim((string) $data['address']) : null;
+        $data['company_id']     = (string) $companyId;
         $data['workstation_id'] = $request->header('X-Workstation-ID')
             ?? $request->ip()
             ?? gethostname();
-        $data['user_id']        = Auth::id()
+
+        $data['user_id'] = Auth::id()
             ? (string) Auth::id()
             : (env('DEFAULT_USER_ID') ? (string) env('DEFAULT_USER_ID') : null);
 
         try {
             $row = Customer::create($data);
+
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Customer created',
@@ -88,33 +99,40 @@ class ReferenceCustomerController extends Controller
     {
         $companyId = $this->resolveCompanyId($request);
 
-        // Load the row only within this company
         $row = Customer::where('id', $id)
             ->where('company_id', (string) $companyId)
             ->firstOrFail();
 
         $data = $request->validate([
             'cust_id'   => [
-                'required', 'string', 'max:50',
+                'required',
+                'string',
+                'max:50',
                 Rule::unique('customer_list', 'cust_id')
                     ->ignore($id)
                     ->where(fn ($q) => $q->where('company_id', (string) $companyId)),
             ],
             'cust_name' => 'required|string|max:250',
+            'tin'       => 'nullable|string|max:50',
+            'address'   => 'nullable|string',
         ]);
 
         $data['cust_id']        = strtoupper(trim($data['cust_id']));
         $data['cust_name']      = trim($data['cust_name']);
-        $data['company_id']     = (string) $companyId; // keep enforced
+        $data['tin']            = isset($data['tin']) ? trim((string) $data['tin']) : null;
+        $data['address']        = isset($data['address']) ? trim((string) $data['address']) : null;
+        $data['company_id']     = (string) $companyId;
         $data['workstation_id'] = $request->header('X-Workstation-ID')
             ?? $request->ip()
             ?? gethostname();
-        $data['user_id']        = Auth::id()
+
+        $data['user_id'] = Auth::id()
             ? (string) Auth::id()
             : (env('DEFAULT_USER_ID') ? (string) env('DEFAULT_USER_ID') : null);
 
         try {
             $row->update($data);
+
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Customer updated',
@@ -157,9 +175,12 @@ class ReferenceCustomerController extends Controller
 
         if ($search !== '') {
             $like = "%{$search}%";
+
             $q->where(function ($x) use ($like) {
                 $x->where('cust_id', 'ILIKE', $like)
                   ->orWhere('cust_name', 'ILIKE', $like)
+                  ->orWhere('tin', 'ILIKE', $like)
+                  ->orWhere('address', 'ILIKE', $like)
                   ->orWhere('workstation_id', 'ILIKE', $like);
             });
         }
@@ -167,6 +188,8 @@ class ReferenceCustomerController extends Controller
         $columns = [
             ['key' => 'cust_id',        'label' => 'Customer ID', 'type' => 'string'],
             ['key' => 'cust_name',      'label' => 'Name',        'type' => 'string'],
+            ['key' => 'tin',            'label' => 'TIN',         'type' => 'string'],
+            ['key' => 'address',        'label' => 'Address',     'type' => 'string'],
             ['key' => 'workstation_id', 'label' => 'Workstation', 'type' => 'string'],
         ];
 
@@ -192,6 +215,7 @@ class ReferenceCustomerController extends Controller
 
         if (!$resolved && Schema::hasTable('companies')) {
             $only = DB::table('companies')->select('id')->limit(2)->pluck('id');
+
             if ($only->count() === 1) {
                 $resolved = (string) $only->first();
             }
@@ -206,6 +230,7 @@ class ReferenceCustomerController extends Controller
 
         if (Schema::hasTable('companies')) {
             $exists = DB::table('companies')->where('id', $resolved)->exists();
+
             if (!$exists) {
                 abort(response()->json([
                     'status'  => 'error',

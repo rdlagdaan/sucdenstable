@@ -47,7 +47,11 @@ const load = async () => {
     const companyId = Number(localStorage.getItem('company_id') || 0);
 
     const res = await napi.get('/receiving-posting/list', {
-      params: { q, company_id: companyId },
+      params: {
+        q,
+        company_id: companyId,
+        include_processed: 1,
+      },
     });
 
     const arr = normalizeArray(res.data);
@@ -374,36 +378,76 @@ const performAction = async (action: 'POST'|'UNPOST'|'DELETE'|'PROCESS') => {
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        {/* Left: list */}
-        <div className="rounded border bg-white">
+        {/* Left: RR status table */}
+        <div className="rounded border bg-white overflow-hidden">
           <div className="border-b px-3 py-2 font-semibold">Transactions</div>
+
           <div className="max-h-[520px] overflow-auto">
-            {rows.map((r) => {
-              const s = statusLabel(r);
-              return (
-                <button
-                  key={r.id}
-                  className={`w-full border-b px-3 py-2 text-left hover:bg-gray-50 ${
-                    selectedId === r.id ? 'bg-blue-50' : ''
-                  }`}
-                  onClick={() => setSelectedId(r.id)}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="font-semibold">{r.receipt_no}</div>
-                    <span className={`rounded px-2 py-1 text-xs ${s.cls}`}>{s.text}</span>
-                  </div>
-                  <div className="text-sm text-gray-600">
-                    {r.vendor_name || ''} {r.pbn_number ? `• PBN ${r.pbn_number}` : ''}
-                  </div>
-                  <div className="text-xs text-gray-500">
-                    {r.sugar_type ? `Sugar ${r.sugar_type}` : ''} {r.crop_year ? `• CY ${r.crop_year}` : ''} {r.mill ? `• ${r.mill}` : ''}
-                  </div>
-                </button>
-              );
-            })}
-            {rows.length === 0 && (
-              <div className="p-3 text-sm text-gray-500">No results.</div>
-            )}
+            <table className="w-full border-collapse text-sm">
+              <thead className="sticky top-0 z-10 bg-white">
+                <tr>
+                  <th className="border px-2 py-2 text-center font-bold bg-orange-100 text-black">
+                    RR
+                  </th>
+                  <th className="border px-2 py-2 text-center font-bold bg-sky-100 text-black">
+                    ENCODED
+                  </th>
+                  <th className="border px-2 py-2 text-center font-bold bg-sky-100 text-black">
+                    POSTED
+                  </th>
+                  <th className="border px-2 py-2 text-center font-bold bg-sky-100 text-black">
+                    PROCESSED
+                  </th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {rows.map((r) => {
+                  const deleted = asBool(r.deleted_flag);
+                  const posted = asBool(r.posted_flag);
+                  const processed = asBool(r.processed_flag);
+
+                  const encoded = !deleted && !posted && !processed;
+
+                  return (
+                    <tr
+                      key={r.id}
+                      onClick={() => setSelectedId(r.id)}
+                      title={`${r.vendor_name || ''}${r.pbn_number ? ` • PBN ${r.pbn_number}` : ''}`}
+                      className={[
+                        'cursor-pointer hover:bg-blue-50',
+                        selectedId === r.id ? 'bg-blue-100 outline outline-2 outline-black' : '',
+                        deleted ? 'opacity-60' : '',
+                      ].join(' ')}
+                    >
+                      <td className="border px-2 py-3 font-semibold text-blue-900 whitespace-nowrap">
+                        {r.receipt_no}
+                      </td>
+
+                      <td className="border px-2 py-3 text-center text-2xl leading-none">
+                        {encoded ? '✓' : ''}
+                      </td>
+
+                      <td className="border px-2 py-3 text-center text-2xl leading-none">
+                        {posted ? '✓' : ''}
+                      </td>
+
+                      <td className="border px-2 py-3 text-center text-2xl leading-none">
+                        {processed ? '✓' : ''}
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {rows.length === 0 && (
+                  <tr>
+                    <td className="border px-3 py-4 text-sm text-gray-500" colSpan={4}>
+                      No results.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
 

@@ -42,9 +42,10 @@ class ModuleAccessController extends Controller
                 'sm.system_name',
                 'am.id as module_id',
                 'am.module_name',
+                'am.component_path as module_component_path',
                 'asm.id as sub_module_id',
                 'asm.sub_module_name',
-                'asm.component_path',
+                'asm.component_path as sub_component_path',
             ]);
 
         $hierarchy = [];
@@ -65,15 +66,16 @@ class ModuleAccessController extends Controller
                 $hierarchy[$sid]['modules'][$mid] = [
                     'module_id'   => $mid,
                     'module_name' => $r->module_name,
+                    'module_component_path' => $r->module_component_path,
                     'sub_modules' => [],
                 ];
             }
 
-            $hierarchy[$sid]['modules'][$mid]['sub_modules'][] = [
-                'sub_module_id'   => $r->sub_module_id,
-                'sub_module_name' => $r->sub_module_name,
-                'component_path'  => $r->component_path,
-            ];
+                $hierarchy[$sid]['modules'][$mid]['sub_modules'][] = [
+                    'sub_module_id'   => $r->sub_module_id,
+                    'sub_module_name' => $r->sub_module_name,
+                    'component_path'  => $r->sub_component_path,
+                ];
         }
 
         $result = array_values(array_map(function ($system) {

@@ -192,15 +192,22 @@ protected function userInitials(?int $userId): string
     if (empty($userId)) return '';
 
     if (\Illuminate\Support\Facades\Schema::hasTable('users_employees')) {
-        $u = (string) DB::table('users_employees')
-            ->where('id', (int)$userId)
+        $firstName = (string) DB::table('users_employees')
+            ->where('id', (int) $userId)
+            ->value('first_name');
+
+        $firstName = strtoupper(trim($firstName));
+        if ($firstName !== '') return $firstName;
+
+        $username = (string) DB::table('users_employees')
+            ->where('id', (int) $userId)
             ->value('username');
 
-        $u = strtoupper(trim((string)$u));
-        if ($u !== '') return $u;
+        $username = strtoupper(trim($username));
+        if ($username !== '') return $username;
     }
 
-    return 'U' . (int)$userId;
+    return 'U' . (int) $userId;
 }
     
     
@@ -773,9 +780,8 @@ public function formPdf(Request $req, $id)
     // ✅ pass company_id so Header() can choose logo
     $pdf->setCompanyId($companyId ? (int)$companyId : null);
 
-    // TEMP DEBUG: show ONLY the prepared_by coming from frontend
-    $preparedBy = strtoupper(trim((string) $req->query('prepared_by', '')));
-    $pdf->setPreparedByInitials($preparedBy);
+    // Prepared by must come from the transaction creator, not the currently logged-in user.
+    $pdf->setPreparedByInitials($this->userInitials((int) ($header->user_id ?? 0)));
 
     $pdf->setPrintHeader(true);
     $pdf->setPrintFooter(true);

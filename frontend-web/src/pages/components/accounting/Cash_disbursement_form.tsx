@@ -892,17 +892,9 @@ const loadDisbursement = useCallback(async (rid: string | number) => {
     if (!mainId) return toast.info('Save or select a disbursement first.');
     if (!canExport) return toast.info('Cannot print: transaction is cancelled or unbalanced.');
 
-    const preparedBy = String(
-      user?.username ??
-      user?.user_name ??
-      user?.name ??
-      ''
-    ).trim();
-
     const url =
       `/api/cash-disbursement/form-pdf/${mainId}` +
       `?company_id=${encodeURIComponent(companyId || '')}` +
-      `&prepared_by=${encodeURIComponent(preparedBy)}` +
       `&_=${Date.now()}`;
 
       setPdfUrl(url);

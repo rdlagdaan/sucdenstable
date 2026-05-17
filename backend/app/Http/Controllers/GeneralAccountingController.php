@@ -150,15 +150,22 @@ protected function userInitials(?int $userId): string
     if (empty($userId)) return '';
 
     if (Schema::hasTable('users_employees')) {
-        $u = (string) DB::table('users_employees')
-            ->where('id', (int)$userId)
+        $firstName = (string) DB::table('users_employees')
+            ->where('id', (int) $userId)
+            ->value('first_name');
+
+        $firstName = strtoupper(trim($firstName));
+        if ($firstName !== '') return $firstName;
+
+        $username = (string) DB::table('users_employees')
+            ->where('id', (int) $userId)
             ->value('username');
 
-        $u = strtoupper(trim((string)$u));
-        if ($u !== '') return $u;
+        $username = strtoupper(trim($username));
+        if ($username !== '') return $username;
     }
 
-    return 'U' . (int)$userId;
+    return 'U' . (int) $userId;
 }
 
 
@@ -562,6 +569,7 @@ public function formPdf(Request $request, $id)
             'g.explanation',
             'g.is_cancel',
             DB::raw("to_char(g.gen_acct_date, 'MM/DD/YYYY') as gen_acct_date"),
+            'g.user_id',
             'g.created_at'
         )
         ->when($companyId, fn($q) => $q->where('g.company_id', $companyId))
@@ -626,9 +634,8 @@ $pdf = new MyJournalVoucherPDF('P','mm','LETTER', true, 'UTF-8', false);
 
 $pdf->setCompanyId($companyId ? (int)$companyId : null);
 
-// prepared initials: prefer query user_id, else none
-$preparedUserId = (int) ($request->query('user_id') ?: 0);
-$pdf->setPreparedByInitials($this->userInitials($preparedUserId));
+// Prepared by must come from the transaction creator, not the currently logged-in user.
+$pdf->setPreparedByInitials($this->userInitials((int) ($header->user_id ?? 0)));
 
 $pdf->setPrintHeader(true);
 $pdf->setPrintFooter(true);
